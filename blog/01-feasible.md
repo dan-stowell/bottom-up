@@ -89,3 +89,11 @@ The next round is about fusing passes.
 Two bugs worth recording: my first hardware probe "proved" the VM executes AVX-512FP16,
 because gcc had constant-folded the instruction away; and my first fuzzer generated
 `~N` with N ≈ 10⁹, and the Python interpreter OOM-killed the whole VM session.
+
+## Update, same day
+
+Fusing passes is done: `:x` ("tee") stores a named vector without ending the line, so the
+byte-level front end is 3 loops instead of ~40 and the compiler is 149 lines instead of
+232. Vector instructions are now 61% of what executes. It is still slower than scalar C
+(1.7x, was 2.5x); REPORT.md has the final numbers and the reason, which is page faults,
+not instructions.

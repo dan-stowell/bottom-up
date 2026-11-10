@@ -42,7 +42,9 @@ here is separate, and runs on every stage (`./test.sh`):
 
 1. **Semantics.** Random Strand programs → compiled binary vs. a scalar interpreter that
    shares no code generation with anything. Inputs are sized to straddle 16-lane chunks.
-2. **Bytes.** The stage under test vs. two scalar compilers (Python, C) on random valid
+2. **Bytes.** The stage under test vs. two scalar compilers (Python, C; *correction: when
+   this was first posted the suite only ran the Python one — Codex caught that, see
+   REVIEWS.md — the C oracle was wired in afterwards*) on random valid
    programs, on the same programs shifted so tokens land at every offset mod 16, and on
    mutated malformed programs, where the exit status must be the same lowest-numbered
    failing check.
@@ -73,3 +75,15 @@ the hand-written island (mmap, read, write, exit).
 Where the claim is weaker than it sounds is recorded in SCALAR_LEDGER.md: the stencil
 *bytes* were assembled by GNU as, not by Strand; gather/scatter are serial inside the CPU;
 and the scalar C compiler is still 2.5× faster end to end.
+
+## Update, same day: what the review broke
+
+Codex's adversarial review (REVIEWS.md, review 2) found that "the same function as the
+scalar reference" was false on inputs my fuzzers never produced: two names with the same
+32-bit hash made the SIMD compiler reject a program the reference accepted, and so did
+40,000 distinct names. It also found that `build.sh` could not fail (`cmp && echo` under
+`set -e`), so the fixed-point check above was decorative. Both are fixed; the name race is
+now part of the language definition and both scalar references simulate it. The fixed
+point has moved to a new hash four more times since, each time with stage1 == stage2 ==
+stage3. A fixed point really does not prove correctness — a reviewer with a different
+imagination found in minutes what thousands of fuzz cases had not.
