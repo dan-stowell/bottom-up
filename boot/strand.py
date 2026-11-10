@@ -287,6 +287,7 @@ def interp(src: bytes, inp: bytes):
                 elif c == KW['prev']:
                     a = st.pop(); st.append(([0] + a)[:len(a)])
                 elif c == KW['dup']: st.append(list(st[-1]))
+                elif c == KW['idx']: st.append(list(range(n)))
                 elif c == KW['drop']: st.pop()
                 elif c == KW['swap']: st[-1], st[-2] = st[-2], st[-1]
                 elif c == KW['over']: st.append(list(st[-2]))
@@ -307,7 +308,8 @@ def interp(src: bytes, inp: bytes):
                     idx = st.pop(); a = st.pop()
                     tgt = vec.setdefault(t.slot, [])
                     for x, i in zip(a, idx):
-                        if not 0 <= i < len(tgt): raise Fail()
+                        if i < 0: continue              # masked lane
+                        if i >= len(tgt): raise Fail()
                         tgt[i] = x
                 elif c == TEE: vec[t.slot] = list(st[-1])
                 elif c == TEEC:

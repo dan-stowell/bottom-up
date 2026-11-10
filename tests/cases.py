@@ -24,7 +24,7 @@ CASES = [
  (b'input :a 1 + :b end\na b + out\n', 0), (b'input :a a + out\n', 0), (b'input :a &a + out\n', 0),
  (b'input >a\na :a end\n', E_TEE), (b'input :a end\ninput >a\n', E_TEE), (b'input :a :a end\n', E_TEE),
  (b'input >b\nb a + :a end\n', E_TEE), (b'input :a @a end\n', E_TEE), (b'input dup 1 & %k 5 end\n', E_DEPTH),
- (b'input 7 over 1 & %k end\nk out\n', 0), (b'input 7 over 1 & %k k + end\n', E_TEE), (b'input :a dup !a\n', E_TEE),
+ (b'input 7 over 1 & %k end\nk out\n', 0), (b'input 7 over 1 & %k k + end\n', E_TEE), (b'input dup 1 & %k\n', E_STENCIL), (b'input idx + out\n', 0), (b'idx out\n', E_STENCIL), (b'input :a dup !a\n', E_TEE),
  (b'input end\n', 0), (b'input 1 :k + end\n', 0), (b'1 :k >A\nk out\n', 0),
  (b"input\xff\x80 out\n", E_UNDEF), (b"\xff out\n", E_TOKEN), (b'\x01\x02input out\n', 0),
 ]

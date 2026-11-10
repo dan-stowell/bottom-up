@@ -119,6 +119,7 @@ for d in range(1, 9):
     st(KW['scanmax'], d, scan('vpmaxsd', '  vpslld zmm25,zmm31,31', 8 + r))
     st(KW['prev'], d, f"  valignd zmm24,zmm{r},zmm{16+r},15\n  vmovdqa32 zmm{16+r},zmm{r}\n  vmovdqa32 zmm{r},zmm24")
     if d <= 7: st(KW['dup'], d, f"  vmovdqa32 zmm{d},zmm{r}")
+    if d <= 7: st(KW['idx'], d, f"  vmovdqa32 zmm{d},zmm26")       # lane indices i..i+15
     st(GATHER, d, f"  lea rcx,[rbx+{DISP}]" + bounds(r) + f"""
   mov rsi,[rcx]
   vpxord zmm24,zmm24,zmm24
@@ -153,7 +154,13 @@ st(COMPRESS, 2, pre=ALLOC('rdi') + "\n  mov r8,rdi", text="""  vptestmd k1{k7},z
   sub r8,rdi
   shr r8,2
   mov [rcx+8],r8""")
-st(SCATTER, 2, f"  lea rcx,[rbx+{DISP}]" + bounds(1) + """
+# scatter: a negative index is a masked-off lane (no write); an index >= len is a failure
+st(SCATTER, 2, f"  lea rcx,[rbx+{DISP}]" + """
+  vpcmpud k1{k7},zmm1,dword ptr [rcx+8]{1to16},1
+  vpmovd2m k2,zmm1
+  korw k2,k2,k1
+  kandnw k2,k2,k7
+  kortestw k2,k2""" + failif('z') + """
   mov rsi,[rcx]
   vpscatterdd [rsi+zmm1*4]{k1},zmm0""" + LOOPEND)
 st(KW['out'], 1, """  mov rsi,[rbx-32]
@@ -165,7 +172,7 @@ st(KW['end'], 1, LOOPEND)
 for d in range(1, 9):
     st(TEE, d, f"  mov rsi,[rbx+{DISP}]\n  vmovdqu32 [rsi+rax*4]{{k7}},zmm{d-1}",
        pre=ALLOC('rsi') + f"\n  lea rcx,[rbx+{DISP}]\n  mov [rcx],rsi\n  mov [rcx+8],r12")
-for d in range(2, 9):
+for d in range(3, 9):    # never at depth 2: a line must not end on a tee
     st(TEEC, d, f"""  lea rcx,[rbx+{DISP}]
   vptestmd k1{{k7}},zmm{d-1},zmm{d-1}
   vpcompressd zmm24{{k1}}{{z}},zmm{d-2}

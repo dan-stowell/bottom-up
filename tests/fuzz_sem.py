@@ -55,7 +55,7 @@ class Gen:
                 op = r.choice(['scan', 'scanmax', 'prev'])
                 key = ('m' if op == 'scanmax' else 's', d)
                 if key not in used: used.add(key); toks.append(op)
-            elif ch < .85 and d < depth_budget: toks.append(r.choice(['dup', 'over'] if d >= 2 else ['dup'])); d += 1
+            elif ch < .85 and d < depth_budget: toks.append(r.choice(['dup', 'over', 'idx'] if d >= 2 else ['dup', 'idx'])); d += 1
             elif ch < .88 and d >= 2: toks.append('swap')
             elif ch < .90 and d >= 2: toks.append('drop'); d -= 1
             elif self.vecs and d < depth_budget - 2:
@@ -99,7 +99,7 @@ class Gen:
         elif k < .72 and [v for v in self.vecs if v not in toks and '@' + v not in toks]:
             v = r.choice([v for v in self.vecs if v not in toks and '@' + v not in toks])
             idx = ['~1', 'drop'] 
-            toks += ['dup', '7', '*', '0', 'max', '&' + v, '1', '-', 'min'] if r.random() < .985 else ["dup"]
+            toks += ['dup', '7', '*', r.choice(['0', '0', '3']), r.choice(['max', 'max', '-']), '&' + v, '1', '-', 'min'] if r.random() < .985 else ["dup"]
             toks.append('!' + v)
         elif k < .80:
             s = 'S%d' % self.ns; self.ns += 1; toks.append(r.choice('$^') + s); self.scal.append(s)
