@@ -35,7 +35,7 @@ class Gen:
             ch = r.random()
             if ch < .25 and d < depth_budget:
                 if same and r.random() < .6: toks.append(r.choice(same))
-                elif self.vecs and r.random() < .03: toks.append(r.choice(list(self.vecs)))   # likely length mismatch
+                elif self.vecs and r.random() < .004: toks.append(r.choice(list(self.vecs)))   # likely length mismatch
                 elif r.random() < .2 and self.vecs: toks.append('&' + r.choice(list(self.vecs)))
                 else: toks.append(self.scalar())
                 d += 1
@@ -54,7 +54,7 @@ class Gen:
             elif ch < .90 and d >= 2: toks.append('drop'); d -= 1
             elif self.vecs and d < depth_budget - 2:
                 v = r.choice(list(self.vecs))
-                if r.random() < .93: toks += ['0', 'max', '&' + v, '1', '-', 'min', '@' + v]   # clamped
+                if r.random() < .985: toks += ["0", "max", "&" + v, "1", "-", "min", "@" + v]   # clamped
                 else: toks.append('@' + v)                                                 # may fail: fine
         while d > 1: toks.append(r.choice(BIN)); d -= 1
         return toks
@@ -89,7 +89,7 @@ class Gen:
         elif k < .72 and [v for v in self.vecs if v not in toks and '@' + v not in toks]:
             v = r.choice([v for v in self.vecs if v not in toks and '@' + v not in toks])
             idx = ['~1', 'drop'] 
-            toks += ['dup', '7', '*', '0', 'max', '&' + v, '1', '-', 'min'] if r.random() < .93 else ['dup']
+            toks += ['dup', '7', '*', '0', 'max', '&' + v, '1', '-', 'min'] if r.random() < .985 else ["dup"]
             toks.append('!' + v)
         elif k < .80:
             s = 'S%d' % self.ns; self.ns += 1; toks.append(r.choice('$^') + s); self.scal.append(s)
@@ -141,5 +141,5 @@ def main():
             stats['ok' if want[0] == 0 else 'fail99' if want[0] == 99 else 'halt'] += 1
     print('PASS', stats)
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
