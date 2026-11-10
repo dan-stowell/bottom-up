@@ -2,3 +2,9 @@ hw/probe
 build/
 __pycache__/
 *.o
+explore/ceiling
+explore/gen
+explore/bench
+explore/base[0-9]
+explore/basev[0-9]
+explore/st_*

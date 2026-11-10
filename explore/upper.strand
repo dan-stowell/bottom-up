@@ -1,0 +1,1 @@
+input dup 97 >= over 122 <= & 32 * - out

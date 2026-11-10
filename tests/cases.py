@@ -45,6 +45,6 @@ def main():
             open('/tmp/case_bin', 'wb').write(want[1]); os.chmod('/tmp/case_bin', 0o755)
             for inp in (b'', b'a', b'Hello, world: 0123456789 abcdef', bytes(range(256)) * 3):
                 r = subprocess.run(['/tmp/case_bin'], input=inp, capture_output=True, timeout=20)
-                assert (r.returncode, r.stdout) == strand.interp(src, inp), ('binary disagrees with interpreter', src, len(inp))
+                assert (r.returncode, r.stdout if r.returncode == 0 else b'') == strand.interp(src, inp), ('binary disagrees with interpreter', src, len(inp))
     print('PASS', comp, len(CASES), 'cases')
 main()

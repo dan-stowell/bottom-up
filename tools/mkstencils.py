@@ -165,12 +165,26 @@ st(SCATTER, 2, f"  lea rcx,[rbx+{DISP}]" + """
   kortestw k2,k2""" + failif('z') + """
   mov rsi,[rcx]
   vpscatterdd [rsi+zmm1*4]{k1},zmm0""" + LOOPEND)
-st(KW['out'], 1, """  mov rsi,[rbx-32]
-  vpmovdb xmm24,zmm0
-  vmovdqu8 [rsi+rax]{k7},xmm24""" + LOOPEND + "\n  add [rbx-32],r12",
-   pre="  mov rsi,[rbx-32]\n  add rsi,r12\n  cmp rsi,[rbx-56]" + failif('be'))
-st(KW['out4'], 1, "  mov rsi,[rbx-32]\n  vmovdqu32 [rsi+rax*4]{k7},zmm0" + LOOPEND + "\n  lea rsi,[rsi+r12*4]\n  mov [rbx-32],rsi",
-   pre="  mov rsi,[rbx-32]\n  lea rsi,[rsi+r12*4]\n  cmp rsi,[rbx-56]" + failif('be'))
+# Output is streamed: r8 walks a 256 KiB buffer that is flushed (a call into the stub) when full.
+# After the loop the cursor is corrected for the lanes of the last chunk that were masked off.
+def outsink(store, step, per):
+    return (f"""  cmp r8,[rbx-56]
+  jb 3f
+  call [rbx-648]
+3:
+{store}
+  add r8,{step}""" + LOOPEND + f"""
+  lea rcx,[r12+15]
+  shr rcx,4
+  cmp rcx,1
+  adc rcx,0
+  shl rcx,4
+  sub rcx,r12
+  imul rcx,rcx,{per}
+  sub r8,rcx
+  mov [rbx-32],r8""")
+st(KW['out'], 1, outsink("  vpmovdb xmm24,zmm0\n  vmovdqu8 [r8]{k7},xmm24", 16, 1), pre="  mov r8,[rbx-32]")
+st(KW['out4'], 1, outsink("  vmovdqu32 [r8]{k7},zmm0", 64, 4), pre="  mov r8,[rbx-32]")
 st(KW['end'], 1, LOOPEND)
 # tee stores: keep the value on the stack and keep the loop going, so one line can define many vectors
 for d in range(1, 9):

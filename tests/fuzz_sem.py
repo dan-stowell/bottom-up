@@ -145,7 +145,7 @@ def main():
             try: want = strand.interp(src, inp)
             except strand.TooBig: stats['toobig'] = stats.get('toobig', 0) + 1; continue
             p = subprocess.run([exe], input=inp, capture_output=True, preexec_fn=unlimit, timeout=20)
-            got = (p.returncode, p.stdout)
+            got = (p.returncode, p.stdout if p.returncode == 0 else b'')   # output is streamed: unspecified on failure
             stats['runs'] += 1
             if got != want:
                 open('/tmp/fuzz_fail.strand', 'wb').write(src); open('/tmp/fuzz_fail.in', 'wb').write(inp)
