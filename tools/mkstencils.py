@@ -154,6 +154,8 @@ for d in range(1, 9):
     if d <= 7:
         st(VEC, d, f"  mov rsi,[rbx+{DISP}]\n  vmovdqu32 zmm{d}{{k7}}{{z}},[rsi+rax*4]",
            pre=f"  cmp r12,[rbx+{DISP8}]" + failif('e'))       # length check hoisted out of the loop
+        st(VECT, d, f"  mov rsi,[rbx+{DISP}]\n  vmovdqu32 zmm{d}{{k7}}{{z}},[rsi+rax*4]",
+           pre=f"  cmp r12,[rbx+{DISP8}]" + failif('e') + "\n" + VETO)
         st(SCAL, d, f"  vpbroadcastd zmm{d},dword ptr [rbx+{DISP}]")
         st(LEN, d, f"  vpbroadcastd zmm{d},dword ptr [rbx+{DISP8}]")
 
@@ -456,7 +458,7 @@ with open(f'{ROOT}/src/tables.strand', 'w') as f:
     f.write(data('pow10', [10 ** i for i in range(MAXDIGITS)]))
     f.write(f"{len(stub)} >Stublen\n")
     for nm, v in [('Rels', rels), ('Rell', rell), ('Relp', relp), ('Kn', K), ('Ncode', NCODE), ('Cdata', DATA), ('Cstr', STR), ('Cnone', NONE), ('Cerr', ERR),
-                  ('Cscatter', SCATTER), ('Ctee', TEE), ('Cteec', TEEC), ('Cbytes', KW['bytes']), ('Cvec', VEC), ('Clen', LEN), ('Nsig5', 5), ('Slot', SLOT), ('Nd', ND), ('Vbase', VBASE), ('Maxname', MAXNAME), ('Maxdig', MAXDIGITS),
+                  ('Cscatter', SCATTER), ('Ctee', TEE), ('Cteec', TEEC), ('Cvect', VECT), ('Cbytes', KW['bytes']), ('Cvec', VEC), ('Clen', LEN), ('Nsig5', 5), ('Slot', SLOT), ('Nd', ND), ('Vbase', VBASE), ('Maxname', MAXNAME), ('Maxdig', MAXDIGITS),
                   ('Ha1', HA1), ('Hb1', HB1), ('Hs1', HS1), ('Ha2', HA2), ('Hb2', HB2), ('Hs2', HS2)]\
                  + [('Ru%d' % r, RACE_U[r]) for r in range(ROUNDS)] + [('Rv%d' % r, RACE_V[r]) for r in range(ROUNDS)]:
         f.write(f"{v} >{nm}\n")

@@ -13,6 +13,8 @@ for s in stage1 stage2 stage3; do
   python3 tests/fuzz_compile.py --compiler build/$s --also build/strandc_scalar --n "$N" --seed 7
   python3 tests/fuzz_sem.py --compiler build/$s --n "$N" --seed 5
 done
+echo "--- thread pool at production block sizes, 2..all CPUs, file and pipe"
+python3 tests/pool.py build/stage2
 echo "--- big inputs: the three compilers agree"
 for f in big8 many; do
   [ $f = big8 ] && python3 tools/mkbig.py 8 > build/big8.strand

@@ -3,8 +3,8 @@
 REPORT.md ends with the Strand compiler *slower* than scalar C. This file is the follow-up
 question: is there a class of programs for which this model is simply the right tool?
 Short answer: **yes — single-pass map / filter / reduce / translate programs with local
-context. There it is 3-15x scalar C; against `gcc -O3 -march=native` it is at least even on
-one core and 2.7-6.7x ahead wherever the loop carries a dependency; and with four cores it
+context. There it is 3-15x scalar C; against `gcc -O3 -march=native` it is level or better on
+one core (one 8% loss) and 2.7-6.7x ahead wherever the loop carries a dependency; and with four cores it
 is limited by the kernel's I/O path rather than by compute.** Everything here is measured on the machine in HARDWARE.md;
 `bench/run.py` reproduces the table.
 
@@ -95,16 +95,18 @@ input4 dup 0 > outif4                                # filter4: keep the positiv
 
 **The sweet spot** is a single pass in which each output element depends on a bounded
 window of input: maps, reductions, filters, table lookups, and anything built from `prev`.
-On **one core** Strand matches or beats `gcc -O3 -march=native` on every row (one tie),
+On **one core** Strand is at least level with `gcc -O3 -march=native` on every row but one
+(`upper`: 6.1 vs 6.6 GB/s, a loss of 8%),
 and by 2.7-6.7x wherever C's loop has a carried dependency, a data-dependent output
 position or a table lookup (`words`, `pairs`, `letters`, `swapcase`, `maxgap4`,
 `filter4`) — the auto-vectoriser cannot touch those, so the two C columns are identical.
 With the pool it reaches 3-15x scalar C.
 
 **The I/O floor.** `explore/iotest.c`: on this VM the kernel needs 12-20 ms just to make a
-256 MiB cached file accessible (map + fault + unmap, or copy), i.e. 13-21 GB/s. Strand hits
-that with two to four cores; eight vCPUs add nothing (the in-memory ceiling test shows the
-same, so there are probably four physical cores). Past this point the numbers measure the
+256 MiB cached file accessible (map + fault + unmap, or copy), i.e. 13-21 GB/s. Strand gets
+within reach of that with four cores; going from four to eight vCPUs helps unevenly (from
+nothing to 1.6x, row by row, and run to run), which is what a kernel-bound workload on
+probably four physical cores looks like. Past this point the numbers measure the
 kernel, not Strand.
 
 **Byte lanes were worth 1.3-1.8x on one core** (`lines` vs `lines32`: 8.35 vs 5.91) and
@@ -139,6 +141,16 @@ stays **3-4x ahead of parallel C**. That class — context and filters — is th
 proper. (The C versions are 5-25 lines each of mmap/OpenMP/region bookkeeping; the Strand
 versions are one line.)
 
+**What this does not show.** These ratios bundle three advantages — SIMD, threads and the
+I/O model — and the single-threaded C columns use `read()` in 64 KiB blocks while Strand
+maps the file; the OpenMP table is the like-for-like comparison. Nor is any of this a limit
+of C: `explore/ceiling.c` contains hand-written AVX-512 intrinsics for `words` that run at
+the same speed as Strand's generated code, because they are the same instructions. The
+claim is narrower: one line of Strand gets what in C takes hand-written intrinsics plus
+hand-written threading, and what the C *compiler* will not produce from the obvious loop.
+A matched benchmark against hand-vectorised, hand-threaded C for `words` and `letters` has
+not been run; I expect a tie.
+
 **Outside the model entirely** (not in the table because they cannot be written well):
 histograms and anything else that needs scatter-*add*; data-dependent control flow
 (parsing nested structure, searching with early exit); pointer-chasing. And, as REPORT.md
@@ -160,7 +172,7 @@ two passes.
   stack pointer was off by 8 there, so 64-byte temporaries straddled cache lines.
 - **A benchmark regression that was not one**: the 64-copies-of-the-compiler input grew by
   30% because the stub (embedded in every copy) grew. Compare against C on the same file.
-- **Eight vCPUs are not better than four** for anything here.
+- **Eight vCPUs are an unreliable gain over four**: between 0.9x and 1.6x depending on the row.
 - **Two more bugs found by measurement in the parallel-scan pool**: the word recording which
   carries a line uses sat on top of a register save slot, so verification silently checked
   nothing (caught because the errors equalled minus the running total); and a fully masked

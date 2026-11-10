@@ -11,8 +11,8 @@ PRELUDE = ' '.join(KEYWORDS)
 
 (VEC, VECLEAD, SCAL, SCALLEAD, LEN, LENLEAD, GATHER, IOTA,
  STOREV, STORES, SUM, MAX, COMPRESS, SCATTER, TEE, TEEC, TEEL, VECL, LENL,
- SCALB, TABLEB, SUMB, TEEBX, VECBX, BAD) = range(K, K + 25)
-BK = K + 25                         # byte-line variant of keyword k is class BK + k
+ SCALB, TABLEB, SUMB, TEEBX, VECBX, BAD, VECT) = range(K, K + 26)
+BK = K + 26                         # byte-line variant of keyword k is class BK + k
 NCODE = BK + K                      # classes below this emit code
 DATA, STR, NONE, ERR = NCODE, NCODE + 1, NCODE + 2, NCODE + 3
 NCLS = NCODE + 4
@@ -35,7 +35,7 @@ for c in [COMPRESS, SCATTER, TEEC]:
     DELTA[c] = -2
 
 for _k in range(K): DELTA[BK + _k] = DELTA[_k]
-DELTA[SCALB] = 1; DELTA[VECBX] = 1; DELTA[SUMB] = -1
+DELTA[SCALB] = 1; DELTA[VECBX] = 1; DELTA[SUMB] = -1; DELTA[VECT] = 1
 
 LEADOF = list(range(NCLS))          # class a token takes when it is first on its line
 LEADOF[VEC], LEADOF[SCAL], LEADOF[LEN] = VECLEAD, SCALLEAD, LENLEAD
@@ -58,6 +58,9 @@ ISTEE = [0] * NCLS                  # ':' tees, before chunk-local classificatio
 ISTEE[TEE] = ISTEE[TEEBX] = 1
 REREAD = [0] * NCLS                 # what may re-read a ':' tee later on its own line
 REREAD[VEC] = REREAD[LEN] = REREAD[VECBX] = 1
+# A ':x' that outlives its line and is pushed again on that line: the push (class VECT) reads the array
+# while it is being written, so a pool warm-up chunk (which stores nothing) would read stale data.
+# VECT is VEC plus a veto: such a line always runs on one thread. (Found by Codex, review 3.)
 
 # lexical classes of a byte
 O_OTHER, O_LOWER, O_UPPER, O_DIGIT, O_QUOTE = range(5)
@@ -93,6 +96,7 @@ for c in [VEC, VECLEAD, GATHER, VECL, TABLEB, VECBX]: READSVEC[c] = 1
 CARRY = [0] * NCLS                  # 1: uses sum-carry register of its depth, 2: max-carry
 CARRY[KW['scan']] = 1; CARRY[KW['prev']] = 1; CARRY[KW['scanmax']] = 2
 CARRY[BK + KW['prev']] = 1
+USES[VECT] = 1; READSVEC[VECT] = 1
 
 MAXNAME = 64                        # longest name (hash weight table size)
 MAXDIGITS = 9

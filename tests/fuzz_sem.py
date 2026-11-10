@@ -182,9 +182,13 @@ def main():
             try: want = strand.interp(src, inp)
             except strand.TooBig: stats['toobig'] = stats.get('toobig', 0) + 1; continue
             # run twice: normally, and in "eager" mode, where every splittable line of 64+ elements
-            # is forked across all cores (exercises the thread pool on chunk-boundary inputs)
+            # big enough to split is forked across all cores, in small blocks
             for mode in ([exe], [exe, 'eager']):
-                p = subprocess.run(mode, input=inp, capture_output=True, preexec_fn=unlimit, timeout=20)
+                if len(mode) == 1:        # normal mode reads a regular file (the mmap path); eager mode a pipe
+                    open(exe + '.in', 'wb').write(inp)
+                    p = subprocess.run(mode, stdin=open(exe + '.in', 'rb'), capture_output=True, preexec_fn=unlimit, timeout=20)
+                else:
+                    p = subprocess.run(mode, input=inp, capture_output=True, preexec_fn=unlimit, timeout=20)
                 got = (p.returncode, p.stdout if p.returncode == 0 else b'')   # output is streamed: unspecified on failure
                 if got != want: break
             stats['runs'] += 1

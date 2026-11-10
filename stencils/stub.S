@@ -56,10 +56,10 @@ _start:
   cmp r15,1
   jbe 2f
   mov eax,64
-  mov qword ptr [rip+f_blk],2048
-  mov qword ptr [rip+f_blkscan],2048
-  mov qword ptr [rip+f_blkprobe],512
-  mov qword ptr [rip+f_blkout],1024
+  mov qword ptr [rip+f_blk],4096
+  mov qword ptr [rip+f_blkscan],4096
+  mov qword ptr [rip+f_blkprobe],1024
+  mov qword ptr [rip+f_blkout],8192
 2:
   mov [rbx-696],rax
   add rsp,128
@@ -125,9 +125,9 @@ _start:
   syscall
   test rax,rax
   jnz useread
-  mov [rbx-16],r13
   test r12,r12
-  jz inputdone
+  jz useread                        # size 0 may be procfs: read it
+  mov [rbx-16],r13
   cmp r12,0x7fe00000                # vectors are limited to 2^31-1 elements
   jae nomem
   mov eax,9                         # mmap(0, size, PROT_READ, MAP_PRIVATE, 0, 0)
@@ -151,7 +151,8 @@ rd:
   mov edx,0x100000
   syscall
   test rax,rax
-  jle rddone
+  jz rddone
+  js nomem                          # a read error is a failure, not end of input
   add r12,rax
   cmp r12,0x7fe00000
   jb rd

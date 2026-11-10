@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""run.py [MiB] -- build and time every program in programs.txt as a whole process:
+"""(The mmap + OpenMP C baselines of SWEETSPOT.md section 4 are bench/base_omp.c; build with
+`gcc -O3 -march=native -fopenmp -DK=P_words -o omp_words bench/base_omp.c` and time with build/suite/bench.)
+
+run.py [MiB] -- build and time every program in programs.txt as a whole process:
 scalar C, gcc -O3, Strand on 1 core and on all cores. Checks all four produce the same bytes.
 Prints a markdown table of GB/s (input bytes per second of wall time, best of N)."""
 import os, subprocess, sys, hashlib

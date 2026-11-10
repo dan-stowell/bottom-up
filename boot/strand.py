@@ -160,6 +160,7 @@ def analyze(src: bytes):
         d = teedef.get(t.slot) if t.isname else None
         t.local = d is not None and ISTEE[d.cls0] == 1 and lastname[d.name].line == d.line and t.line == d.line
         if t.local: t.cls = LOCALOF[t.cls]
+        elif d is not None and t is not d and t.line == d.line and t.cls == VEC: t.cls = VECT   # re-read of a persistent tee
 
     depth = 0
     bad = False
@@ -336,7 +337,7 @@ def interp(src: bytes, inp: bytes):
                 elif c == KW['input']: n = len(inp); st.append(list(inp))
                 elif c == KW['input4']:
                     n = len(inp) // 4; st.append([w32(x) for x in struct.unpack('<%dI' % n, inp[:4 * n])])
-                elif c in (VEC, VECL):
+                elif c in (VEC, VECL, VECT):
                     if len(v) != n: raise Fail()
                     st.append(list(v))
                 elif c == SCAL: st.append([sval] * n)

@@ -109,7 +109,10 @@ ln1 @lbt clsd @byteof clsd - * clsd + >clso
 # needs an array. Its occurrences there switch class, and keep just the current chunk in x's slot.
 ~S1 0 * >tdef
 ~NT 1 + clso @istee clso Cteec = | slot Neg sel !tdef
-slot @tdef :td1 1 - 0 max :td @clso @istee td1 0 > & isname & td @rep @ln1 td @ln1 = & ln1 td @ln1 = & :loc clso @localof clso - * clso + >cls
+slot @tdef :td1 1 - 0 max :td @clso @istee td1 0 > & isname & td @rep @ln1 td @ln1 = & ln1 td @ln1 = & :loc clso @localof clso - * clso + >clsl
+# ... and a ':x' that does outlive its line but is pushed again on it: that push reads the array while it
+# is being written, so it takes a class that keeps the line on one thread
+td1 0 > isname & idx td != & ln1 td @ln1 = & loc 1 ^ & clsl Cvec = & Cvect Cvec - * clsl + >cls
 
 # ---------------------------------------------------------------- stack depth = register allocation, by one scan
 cls @delta 2 - :dlt scan :da dlt - :d0 0 < d0 8 > | da 0 = last != | cls Ncode < :code & $Edp
