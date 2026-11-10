@@ -241,14 +241,14 @@ The question that started the project. By phase, with what is measured and what 
 |---|---|---|---|
 | comments and strings (which bytes are code?) | automaton | yes, up to 4 states | `strip`, `strings`: 3-5x ordinary C, 0.7-0.9x hand C. Real languages need more states: C with strings, character literals and both comment forms is 9; Python with triple quotes more. **Out until automata are wider** (or as a cascade, untested). |
 | token boundaries and kinds | byte table + `prev` | yes | `idents`: 3.6-4.1x ordinary C |
-| a complete scanner for a real grammar | automaton + table + filter | yes for JSON, CSV | `json`: 3-7x ordinary C, exact against Python's parser; 0.4-0.6x the simdjson-style hand C on 1 and 8 CPUs |
-| token *positions* (an index per token) | filter of indices | **no**: automata live on byte lines, `idx` and `scan` on dword lines, and there is no bridge | not measured; this is the missing piece between "classify" and "emit a token stream" |
-| identifier and keyword interning | hash of a variable-length slice, then a join | in the self-hosted compiler only, as scans plus a scatter race on dword lanes | gather and scatter cost scalar-loop prices on this CPU (HARDWARE.md); not a win |
-| number literals | scan over affine maps `x -> 10x + d`, reset per token | no segmented scan | not built |
+| structural extraction for a real grammar (not a complete scanner: no token kinds, no validation) | automaton + table + filter | yes for JSON, CSV | `json`: 3-7x ordinary C, exact against Python's parser; 0.4-0.6x the simdjson-style hand C on 1 and 8 CPUs |
+| token *positions* (an index per token) | filter of indices | **yes, since the bridge** (DESIGN.md): `m %x` on a byte line emits the positions of set lanes as dwords, and dword lines read the bytes back with `[x` / `{x`. Before it, positions existed only on dword lanes, at one dword per source byte. | the self-hosted compiler's lexer is now one automaton line; its memory fell from 2.5x the scalar C compiler's to parity |
+| identifier and keyword interning | hash of a short slice, then a join | in the self-hosted compiler: four dword gathers per token, a scatter race for names, a generated perfect hash for keywords. Not a general join engine. | gather and scatter cost scalar-loop prices on this CPU (HARDWARE.md); the compiler spends most of its user time there |
+| number literals | three 4-digit groups evaluated in place, scaled by length | in the self-hosted compiler (9 digits). A general segmented scan is still absent. | part of the whole-compiler figure only |
 | nesting depth of brackets | prefix sum of +1/-1 outside strings | the sum yes, on dword lanes; the automaton is on byte lines, so not in one line | not built |
 | matching brackets, building a tree | stack, or sort by depth | **no** | outside the model. Strand's own grammar is postfix so that it has no parser. |
 | name resolution, type checking | hash join; walks over a graph | **no**, beyond the compiler's own flat symbol table | outside the model |
-| dataflow optimisation | fixpoint over a graph | **no**. (Straight-line liveness is a backward scan of gen/kill functions, which is associative; the compiler does its own that way.) | outside the model |
+| dataflow optimisation | fixpoint over a graph | **no**. The compiler's own liveness is not a dataflow scan: a vector dies after its last occurrence, which the name race already identified. | outside the model |
 | instruction selection and encoding | table lookup, variable-length emit | yes: this is copy-and-patch, the compiler's back end | whole compiler: 1.3-1.5x *slower* than scalar C on one core |
 | layout and relocation | prefix sum, scatter | yes | same |
 
@@ -264,9 +264,8 @@ What this adds up to:
   measurement). It matters for tools that *only* scan: dependency and include scanners,
   code search, comment and string extraction, syntax colouring, minifiers, linters' first
   pass, and ingest of JSON, CSV and logs.
-- The three things that would move the boundary, in order: automata of 16 states (real
-  lexers); a byte-to-dword bridge so a line can emit token positions; a segmented scan
-  (number values, per-token hashes).
+- What would move the boundary next: automata of 16 states (real lexers) and a segmented
+  scan. The byte-to-dword bridge that was second on this list is built.
 
 ## What does not work
 
