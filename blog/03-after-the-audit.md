@@ -53,8 +53,9 @@ bytes dup @cls /dfa 1 != outif                       # strip comments, respectin
 
 That line runs at 3.1 GB/s on one core. The C `switch` loop runs at 0.96, and a C compiler
 will neither vectorise it nor split it across threads; the hand-threaded C version (run
-every range from all four states, then again from the right one) does not catch up until
-eight threads. Counting identifiers outside comments and strings: 3.2 against 0.78.
+every range from all four states, then again from the right one) reaches 1.5 on eight
+threads, half of what the Strand line does on one. Counting identifiers outside comments
+and strings: 3.2 against 0.78.
 
 The first version of the stencil did 99 vector operations per 64 bytes. Laying the
 functions out transposed — register *t* holds bytes 4g+t — turns the first two levels of
