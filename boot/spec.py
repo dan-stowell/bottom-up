@@ -14,8 +14,8 @@ PRELUDE = ' '.join(KEYWORDS)
  STOREV, STORES, SUM, MAX, COMPRESS, SCATTER, TEE, TEEC, TEEL, VECL, LENL,
  SCALB, TABLEB, SUMB, TEEBX, VECBX, BAD, VECT, FSM, FSMB,
  STOREVB, WHEREB, GATHERB, GATHER4,
- STOREVN, BYTESV, SLSRC, SLICES, SCATTER4, INPUTV, ZEROSV) = range(K, K + 39)
-BK = K + 39                         # byte-line variant of keyword k is class BK + k
+ STOREVN, BYTESV, SLSRC, SLICES, SCATTER4, INPUTV, ZEROSV, FSM8, FSM8B) = range(K, K + 41)
+BK = K + 41                         # byte-line variant of keyword k is class BK + k
 NCODE = BK + K                      # classes below this emit code
 DATA, STR, NONE, ERR = NCODE, NCODE + 1, NCODE + 2, NCODE + 3
 NCLS = NCODE + 4
@@ -62,6 +62,8 @@ BYTEOF[SCAL], BYTEOF[GATHER], BYTEOF[SUM], BYTEOF[TEE], BYTEOF[VEC] = SCALB, TAB
 # reading it: state' = t[(x & 15) * 4 + state] & 3 (entries past the end of t, or past 64, are 0);
 # the state before the first element is 0. It exists on byte lines only (FSM itself has no stencil).
 BYTEOF[FSM] = FSMB
+# `x \\t` is the same with 8 states: state' = t[(x & 15) * 8 + state] & 7, a table of up to 128 entries.
+BYTEOF[FSM8] = FSM8B
 # The bridge between byte lines and dword lines. A byte line can leave two kinds of vector behind:
 #   `>x`   a byte vector: its elements are the line's bytes (`:x` the same, and the line goes on);
 #   `m %x` a dword vector of *positions*: the indices of the lanes where m is nonzero, in order.
@@ -89,7 +91,7 @@ ISSCAT[SCATTER] = ISSCAT[SCATTER4] = 1
 ISTEEC = [0] * NCLS                 # '%' compress-tees: one definition, never re-read on their own line
 ISTEEC[TEEC] = ISTEEC[WHEREB] = 1
 VTYPE = [0] * NCLS                  # what a class requires of its operand name: 1 dword vector, 2 byte vector
-for _c in (VEC, VECLEAD, VECT, GATHER, STOREV, COMPRESS, SCATTER, TEE, TEEC, WHEREB, DATA, TABLEB, FSM, FSMB): VTYPE[_c] = 1
+for _c in (VEC, VECLEAD, VECT, GATHER, STOREV, COMPRESS, SCATTER, TEE, TEEC, WHEREB, DATA, TABLEB, FSM, FSMB, FSM8, FSM8B): VTYPE[_c] = 1
 for _c in (STOREVB, TEEBX, GATHERB, GATHER4, STOREVN, BYTESV, SLSRC, SLICES, SCATTER4, INPUTV, ZEROSV): VTYPE[_c] = 2
 LOCALOF[TEEBX], LOCALOF[VECBX] = TEEL, VECL
 ISTEE = [0] * NCLS                  # ':' tees, before chunk-local classification
@@ -108,7 +110,7 @@ def opclass(c):
     if 48 <= c <= 57: return O_DIGIT
     if c == 34: return O_QUOTE
     return O_OTHER
-SIGILS = '>@~?!$^&=:%/[{.\'()}<,'                # sigil index = position + 1
+SIGILS = '>@~?!$^&=:%/[{.\'()}<,\\'                # sigil index = position + 1
 def sigil(c):
     return SIGILS.index(chr(c)) + 1 if c < 128 and chr(c) in SIGILS else 0
 
@@ -124,18 +126,19 @@ _s('$', O_UPPER, SUM); _s('^', O_UPPER, MAX)
 _s('&', O_LOWER, LEN); _s('=', O_LOWER, DATA)
 _s(':', O_LOWER, TEE); _s('%', O_LOWER, TEEC); _s('/', O_LOWER, FSM)
 _s('[', O_LOWER, GATHERB); _s('{', O_LOWER, GATHER4)
-_s('<', O_LOWER, INPUTV); _s(',', O_LOWER, ZEROSV); _s('.', O_LOWER, STOREVN); _s("'", O_LOWER, BYTESV); _s('(', O_LOWER, SLSRC); _s(')', O_LOWER, SLICES); _s('}', O_LOWER, SCATTER4)
+_s('\\', O_LOWER, FSM8); _s('<', O_LOWER, INPUTV); _s(',', O_LOWER, ZEROSV); _s('.', O_LOWER, STOREVN); _s("'", O_LOWER, BYTESV); _s('(', O_LOWER, SLSRC); _s(')', O_LOWER, SLICES); _s('}', O_LOWER, SCATTER4)
 
 # which classes define / use their operand variable
 DEFINES = [0] * NCLS
 for c in [STOREV, STORES, SUM, MAX, COMPRESS, DATA, TEE, TEEC, TEEL, SUMB, TEEBX, STOREVB, WHEREB, STOREVN, INPUTV, ZEROSV]: DEFINES[c] = 1
 USES = [0] * NCLS
-for c in [VEC, VECLEAD, SCAL, SCALLEAD, LEN, LENLEAD, GATHER, IOTA, SCATTER, VECL, LENL, SCALB, TABLEB, VECBX, FSM, FSMB, GATHERB, GATHER4, BYTESV, SLSRC, SLICES, SCATTER4]: USES[c] = 1
+for c in [VEC, VECLEAD, SCAL, SCALLEAD, LEN, LENLEAD, GATHER, IOTA, SCATTER, VECL, LENL, SCALB, TABLEB, VECBX, FSM, FSMB, GATHERB, GATHER4, BYTESV, SLSRC, SLICES, SCATTER4, FSM8, FSM8B]: USES[c] = 1
 READSVEC = [0] * NCLS               # reads vector *contents* (conflicts with an in-place scatter)
-for c in [VEC, VECLEAD, GATHER, VECL, TABLEB, VECBX, FSM, FSMB, GATHERB, GATHER4, BYTESV, SLSRC]: READSVEC[c] = 1
+for c in [VEC, VECLEAD, GATHER, VECL, TABLEB, VECBX, FSM, FSMB, GATHERB, GATHER4, BYTESV, SLSRC, FSM8, FSM8B]: READSVEC[c] = 1
 CARRY = [0] * NCLS                  # 1: uses sum-carry register of its depth, 2: max-carry
 CARRY[KW['scan']] = 1; CARRY[KW['prev']] = 1; CARRY[KW['scanmax']] = 2
 CARRY[BK + KW['prev']] = 1
+CARRY[FSM8B] = 1
 CARRY[FSMB] = 1                    # the automaton's carry (a transition function) lives in zmm16+r too
 USES[VECT] = 1; READSVEC[VECT] = 1
 

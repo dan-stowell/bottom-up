@@ -313,6 +313,13 @@ def interp(src: bytes, inp: bytes):
                         idx = st.pop()
                         if len(v) < 256: raise Fail()
                         st.append([v[i] & 255 for i in idx])
+                    elif c == FSM8B:
+                        q = 0; r = []
+                        for x in st.pop():
+                            i = (x & 15) * 8 + q
+                            q = v[i] & 7 if i < len(v) and i < 128 else 0
+                            r.append(q)
+                        st.append(r)
                     elif c == FSMB:
                         q = 0; r = []
                         for x in st.pop():

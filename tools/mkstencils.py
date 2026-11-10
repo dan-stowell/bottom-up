@@ -49,6 +49,7 @@ SETUP = """
   mov dword ptr [rbx-704],0
   mov dword ptr [rbx-708],16
   mov dword ptr [rbx-712],0
+  mov dword ptr [rbx-716],0
   xor eax,eax
   vpbroadcastd zmm27,r12d
   vmovdqa32 zmm26,zmm30
@@ -392,6 +393,7 @@ SETUPB = """
   mov dword ptr [rbx-704],0
   mov dword ptr [rbx-708],64
   mov dword ptr [rbx-712],0
+  mov dword ptr [rbx-716],0
   xor eax,eax
 """
 LOOPHEADB = """
@@ -582,6 +584,79 @@ for d in range(1, 9):
   vpxord zmm{C},zmm{C},zmm{C}
   or dword ptr [rbx-712],{1 << (24 + r)}
   mov dword ptr [rbx-680],{r + 1}""")
+# ---- 8-state automata: `x \\t`. The same construction with 8-byte functions in qword lanes: register t
+# (zmm8+t, eight of them) gets the functions of bytes 8g+t, one qword per group g, by `vpermi2q` from a
+# 16-qword table; a 7-step chain composes within groups, a Kogge-Stone scan over the 8 group functions
+# follows, then the carry. vpshufb works within 128-bit lanes, so a function in an odd qword keeps its
+# values with bit 3 set ("pre-offset"); a shift by one qword flips that bit. The carry is kept xor
+# identity in every qword, like the 4-state one, so the pool treats both alike except for the identity.
+DISP32 = '0x11223364'               # the same + 32: a vector's packed 8-state automaton table pointer
+def fsm8_body(d):
+    r, C = d - 1, 16 + d - 1
+    return (f"""  mov rsi,[rbx+{DISP32}]
+  vmovdqu64 zmm25,[rsi]
+  vbroadcasti32x4 zmm26,xmmword ptr [rbx-784]
+  vmovdqa64 zmm8,zmm{r}
+  vpermi2q zmm8,zmm25,[rsi+64]
+""" + "".join(f"  vpsrlq zmm{8+t},zmm{r},{8*t}\n  vpermi2q zmm{8+t},zmm25,[rsi+64]\n" for t in range(1, 8))
+        + "  vpord zmm8,zmm8,zmm26\n" + "".join(f"  vpshufb zmm{8+t},zmm{8+t},zmm{7+t}\n  vpord zmm{8+t},zmm{8+t},zmm26\n" for t in range(1, 8)) + f"""  vmovdqa64 zmm25,zmm15
+  valignq zmm24,zmm25,[rbx-896],7
+  vpxord zmm24,zmm24,dword ptr [rbx-828]{{1to16}}
+  vpshufb zmm25,zmm25,zmm24
+  valignq zmm24,zmm25,[rbx-896],6
+  vpshufb zmm25,zmm25,zmm24
+  valignq zmm24,zmm25,[rbx-896],4
+  vpshufb zmm25,zmm25,zmm24
+  vpxord zmm24,zmm{C},[rbx-896]
+  vpshufb zmm25,zmm25,zmm24
+  valignq zmm24,zmm25,zmm24,7
+  vpxord zmm24,zmm24,dword ptr [rbx-828]{{1to16}}
+  valignq zmm25,zmm25,zmm25,7
+  vpbroadcastq zmm{C},xmm25
+  vpxorq zmm{C},zmm{C},qword ptr [rbx-888]{{1to8}}
+  cmp dword ptr [rbx-676],{r + 1}
+  jne 9f
+  add rax,64
+  cmp rax,rbp
+  jae 1f
+  jmp r11
+1:
+  jmp r15
+9:
+  vpshufb zmm24,zmm24,zmm26
+  mov r10,0x0101010101010101
+  kmovq k1,r10
+  vpshufb zmm{r}{{k1}}{{z}},zmm8,zmm24
+""" + "".join(f"  kshiftlq k1,k1,1\n  vpshufb zmm{r}{{k1}},zmm{8+t},zmm24\n" for t in range(1, 8)) + f"  vpxord zmm{r},zmm{r},zmm26")
+def fsm8_pre(d):
+    r, C = d - 1, 16 + d - 1
+    half = lambda h: ("""  mov r10d,64
+  cmp r9,r10
+  cmovb r10,r9
+  sub r9,r10
+  mov rax,-1
+  bzhi rax,rax,r10
+  kmovq k1,rax
+""" + "".join(f"  vmovdqu32 zmm24{{k1}}{{z}},[rsi+{64*(4*h+i)}]\n  vpmovdb [rdx+{16*(4*h+i)}],zmm24\n  kshiftrq k1,k1,16\n" for i in range(4))
+        + f"  vmovdqu8 zmm24,[rdx+{64*h}]\n  vpandd zmm24,zmm24,zmm25\n  vmovdqu8 [rdx+{64*h}],zmm24\n")
+    return (f"""  lea rcx,[rbx+{DISP}]
+  mov rsi,[rcx]
+  mov r9,[rcx+8]
+  mov rdx,r13
+  add r13,128
+  cmp r13,[rbx-64]
+  jbe 7f
+  call r14
+7:
+  mov [rcx+32],rdx
+  mov eax,0x07070707
+  vpbroadcastd zmm25,eax
+""" + half(0) + half(1) + f"""  xor eax,eax
+  vpxord zmm{C},zmm{C},zmm{C}
+  or dword ptr [rbx-712],{1 << (24 + r)}
+  or dword ptr [rbx-716],{1 << r}
+  mov dword ptr [rbx-680],{r + 1}""")
+for d in range(1, 9): st(FSM8B, d, fsm8_body(d), pre=fsm8_pre(d))
 st(SUMB, 1, """  vmovdqu8 zmm24{k6}{z},zmm0
   vpxord zmm25,zmm25,zmm25
   vpsadbw zmm24,zmm24,zmm25
@@ -657,7 +732,7 @@ def assemble(name):
     return open(f'{B}/{name}.bin', 'rb').read(), syms
 
 code, syms = assemble('stencils')
-PH = {bytes.fromhex('44332211'): 0, bytes.fromhex('4c332211'): 8, bytes.fromhex('84332211'): 64, bytes.fromhex('54332211'): 16, bytes.fromhex('5c332211'): 24}
+PH = {bytes.fromhex('44332211'): 0, bytes.fromhex('4c332211'): 8, bytes.fromhex('84332211'): 64, bytes.fromhex('54332211'): 16, bytes.fromhex('5c332211'): 24, bytes.fromhex('64332211'): 32}
 def extract(blob):
     """find the (at most one) operand placeholder; return (bytes with it zeroed, pos+1 or 0, addend)"""
     blob = bytearray(blob); pos, add = 0, 0

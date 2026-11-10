@@ -6,6 +6,7 @@
 #   [rbx-960..-768) constants of the automaton stencils (see the end of this file)
 #   [rbx-712] carries the current line uses: bit r = running sum in zmm16+r, bit 8+r = running max
 #             in zmm8+r, bit 16+r = prev in zmm16+r, bit 24+r = automaton function in zmm16+r
+#   [rbx-716] bit r: the automaton in zmm16+r has 8 states (8-byte functions) rather than 4
 #   [rbx-708] chunk size of the current line: 16 (dword lanes) or 64 (byte lanes)
 #   [rbx-704] out stride of the current line: 0 = no out sink, 1 = out, 4 = out4
 #   [rbx-696] fork threshold: lines with at least this many elements may run on all cores
@@ -694,6 +695,9 @@ derive:                             # zmm24 = carry edx after a range, from IN [
   lea r9d,[rdx+16]
   bt eax,r9d
   jnc 6f                            # automaton: OUT o IN (both stored xor identity)
+  lea r9d,[rdx-8]
+  bt dword ptr [rbx-716],r9d
+  jc 58f
   vpxord zmm24,zmm24,dword ptr [rbx-896]{1to16}
   cmp dword ptr [rip+f_retry],0     # after a real pass, OUT = M o (^e): undo the ^e first
   je 57f
@@ -704,6 +708,17 @@ derive:                             # zmm24 = carry edx after a range, from IN [
   vpshufb zmm24,zmm25,zmm24
   vpxord zmm24,zmm24,dword ptr [rbx-896]{1to16}
 6:
+  ret
+58:                                 # an 8-state automaton: the same with 8-byte functions
+  vpxorq zmm24,zmm24,qword ptr [rbx-896]{1to8}
+  cmp dword ptr [rip+f_retry],0
+  je 59f
+  vpbroadcastb zmm26,byte ptr [rdi+256]
+  vpxord zmm24,zmm24,zmm26
+59:
+  vpxorq zmm25,zmm25,qword ptr [rbx-896]{1to8}
+  vpshufb zmm24,zmm25,zmm24
+  vpxorq zmm24,zmm24,qword ptr [rbx-896]{1to8}
   ret
 fsbad:                              # not what a serial run would do: undo and finish serially
   mov r10,[rip+wbase]
@@ -902,7 +917,7 @@ f_a29:    .fill 64,1,0
   .long 0x03020100,0x07060504,0x0b0a0908,0x0f0e0d0c, 0x03020100,0x07060504,0x0b0a0908,0x0f0e0d0c   #   identity | offsets
   .long 0x04040404,0x08080808,0x03030303,0x0f0e0d0c                             # [rbx-832] -828 -824 -820
   .quad 0x1111111111111111,0x2222222222222222,0x4444444444444444,0x8888888888888888   # [rbx-816..-784)
-  .fill 16,1,0
+  .quad 0,0x0808080808080808        # [rbx-784] qword offsets within a 128-bit lane (8-state automata)
   .fill 128,1,0                     # runtime variables [rbx-768 .. rbx-640)
   .fill 512,1,0
   .long 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15

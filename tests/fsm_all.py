@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """fsm_all.py COMPILER -- every one of the 256 functions on four states, as automaton transitions.
 An automaton has 16 classes, so 16 tables hold all 256 functions (function f sends state s to
-(f >> 2s) & 3). Each table runs over an input in which every ordered pair of its classes occurs at
-every position of a 64-byte chunk and across chunk and thread-range boundaries; the compiled program
+(f >> 2s) & 3). Each table runs over an input in which every ordered pair of its classes occurs
+(64 shuffled copies of the 256 pairs, so at varied chunk offsets and across chunk boundaries; not
+every pair at every offset); the compiled program
 on one CPU, on all CPUs and in eager mode (which forks even small lines) must equal the scalar
 interpreter. Suggested by the second audit: random tables mostly forget their start state, so
 random testing says little about composition."""
@@ -29,4 +30,16 @@ for k in range(16):
     for cpus, mode in ((str(allowed[0]), []), (every, []), (every, ['eager'])):
         p = subprocess.run(['taskset', '-c', cpus, exe] + mode, input=bytes(seq), capture_output=True); runs += 1
         assert (p.returncode, p.stdout) == want, ('table', k, 'cpus', cpus, mode)
-print('PASS', comp, '256 transition functions,', len(seq), 'bytes,', runs, 'runs')
+# 8-state automata: there are 8^8 functions, so sample: 40 tables of 16 random functions each (a third
+# of them permutations, which never forget their start state), over the same input
+for k in range(40):
+    fs = [r.sample(range(8), 8) if r.random() < .34 else [r.randrange(8) for _ in range(8)] for _ in range(16)]
+    src = ' '.join(str(x) for f in fs for x in f) + ' =d\nbytes \\d dup prev 8 * + 40 + out\n'
+    exe = f'{T}/q{k}'
+    b = subprocess.run([comp], input=src.encode(), capture_output=True); assert b.returncode == 0, (k, b.returncode)
+    open(exe, 'wb').write(b.stdout); os.chmod(exe, 0o755)
+    want = strand.interp(src.encode(), bytes(seq))
+    for cpus, mode in ((str(allowed[0]), []), (every, []), (every, ['eager'])):
+        p = subprocess.run(['taskset', '-c', cpus, exe] + mode, input=bytes(seq), capture_output=True); runs += 1
+        assert (p.returncode, p.stdout) == want, ('8-state table', k, 'cpus', cpus, mode)
+print('PASS', comp, '256 four-state transition functions and 640 sampled eight-state ones,', len(seq), 'bytes,', runs, 'runs')

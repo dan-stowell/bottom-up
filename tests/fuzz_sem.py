@@ -81,7 +81,8 @@ class Gen:
             elif ch < .55 and d >= 2: toks.append(r.choice(BOPS)); d -= 1
             elif ch < .62 and d >= 3: toks.append('sel'); d -= 2
             elif ch < .72 and ('p', d) not in used: used.add(('p', d)); toks.append('prev')
-            elif ch < .79 and ('p', d) not in used: used.add(('p', d)); toks.append('/' + self.automaton())
+            elif ch < .76 and ('p', d) not in used: used.add(('p', d)); toks.append('/' + self.automaton())
+            elif ch < .79 and ('p', d) not in used: used.add(('p', d)); toks.append('\\' + self.automaton(8))
             elif ch < .82 and d < 7: toks.append(r.choice(['dup', 'over'] if d >= 2 else ['dup'])); d += 1
             elif ch < .84 and d >= 2: toks.append(r.choice(['swap', 'drop'])); d -= toks[-1] == 'drop'
             elif ch < .90:
@@ -105,7 +106,15 @@ class Gen:
         else: toks.append('end')
         self.lines.append(' '.join(toks))
         for v in newvecs: self.vecs[v] = self.newcls()
-    def automaton(self):
+    def automaton(self, states=4):
+        if states == 8:
+            if not hasattr(self, 'autos8'): self.autos8 = []
+            if not self.autos8 or self.r.random() < .4:
+                v = 'ax%d' % self.nv; self.nv += 1
+                n = self.r.choice([128, 128, 128, 40, 0, 1, 127, 129, 200, 64, 65])
+                big = self.r.random() < .3
+                self.lines.append(' '.join(str(self.r.randrange(1000 if big else 8)) for _ in range(n)) + ' =' + v); self.autos8.append(v)
+            return self.r.choice(self.autos8)
         if not hasattr(self, 'autos'): self.autos = []
         if not self.autos or self.r.random() < .4:
             v = 'au%d' % self.nv; self.nv += 1

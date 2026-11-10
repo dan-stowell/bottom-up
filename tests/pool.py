@@ -10,6 +10,8 @@ import strand
 comp = sys.argv[1]; T = '/tmp/strand_pool'; os.makedirs(T, exist_ok=True)
 # a non-forgetting automaton whose functions do not commute: every wrong guess of a state shows
 PERM = '0 1 2 3  1 0 2 3  1 2 3 0  0 1 3 2 =d\n'
+# the same on 8 states: a transposition, an 8-cycle, a product of transpositions, a 3-cycle
+PERM8 = '0 1 2 3 4 5 6 7  1 0 2 3 4 5 6 7  1 2 3 4 5 6 7 0  1 0 3 2 5 4 7 6 =e\n'
 PROGS = {
  'persistent tee re-read': 'input :x x prev + >y\nx end\ny out4\n',
  'tee then prev, two outputs': 'input :a dup prev :b + >c\na b + c + out4\n',
@@ -48,6 +50,10 @@ PROGS = {
  'three nested scans': 'input 1 & scan dup 3 & scan dup 7 & scan + + out4\n',
  'four nested scans': 'input 1 & scan dup 3 & scan dup 7 & scan dup 15 & scan + + + out4\n',
  'scanmax of a scan': 'input 100 - scan dup scanmax + out4\n',
+ 'permutation automaton, 8 states': PERM8 + 'bytes 3 & \\e 48 + out\n',
+ '8 states feeding 8 states': PERM8 + 'bytes 3 & \\e dup \\e 8 * + 48 + out\n',
+ '8 states -> prev -> 4 states': PERM8 + PERM + 'bytes 3 & \\e 0 over prev + 3 & /d + 48 + out\n',
+ 'prev of an 8-state automaton, summed': PERM8 + 'bytes 3 & \\e :s 5 = s prev 2 = & $N\n~1 N + out4\n',
  'input4 scan': 'input4 scan out4\n',
  'input4 prev filter': 'input4 dup dup prev > outif4\n',
 }
@@ -105,6 +111,8 @@ DEPTH = {'scan': 1, 'two independent scans': 1, 'bytes words': 1, 'automaton: st
          'nested scans (must fall back)': 2, 'permutation automaton feeding itself': 2,
          'automaton -> prev -> automaton': 2, 'scan -> prev -> scan': 2,
          'three automata in cascade': 3, 'three nested scans': 3, 'four nested scans': 4,
+         'permutation automaton, 8 states': 1, 'prev of an 8-state automaton, summed': 1,
+         '8 states feeding 8 states': 2, '8 states -> prev -> 4 states': 2,
          'scanmax of a scan': 3}       # a running max that misses costs two retries, not one
 R = os.path.join(H, '..', 'build')
 nm = subprocess.run(['nm', R + '/stub.o'], capture_output=True, text=True, check=True).stdout
