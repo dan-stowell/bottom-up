@@ -189,6 +189,8 @@ def compile_(src: bytes, want_map=False):
 
 # ------------------------------------------------------------------ interpreter
 class Fail(Exception): pass          # runtime check failed: exit 99, no output
+class TooBig(Exception): pass        # line longer than the interpreter is willing to model (test harness skips)
+MAXN = 1 << 20
 class Halt(Exception):
     def __init__(self, status): self.status = status
 
@@ -231,6 +233,7 @@ def interp(src: bytes, inp: bytes):
                 elif c == LENLEAD: n = 1; st.append([len(v)])
                 elif c == IOTA:
                     if sval < 0: raise Fail()
+                    if sval > MAXN: raise TooBig()
                     n = sval; st.append(list(range(n)))
                 elif c == KW['input']: n = len(inp); st.append(list(inp))
                 elif c == VEC:

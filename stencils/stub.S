@@ -7,7 +7,6 @@
 .intel_syntax noprefix
 .text
   .quad 0x1000                      # p_align: the last field of the program header
-.globl _start
 _start:
   lea rbx,[rip+dataend]
   mov eax,9                         # mmap heap: 64 GiB, lazily committed
@@ -70,7 +69,6 @@ wrdone:
   xor edi,edi
   mov eax,231
   syscall
-.globl fail
 fail:                               # a runtime check failed; return address identifies the stencil
   pop r12
   lea rsi,[rip+msg]
