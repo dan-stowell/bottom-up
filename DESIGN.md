@@ -1,6 +1,7 @@
 # DESIGN.md — Strand
 
-*Written before reading any outside review (see REVIEWS.md for what changed afterwards).*
+*The first version of this file was written before reading any outside review (git history has
+it). This version describes the language as built; REVIEWS.md records what changed and why.*
 
 Strand is a language designed backwards from one question: **what would a language have to
 look like for its own compiler to contain no loops and no branches?**
@@ -10,8 +11,10 @@ look like for its own compiler to contain no loops and no branches?**
 A Strand program is a straight-line list of lines. There is no `if`, no `while`, no
 recursion, no functions. Every line is one fused SIMD loop over a flat array of `i32`.
 So a compiler written in Strand is *by construction* a fixed sequence of data-parallel
-passes: the only loops that exist are the ones the code generator wraps around each line,
-and the only branches are loop back-edges and runtime safety checks.
+passes: the only loops that exist are the ones the code generator wraps around each line.
+(Branches do exist in the *generated* code: loop back-edges, runtime safety checks, the
+allocator's free-list-or-bump choice, and `halt`. They are per line, never per element.
+SCALAR_LEDGER.md counts them.)
 
 That means the compiler's language must be compilable by passes that are each one
 scan / elementwise map / compress / gather / scatter. Wherever the classical algorithm is
@@ -48,7 +51,11 @@ input 64 > $N        # vector line: lead `input`, ops, sink `$N` (sum into scala
 | `>Abc` | sink: store scalar (scalar line) |
 | `$Abc`, `^Abc` | sink: sum / max of the line into a scalar |
 | `?abc` | sink: `vals mask ?abc` stores the `vals` whose mask is nonzero (compress) |
-| `!abc` | sink: `vals idx !abc` does `abc[idx] = vals` in place (scatter, last writer wins) |
+| `!abc` | sink: `vals idx !abc` does `abc[idx] = vals` in place (scatter, last writer wins; a negative index is a masked-off lane) |
+| `:abc` | tee: store the top of stack as vector `abc` and *keep going* (one loop, many outputs) |
+| `%abc` | tee: `vals mask %abc` compress-stores mid-line |
+| `idx` | push the lane index `0,1,2,...` |
+| `end` | sink: discard the result (the line's work was its tees) |
 | `out`, `out4` | sink: append to stdout as bytes / as little-endian dwords |
 | `halt` | sink (scalar line): if nonzero, exit with that status and no output |
 | `1 2 "txt" =abc` | data line: `abc` is a constant vector (numbers, string bytes) |
@@ -74,18 +81,37 @@ input 64 > $N        # vector line: lead `input`, ops, sink `$N` (sum into scala
 Every name token computes a 32-bit polynomial hash (segmented sum = difference of two
 prefix-sum values). Then, with no sorting and no sequential insertion:
 
-1. every token scatters its own index into `table[h mod M]` — AVX-512 scatter semantics
-   make the *last* writer win, deterministically;
-2. every token gathers the slot back and asks: "is the winner's hash mine?" If yes, the
-   winner is the canonical occurrence of my name. All occurrences of one name agree,
-   because they collide with each other on purpose;
-3. names that lost to a *different* name race again in a second table under a different
-   hash, then a third.
-4. Finally every byte of every name is compared against the corresponding byte of its
-   canonical occurrence (one gather), so a 32-bit hash collision is a detected compile
+1. every token scatters its own index into `table[key]` — AVX-512 scatter semantics make
+   the *last* writer win, deterministically;
+2. every token gathers the slot back and asks: "does the winner have my fingerprint?" If
+   yes, the winner is the canonical occurrence of my name — its last occurrence. All
+   occurrences of one name agree, because they collide with each other on purpose;
+3. names that lost to a *different* name race again under the next round's key (4 rounds);
+4. finally every byte of every name is compared against the corresponding byte of its
+   canonical occurrence (one gather), so a fingerprint collision is a detected compile
    error, never a miscompile.
 
 A name's slot number is then the running count of canonical occurrences.
+
+The race is not complete: a name can lose four times (E_RACE), and two names can share a
+64-bit fingerprint (E_COLLISION). Rather than pretend otherwise, **the race is part of the
+language definition** (`boot/spec.py`): the table is `2 x pow2ceil(tokens)` slots, the
+fingerprint and round keys are fixed, and the scalar references simulate the same race with
+plain loops, so every implementation accepts exactly the same programs. Codex found inputs
+that broke the first, unspecified version (REVIEWS.md, review 2).
+
+### Liveness and hoisting, also by scan
+
+Two things a compiler normally needs an analysis for fall out of the same structures:
+
+- **Liveness.** With no loops, a vector is dead after the line containing its last
+  occurrence — and the race makes exactly that token the canonical one (`rep == self`).
+  The compiler emits a *release* after that line; stores release what they overwrite.
+  Blocks are recycled through size-class free lists.
+- **Loop-invariant hoisting.** Every token may have a *prologue* stencil (length check,
+  allocation, carry init) besides its body. A line is laid out as
+  `[all prologues][all bodies][releases]`. The three streams are sized, prefix-summed and
+  interleaved by arithmetic on the sums; nothing is moved.
 
 ## Code shape
 
@@ -103,14 +129,17 @@ loop    : k7 = active-lane mask for this chunk
           c = (out, n)
 ```
 
-Scans, gathers, compress-stores and scatters are stencils *inside* the same loop — there
-is no runtime library of kernels. Everything the compiler executes outside a small
-startup/exit stub is code its own stencil-gather produced.
+Scans, gathers, compress-stores, scatters and the allocator are stencils *inside* the
+line — there is no runtime library of kernels. Everything the compiler executes outside a
+small startup/exit stub was placed by its own stencil gather. "Code generator" here means
+selection, layout, copying and operand patching; the instruction *encodings* inside each
+stencil come from GNU as at build time (SCALAR_LEDGER.md, item 8).
 
 ## Bootstrap
 
-- **Stage 0** is a deliberately naive scalar compiler in Python (`boot/`): dictionaries,
-  for-loops, lists. It is the *reference*: the SIMD compiler must reproduce its output
+- **Stage 0** is a deliberately naive scalar compiler in Python (`boot/strand.py`): dictionaries,
+  for-loops, lists. `boot/strandc.c` is the same compiler again in plain C: the speed
+  baseline and a second, independently written oracle. It is the *reference*: the SIMD compiler must reproduce its output
   byte for byte on every input. Python because the only job of stage 0 is to be obviously
   right and to be thrown away; nothing of it survives into the fixed point.
 - A scalar **interpreter** in Python defines what programs *mean*, independently of any
@@ -123,11 +152,10 @@ startup/exit stub is code its own stencil-gather produced.
   the Strand compiler implement the same function, stage1 == stage2 is also expected and
   is a stronger check.
 
-## Known costs accepted up front
+## Known costs accepted up front (and what measuring them showed)
 
-- `i32` only: bytes are widened 4x. HARDWARE.md says this spills L1 at 8 KiB of source and
-  that byte lanes would be 4x denser. Chosen anyway for a one-type language; revisit.
-- Gather/scatter cost scalar-loop prices on this CPU. The design leans on them (symbol
-  race, stencil gather). They are branch-free and fuse into the loop, but they are not a
-  speedup, and the ledger will say so with numbers.
-- No reuse of memory: every line bump-allocates its result.
+- `i32` only: bytes are widened 4x. This turned out to be the dominant cost, but through
+  page faults rather than cache misses (REPORT.md).
+- Gather/scatter cost scalar-loop prices on this CPU. They are branch-free and fuse into
+  the loop, but they are not a speedup.
+- Memory was originally never reused; that was 80% of compile time and is fixed (above).
