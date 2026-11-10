@@ -159,6 +159,8 @@ st(SCALLEAD, 0, LOOPHEAD + f"  vpbroadcastd zmm0,dword ptr [rbx+{DISP}]", pre=" 
 st(LENLEAD, 0, LOOPHEAD + f"  vpbroadcastd zmm0,dword ptr [rbx+{DISP8}]", pre="  mov r12d,1\n" + SETUP)
 st(IOTA, 0, LOOPHEAD + "  vmovdqa32 zmm0,zmm26", pre=f"  mov r12d,dword ptr [rbx+{DISP}]\n  test r12d,r12d" + failif('ns') + SETUP)
 st(KW['input'], 0, LOOPHEAD + "  mov rsi,[rbx-16]\n  vpmovzxbd zmm0{k7}{z},xmmword ptr [rsi+rax]", pre="  mov r12,[rbx-8]\n" + SETUP)
+# stdin as little-endian dwords (a trailing partial dword is ignored)
+st(KW['input4'], 0, LOOPHEAD + "  mov rsi,[rbx-16]\n  vmovdqu32 zmm0{k7}{z},[rsi+rax*4]", pre="  mov r12,[rbx-8]\n  shr r12,2\n" + SETUP)
 st(STOREV, 1, pre=ALLOC('rdi'), text="  vmovdqu32 [rdi+rax*4]{k6},zmm0" + LOOPEND + f"""
   lea rcx,[rbx+{DISP}]""" + RELEASE + """
   mov [rcx],rdi
@@ -206,6 +208,20 @@ def outsink(store, step, per):
   mov [rbx-32],r8""")
 st(KW['out'], 1, outsink("  vpmovdb xmm24,zmm0\n  vmovdqu8 [r8]{k6},xmm24", 16, 1), pre="  mov r8,[rbx-32]\n  mov dword ptr [rbx-704],1")
 st(KW['out4'], 1, outsink("  vmovdqu32 [r8]{k6},zmm0", 64, 4), pre="  mov r8,[rbx-32]\n  mov dword ptr [rbx-704],4")
+# streaming filter: `vals mask outif` appends the selected values to stdout, nothing is materialised
+def outifsink(narrow, store, adv):
+    return (f"""  cmp r8,[rbx-56]
+  jb 3f
+  call [rbx-648]
+3:
+  vptestmd k1{{k6}},zmm1,zmm1
+  vpcompressd zmm24{{k1}}{{z}},zmm0
+{narrow}  {store}
+  kmovw ecx,k1
+  popcnt ecx,ecx
+  {adv}""" + LOOPEND + "\n  mov [rbx-32],r8")
+st(KW['outif'], 2, outifsink("  vpmovdb xmm24,zmm24\n", "vmovdqu8 [r8],xmm24", "add r8,rcx"), pre="  mov r8,[rbx-32]\n  mov dword ptr [rbx-704],1")
+st(KW['outif4'], 2, outifsink("", "vmovdqu32 [r8],zmm24", "lea r8,[r8+rcx*4]"), pre="  mov r8,[rbx-32]\n  mov dword ptr [rbx-704],4")
 st(KW['end'], 1, LOOPEND)
 # tee stores: keep the value on the stack and keep the loop going, so one line can define many vectors
 for d in range(1, 9):

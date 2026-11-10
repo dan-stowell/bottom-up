@@ -5,7 +5,7 @@ The first K classes are the keywords, in prelude order.
 """
 KEYWORDS = ['+', '-', '*', '&', '|', '^', 'min', 'max', '<<', '>>',
             '<', '<=', '>', '>=', '=', '!=', 'sel', 'scan', 'scanmax', 'prev',
-            'dup', 'drop', 'swap', 'over', 'input', 'out', 'out4', 'halt', 'end', 'idx']
+            'dup', 'drop', 'swap', 'over', 'input', 'out', 'out4', 'halt', 'end', 'idx', 'input4', 'outif', 'outif4']
 K = len(KEYWORDS)
 PRELUDE = ' '.join(KEYWORDS)
 
@@ -22,7 +22,8 @@ for k in ['+', '-', '*', '&', '|', '^', 'min', 'max', '<<', '>>', '<', '<=', '>'
           'drop', 'out', 'out4', 'halt', 'end']:
     DELTA[KW[k]] = -1
 DELTA[KW['sel']] = -2
-for k in ['dup', 'over', 'input', 'idx']:
+DELTA[KW['outif']] = DELTA[KW['outif4']] = -2
+for k in ['dup', 'over', 'input', 'idx', 'input4']:
     DELTA[KW[k]] = 1
 for c in [VEC, VECLEAD, SCAL, SCALLEAD, LEN, LENLEAD, IOTA, VECL, LENL]:
     DELTA[c] = 1

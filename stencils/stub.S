@@ -186,13 +186,18 @@ newstack:                           # rax = initial stack pointer of a fresh sta
   ret
 
 flush:                              # write [output base, r8) to stdout; r8 = output base. Preserves everything else.
+  push rsi
+  mov rsi,[rbx-24]
+  call wrange
+  mov r8,[rbx-24]
+  pop rsi
+  ret
+wrange:                             # write [rsi, r8) to stdout. Preserves everything but rsi.
   push rax
   push rcx
   push rdx
-  push rsi
   push rdi
   push r11
-  mov rsi,[rbx-24]
 fl1:
   mov rdx,r8
   sub rdx,rsi
@@ -205,10 +210,8 @@ fl1:
   add rsi,rax
   jmp fl1
 fl2:
-  mov r8,[rbx-24]
   pop r11
   pop rdi
-  pop rsi
   pop rdx
   pop rcx
   pop rax
@@ -230,6 +233,8 @@ exit:
 # sink), combines the accumulators, and returns with rax = m so the caller's own loop finishes
 # the tail [m, n) serially. Each range starts with a one-chunk warm-up so `prev` carries are right.
 fork:
+  pop qword ptr [rip+f_ret]         # keep rsp exactly as in the serial loop: chunk-local vectors
+                                    # live at 64-byte-aligned offsets from it
   mov [rip+j_head],r11
   mov [rip+j_rdi],rdi
   mov [rip+j_n],r12
@@ -318,7 +323,7 @@ fblock:
   vpbroadcastd zmm26,eax
   vpaddd zmm26,zmm26,zmm30
   lea rbp,[rax+16]
-  mov r8,[rbx-24]
+  lea r8,[rip+scratch]
   lea r15,[rip+6f]
   jmp r11
 6:
@@ -332,6 +337,7 @@ fblock:
   lea r15,[rip+7f]
   jmp r11
 7:
+  mov [rip+f_r8end],r8
   mov ecx,20000                     # wait for the workers: spin briefly, then sleep
 8:
   cmp dword ptr [rip+done],0
@@ -367,13 +373,22 @@ fblock:
   mov rsi,[rip+f_bs]
   add rsi,rax
   mov [rip+f_bs],rsi
-  mov rdx,[rip+f_stride]
-  test rdx,rdx
-  jz fblock
-  imul rax,rdx
+  cmp qword ptr [rip+f_stride],0
+  je fblock
+  lea r10,[rip+wparams]             # this block's output: every thread's region, in order
+  mov ecx,[rip+nthreads]
+  dec ecx
+11:
+  mov rsi,[r10+16]
+  mov r8,[r10+32]
+  call wrange
+  add r10,192
+  dec ecx
+  jnz 11b
+  mov rsi,[rip+f_r8]
+  mov r8,[rip+f_r8end]
+  call wrange
   mov r8,[rbx-24]
-  add r8,rax
-  call flush                        # this block's output, in order
   jmp fblock
 fdone:
   mov rdi,[rip+j_rdi]               # syscalls above clobbered these
@@ -386,7 +401,7 @@ fdone:
   vpaddd zmm26,zmm26,zmm30
   mov rbp,r12
   xor r15d,r15d
-  ret
+  jmp [rip+f_ret]
 
 startthreads:
   push r13
@@ -462,7 +477,7 @@ wloop:
   vpbroadcastd zmm26,eax
   vpaddd zmm26,zmm26,zmm30
   lea rbp,[rax+16]
-  mov r8,[rbx-24]
+  lea r8,[r13+64]
   lea r15,[rip+3f]
   jmp r11
 3:
@@ -476,6 +491,7 @@ wloop:
   lea r15,[rip+4f]
   jmp r11
 4:
+  mov [r13+32],r8                   # where this range's output ended
   vmovdqu32 [r13+64],zmm28
   vmovdqu32 [r13+128],zmm29
   lock dec dword ptr [rip+done]
@@ -532,6 +548,10 @@ f_per:    .quad 0
 f_lo:     .quad 0
 f_hi:     .quad 0
 f_r8:     .quad 0
+f_ret:    .quad 0
+f_r8end:  .quad 0
+  .balign 64
+scratch:  .fill 64,1,0
   .balign 64
 wparams:  .fill 192*16,1,0          # per worker: lo, hi, out ptr, last seq | sum acc | max acc
   .balign 64

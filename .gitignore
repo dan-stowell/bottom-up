@@ -3,7 +3,7 @@ build/
 __pycache__/
 *.o
 explore/ceiling
-explore/gen
+explore/iotest
 explore/bench
 explore/base[0-9]
 explore/basev[0-9]

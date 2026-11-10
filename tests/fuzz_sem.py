@@ -85,7 +85,8 @@ class Gen:
         lead = r.random()
         if lead < .45 and self.vecs:
             v = r.choice(list(self.vecs)); lcls = self.vecs[v]; toks = [v]
-        elif lead < .75: toks = ['input']; lcls = 0
+        elif lead < .68: toks = ['input']; lcls = 0
+        elif lead < .75: toks = ['input4']; lcls = -4
         else:
             s = r.choice(self.scal) if self.scal and r.random() < .4 else r.choice(['0', '1', '15', '16', '17', '33', '100'])
             toks = ['~' + s]; lcls = ('iota', s) if s[0] != 'S' else self.newcls()
@@ -106,7 +107,8 @@ class Gen:
             toks.append('!' + v)
         elif k < .80:
             s = 'S%d' % self.ns; self.ns += 1; toks.append(r.choice('$^') + s); self.scal.append(s)
-        else: toks.append(r.choice(['out', 'out', 'out4', 'end']))
+        elif k < .90: toks.append(r.choice(['out', 'out', 'out4', 'end']))
+        else: toks += [self.scalar(), r.choice(BIN), 'dup', '1', '&', r.choice(['outif', 'outif4'])]
         self.lines.append(' '.join(toks))
     def program(self):
         for _ in range(self.r.choice([self.r.randrange(1, 25)] * 9 + [self.r.randrange(60, 200)])): self.line()

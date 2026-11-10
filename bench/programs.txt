@@ -1,0 +1,16 @@
+# name | input | shape | Strand program (';' separates lines)
+lines    | text | reduce        | input 10 = $N ; ~1 N + out4
+words    | text | prev+reduce   | input 32 > dup prev 1 ^ & $W ; ~1 W + out4
+sum      | text | reduce        | input $S ; ~1 S + out4
+pairs    | text | prev+reduce   | input :c 104 = c prev 116 = & $C ; ~1 C + out4
+nonascii | text | reduce        | input 127 > $C ; ~1 C + out4
+upper    | text | map           | input dup 97 >= over 122 <= & 32 * - out
+rot13    | text | map           | input :c 97 >= c 122 <= & c 97 - 13 + dup 26 >= 26 * - 97 + c sel out
+maxline  | text | scan+reduce   | input 10 = idx 1 + :p * scanmax p swap - ^M ; ~1 M + out4
+letters  | text | filter        | input dup 97 >= over 122 <= & outif
+sum4     | ints | reduce        | input4 $S ; ~1 S + out4
+sumpos4  | ints | map+reduce    | input4 dup 0 > * $S ; ~1 S + out4
+maxgap4  | ints | prev+reduce   | input4 dup prev - ^M ; ~1 M + out4
+scale4   | ints | map           | input4 3 * 7 + out4
+filter4  | ints | filter        | input4 dup 0 > outif4
+prefix4  | ints | scan          | input4 scan out4

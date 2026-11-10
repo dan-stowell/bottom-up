@@ -296,6 +296,8 @@ def interp(src: bytes, inp: bytes):
                     if sval > MAXN: raise TooBig()
                     n = sval; st.append(list(range(n)))
                 elif c == KW['input']: n = len(inp); st.append(list(inp))
+                elif c == KW['input4']:
+                    n = len(inp) // 4; st.append([w32(x) for x in struct.unpack('<%dI' % n, inp[:4 * n])])
                 elif c in (VEC, VECL):
                     if len(v) != n: raise Fail()
                     st.append(list(v))
@@ -352,6 +354,12 @@ def interp(src: bytes, inp: bytes):
                     vec[t.slot] = [x for x, q in zip(a, m) if q]
                 elif c == KW['end']: st.pop()
                 elif c == KW['out']: out += bytes(x & 255 for x in st.pop())
+                elif c == KW['outif']:
+                    m = st.pop(); a = st.pop(); out += bytes(x & 255 for x, q in zip(a, m) if q)
+                elif c == KW['outif4']:
+                    m = st.pop(); a = st.pop()
+                    for x, q in zip(a, m):
+                        if q: out += struct.pack('<I', x & 0xffffffff)
                 elif c == KW['out4']:
                     for x in st.pop(): out += struct.pack('<I', x & 0xffffffff)
                 elif c == KW['halt']:
