@@ -403,7 +403,7 @@ def interp(src: bytes, inp: bytes):
                 elif c == KW['halt']:
                     a = st.pop()
                     if n != 1: raise Fail()
-                    if a[0] != 0: raise Halt(a[0] & 255)
+                    if a[0] != 0: raise Halt((a[0] & 255) or 1)   # never exits 0
                 else: raise AssertionError(c)
             assert not st
     except Fail: return 99, b''

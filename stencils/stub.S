@@ -3,6 +3,8 @@
 # See SCALAR_LEDGER.md.
 #
 # Layout contract with the stencils (rbx = address of the first byte after this blob):
+#   [rbx-712] carries the current line uses: bit r = running sum in zmm16+r, bit 8+r = running max
+#             in zmm8+r, bit 16+r = prev in zmm16+r
 #   [rbx-708] chunk size of the current line: 16 (dword lanes) or 64 (byte lanes)
 #   [rbx-704] out stride of the current line: 0 = no out sink, 1 = out, 4 = out4
 #   [rbx-696] fork threshold: lines with at least this many elements may run on all cores
@@ -54,6 +56,10 @@ _start:
   cmp r15,1
   jbe 2f
   mov eax,64
+  mov qword ptr [rip+f_blk],2048
+  mov qword ptr [rip+f_blkscan],2048
+  mov qword ptr [rip+f_blkprobe],512
+  mov qword ptr [rip+f_blkout],1024
 2:
   mov [rbx-696],rax
   add rsp,128
@@ -230,43 +236,200 @@ exit:
 
 # ------------------------------------------------------------------ thread pool
 # fork: called at a line's loop head when the line voted "splittable" and n >= threshold.
-# Runs elements [0, m) on all threads (in blocks, written out in order, if the line has an out
-# sink), combines the accumulators, and returns with rax = m so the caller's own loop finishes
-# the tail [m, n) serially. Each range starts with a one-chunk warm-up so `prev` carries are right.
+# Runs elements [0, m) on all threads, block by block, and returns with rax = m so the caller's
+# own loop finishes [m, n) serially.
+#
+# Every thread (the caller included, as the last one) runs `dojob` on its range:
+#   mode 0  plain line: a one-chunk warm-up (computes, stores nothing) so `prev` carries are
+#           right, then the range for real.
+#   mode 1  dry pass for lines with running sums/maxima: warm-up, then the whole range with
+#           nothing stored; reports its carries before (W) and after (OUT).
+#   mode 2  real pass starting from the carries the pool computed (IN); reports OUT.
+# For scan lines the pool derives each thread's IN from the dry pass, runs the real pass, and then
+# *verifies* that every thread's IN equals its predecessor's real OUT. If so the block is exactly
+# what a serial run produces. If not (scans feeding scans, or a deferred bounds-check failure),
+# the caller's registers are restored and the rest of the line runs serially.
+#
+# Per-thread block (4096 bytes, allocated when the pool starts): +0 lo, +8 hi, +16 output start,
+# +24 last seq, +32 output end, +40 continuation, +48 reset-accumulators flag, +64 scratch,
+# +128 sum acc, +192 max acc, +256 W, +1280 IN, +2304 OUT (16 zmm each: zmm8..zmm23).
+.macro savecar base
+  .irp i,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23
+  vmovdqu32 [\base+(\i-8)*64],zmm\i
+  .endr
+.endm
+.macro loadcar base
+  .irp i,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23
+  vmovdqu32 zmm\i,[\base+(\i-8)*64]
+  .endr
+.endm
+.macro setrange                     # rax = first element: lane indices follow
+  vpbroadcastd zmm26,eax
+  vpaddd zmm26,zmm26,zmm30
+.endm
+
+dojob:                              # r13 = this thread's block; continues at [r13+40]
+  mov r11,[rip+j_head]
+  mov rdi,[rip+j_rdi]
+  mov r12,[rip+j_n]
+  vpbroadcastd zmm27,r12d
+  cmp dword ptr [rip+j_mode],2
+  je dj_real
+  vpxord zmm16,zmm16,zmm16          # identity carries
+  .irp i,17,18,19,20,21,22,23
+  vmovdqa32 zmm\i,zmm16
+  .endr
+  vpslld zmm8,zmm31,31
+  .irp i,9,10,11,12,13,14,15
+  vmovdqa32 zmm\i,zmm8
+  .endr
+  mov rax,[r13]
+  test rax,rax
+  jz dj_warm
+  kxorq k5,k5,k5                    # warm-up chunk: compute, keep nothing, ignore check failures
+  lea r14,[rip+justret]
+  mov rbp,rax
+  mov ecx,[rbx-708]
+  sub rax,rcx
+  setrange
+  lea r8,[r13+64]
+  lea r15,[rip+dj_warm]
+  jmp r11
+dj_warm:
+  cmp dword ptr [rip+j_mode],1
+  jne dj_run
+  savecar r13+256
+  kxorq k5,k5,k5
+  lea r14,[rip+justret]
+  mov rax,[r13]
+  setrange
+  mov rbp,[r13+8]
+  mov r8,[r13+16]                   # a fully masked store must still point at mapped memory,
+                                    # or every one of them takes a microcode assist
+  lea r15,[rip+dj_dry]
+  jmp r11
+dj_dry:
+  savecar r13+2304
+  jmp dj_end
+dj_real:
+  loadcar r13+1280
+dj_run:
+  kxnorq k5,k5,k5
+  lea r14,[rip+fail]
+  lea rax,[rip+softfail]
+  cmp dword ptr [rip+j_mode],2
+  cmove r14,rax
+  cmp dword ptr [r13+48],0
+  je 1f
+  vpxord zmm28,zmm28,zmm28
+  vpslld zmm29,zmm31,31
+1:
+  mov rax,[r13]
+  setrange
+  mov rbp,[r13+8]
+  mov r8,[r13+16]
+  lea r15,[rip+dj_ran]
+  jmp r11
+dj_ran:
+  mov [r13+32],r8
+  vmovdqu32 [r13+128],zmm28
+  vmovdqu32 [r13+192],zmm29
+  savecar r13+2304
+dj_end:
+  kxnorq k5,k5,k5
+  lea r14,[rip+fail]
+  jmp [r13+40]
+
+runall:                             # run the current job on every thread; continues at [rip+f_cont]
+  mov eax,[rip+nthreads]
+  dec eax
+  mov [rip+done],eax
+  lock inc dword ptr [rip+seq]
+  mov eax,202                       # futex(&seq, WAKE|PRIVATE, 64)
+  lea rdi,[rip+seq]
+  mov esi,129
+  mov edx,64
+  syscall
+  lea rax,[rip+ra1]
+  mov [r13+40],rax
+  jmp dojob
+ra1:
+  mov ecx,20000                     # wait for the workers: spin briefly, then sleep
+ra2:
+  cmp dword ptr [rip+done],0
+  je ra3
+  pause
+  dec ecx
+  jnz ra2
+  mov edx,[rip+done]
+  test edx,edx
+  jz ra3
+  mov eax,202                       # futex(&done, WAIT|PRIVATE, edx)
+  lea rdi,[rip+done]
+  mov esi,128
+  xor r10d,r10d
+  syscall
+  mov ecx,1
+  jmp ra2
+ra3:
+  mov rdi,[rip+j_rdi]
+  mov r11,[rip+j_head]
+  jmp [rip+f_cont]
+
 fork:
   pop qword ptr [rip+f_ret]         # keep rsp exactly as in the serial loop: chunk-local vectors
                                     # live at 64-byte-aligned offsets from it
   mov [rip+j_head],r11
   mov [rip+j_rdi],rdi
   mov [rip+j_n],r12
+  mov [rip+f_r13],r13
+  mov [rip+f_r8in],r8
+  mov qword ptr [rbx-56],-1         # no streaming flushes while the pool owns the line
   cmp dword ptr [rip+started],0
   jne 1f
   call startthreads
 1:
+  mov eax,[rip+nthreads]            # the caller is the last thread
+  dec eax
+  shl rax,12
+  add rax,[rip+wbase]
+  mov r13,rax
+  mov dword ptr [r13+48],0
   mov eax,[rbx-704]
   mov [rip+f_stride],rax
   mov qword ptr [rip+f_bs],0
+  mov dword ptr [rip+f_probe],1
   test eax,eax
   jz fblock
   call flush                        # pending output goes first; r8 = output base
-  mov rax,[rbx-24]                  # no streaming flushes while blocks are in flight
-  add rax,0x4000000
-  mov [rbx-56],rax
 fblock:
   mov rsi,[rip+f_bs]
   mov rcx,r12                       # rcx = end of this block
+  mov rdx,[rip+f_blk]               # block length: everything, unless ...
+  mov eax,[rbx-712]
+  test eax,0xffff
+  jz 2f
+  mov rdx,[rip+f_blkscan]           # ... the line has scans (first a small probe block) ...
+  cmp dword ptr [rip+f_probe],0
+  je 2f
+  mov rdx,[rip+f_blkprobe]
+2:
   mov rax,[rip+f_stride]
   test rax,rax
   jz 3f
-  mov edx,0x400000                  # 4 MiB of output per block
+  mov r9,[rip+f_blkout]             # ... or an out sink (output is produced block by block)
   cmp eax,4
-  jne 2f
-  mov edx,0x100000
-2:
+  jne 21f
+  shr r9,2
+21:
+  cmp r9,rdx
+  cmovb rdx,r9
+3:
   add rdx,rsi
+  jc 31f
   cmp rdx,rcx
   cmovb rcx,rdx
-3:
+31:
   mov rax,rcx
   sub rax,rsi
   cmp rcx,r12
@@ -281,10 +444,9 @@ fblock:
   jz fdone
   shl rax,6
   mov [rip+f_per],rax
-  lea r10,[rip+wparams]
+  mov r10,[rip+wbase]
   mov rdx,rsi
   mov ecx,r9d
-  dec ecx
 5:
   mov [r10],rdx                     # lo
   lea rdi,[rdx+rax]
@@ -295,121 +457,170 @@ fblock:
   add rdi,[rbx-24]
   mov [r10+16],rdi                  # where this range's output goes
   add rdx,rax
-  add r10,192
+  add r10,4096
   dec ecx
   jnz 5b
-  mov [rip+f_lo],rdx                # the main thread takes the last range
-  lea rdi,[rdx+rax]
-  mov [rip+f_hi],rdi
-  mov rdi,rdx
-  sub rdi,rsi
-  imul rdi,[rip+f_stride]
-  add rdi,[rbx-24]
-  mov [rip+f_r8],rdi
-  mov eax,r9d
-  dec eax
-  mov [rip+done],eax
-  lock inc dword ptr [rip+seq]
-  mov eax,202                       # futex(&seq, WAKE|PRIVATE, 64)
-  lea rdi,[rip+seq]
-  mov esi,129
-  mov edx,64
-  syscall
-  mov rdi,[rip+j_rdi]
-  mov r11,[rip+j_head]
-  kxorq k5,k5,k5                    # warm-up chunk: compute, keep nothing, ignore check failures
-  lea r14,[rip+justret]
-  mov rax,[rip+f_lo]
-  mov rbp,rax
-  mov ecx,[rbx-708]
-  sub rax,rcx
-  vpbroadcastd zmm26,eax
-  vpaddd zmm26,zmm26,zmm30
-  lea r8,[rip+scratch]
-  lea r15,[rip+6f]
-  jmp r11
-6:
-  kxnorq k5,k5,k5
-  lea r14,[rip+fail]
-  mov rax,[rip+f_lo]
-  vpbroadcastd zmm26,eax
-  vpaddd zmm26,zmm26,zmm30
-  mov rbp,[rip+f_hi]
-  mov r8,[rip+f_r8]
-  lea r15,[rip+7f]
-  jmp r11
-7:
-  mov [rip+f_r8end],r8
-  mov ecx,20000                     # wait for the workers: spin briefly, then sleep
-8:
-  cmp dword ptr [rip+done],0
-  je 9f
-  pause
-  dec ecx
-  jnz 8b
-  mov edx,[rip+done]
-  test edx,edx
-  jz 9f
-  mov eax,202                       # futex(&done, WAIT|PRIVATE, edx)
-  lea rdi,[rip+done]
-  mov esi,128
-  xor r10d,r10d
-  syscall
+  mov eax,[rbx-712]
+  test eax,0xffff
+  jnz fscan
+  mov dword ptr [rip+j_mode],0      # plain line: one pass
+  lea rax,[rip+fgood]
+  mov [rip+f_cont],rax
+  jmp runall
+
+fscan:                              # scan line: dry pass, derive carries, real pass, verify
+  mov r10,[rip+wbase]
+  savecar r10+1280                  # thread 0 starts from the caller's (true) carries
+  vmovdqu32 [rip+f_a28],zmm28
+  vmovdqu32 [rip+f_a29],zmm29
+  mov dword ptr [rip+j_mode],1
+  lea rax,[rip+fs1]
+  mov [rip+f_cont],rax
+  jmp runall
+fs1:
+  mov r10,[rip+wbase]               # IN[t] from IN[t-1], W[t-1], OUT[t-1], by kind of carry
   mov ecx,1
-  jmp 8b
-9:
-  mov rdi,[rip+j_rdi]
-  mov r11,[rip+j_head]
-  lea r10,[rip+wparams]
+  mov eax,[rbx-712]
+fs2:
+  xor edx,edx                       # j: 0..7 = zmm8..15 (max carries), 8..15 = zmm16..23 (sum / prev)
+fs3:
+  mov rsi,rdx
+  shl rsi,6
+  vmovdqu32 zmm24,[r10+rsi+1280]
+  vmovdqu32 zmm25,[r10+rsi+2304]
+  cmp edx,8
+  jae fs4
+  lea r9d,[rdx+8]
+  bt eax,r9d
+  jnc fs6
+  vpmaxsd zmm24,zmm24,zmm25
+  jmp fs6
+fs4:
+  lea r9d,[rdx-8]
+  bt eax,r9d
+  jnc fs5
+  vpaddd zmm24,zmm24,zmm25
+  vpsubd zmm24,zmm24,[r10+rsi+256]
+  jmp fs6
+fs5:
+  lea r9d,[rdx+8]
+  bt eax,r9d
+  jnc fs6
+  vmovdqa32 zmm24,zmm25
+fs6:
+  vmovdqu32 [r10+rsi+4096+1280],zmm24
+  inc edx
+  cmp edx,16
+  jb fs3
+  add r10,4096
+  inc ecx
+  cmp ecx,[rip+nthreads]
+  jb fs2
+  mov dword ptr [rip+f_soft],0
+  mov dword ptr [rip+j_mode],2
+  lea rax,[rip+fs7]
+  mov [rip+f_cont],rax
+  jmp runall
+fs7:
+  cmp dword ptr [rip+f_soft],0
+  jne fsbad
+  mov r10,[rip+wbase]               # verify: IN[t] == real OUT[t-1] for every carry in use
+  mov ecx,1
+  mov eax,[rbx-712]
+  mov r9d,eax
+  shr r9d,16
+  or eax,r9d                        # bits 0..7: zmm16+r in use; bits 8..15: zmm8+r in use
+fs8:
+  xor edx,edx
+fs9:
+  lea r9d,[rdx+8]
+  and r9d,15
+  bt eax,r9d
+  jnc fs10
+  mov rsi,rdx
+  shl rsi,6
+  vmovdqu32 zmm24,[r10+rsi+4096+1280]
+  vpcmpd k1,zmm24,[r10+rsi+2304],4
+  kortestw k1,k1
+  jnz fsbad
+fs10:
+  inc edx
+  cmp edx,16
+  jb fs9
+  add r10,4096
+  inc ecx
+  cmp ecx,[rip+nthreads]
+  jb fs8
+  mov dword ptr [rip+f_probe],0
+  jmp fgood
+fsbad:                              # not what a serial run would do: undo and finish serially
+  mov r10,[rip+wbase]
+  loadcar r10+1280
+  vmovdqu32 zmm28,[rip+f_a28]
+  vmovdqu32 zmm29,[rip+f_a29]
+  jmp fdone
+
+fgood:                              # the block stands: fold in the workers' accumulators, emit output
+  mov r10,[rip+wbase]
   mov ecx,[rip+nthreads]
   dec ecx
-10:
-  vpaddd zmm28,zmm28,[r10+64]
-  vpmaxsd zmm29,zmm29,[r10+128]
-  add r10,192
+1:
+  vpaddd zmm28,zmm28,[r10+128]
+  vpmaxsd zmm29,zmm29,[r10+192]
+  add r10,4096
   dec ecx
-  jnz 10b
+  jnz 1b
   mov r9d,[rip+nthreads]
   mov rax,[rip+f_per]
   imul rax,r9
-  mov rsi,[rip+f_bs]
-  add rsi,rax
-  mov [rip+f_bs],rsi
+  add [rip+f_bs],rax
   cmp qword ptr [rip+f_stride],0
   je fblock
-  lea r10,[rip+wparams]             # this block's output: every thread's region, in order
+  mov r10,[rip+wbase]               # every thread's region, in order
   mov ecx,[rip+nthreads]
-  dec ecx
-11:
+2:
   mov rsi,[r10+16]
   mov r8,[r10+32]
   call wrange
-  add r10,192
+  add r10,4096
   dec ecx
-  jnz 11b
-  mov rsi,[rip+f_r8]
-  mov r8,[rip+f_r8end]
-  call wrange
-  mov r8,[rbx-24]
+  jnz 2b
   jmp fblock
 fdone:
   mov rdi,[rip+j_rdi]               # syscalls above clobbered these
   mov r11,[rip+j_head]
+  mov r13,[rip+f_r13]
   mov rax,[rbx-24]
+  mov r8,rax
   add rax,0x40000
   mov [rbx-56],rax
+  cmp qword ptr [rip+f_stride],0
+  jne 1f
+  mov r8,[rip+f_r8in]
+1:
   mov rax,[rip+f_bs]
-  vpbroadcastd zmm26,eax
-  vpaddd zmm26,zmm26,zmm30
+  setrange
   mov rbp,r12
   xor r15d,r15d
+  lea r14,[rip+fail]
   jmp [rip+f_ret]
 
 startthreads:
   push r13
   push r8
   mov dword ptr [rip+started],1
-  lea r13,[rip+wparams]
+  mov eax,9                         # per-thread blocks: 17 x 4096
+  xor edi,edi
+  mov esi,0x11000
+  mov edx,3
+  mov r10d,0x22
+  mov r8,-1
+  xor r9d,r9d
+  syscall
+  cmp rax,-4096
+  ja nomem
+  mov [rip+wbase],rax
+  mov r13,rax
   mov r15d,[rip+nthreads]
   dec r15d
 1:
@@ -417,6 +628,9 @@ startthreads:
   mov rsi,rax
   mov eax,[rip+seq]
   mov [r13+24],eax
+  mov dword ptr [r13+48],1
+  lea rax,[rip+wdone]
+  mov [r13+40],rax
   mov eax,56                        # clone(VM|FS|FILES|SIGHAND|THREAD|SYSVSEM, stack)
   mov edi,0x50f00
   xor edx,edx
@@ -426,18 +640,16 @@ startthreads:
   test rax,rax
   jz worker
   js nomem
-  add r13,192
+  add r13,4096
   dec r15d
   jnz 1b
   pop r8
   pop r13
   ret
 
-worker:                             # r13 = this worker's parameter block
+worker:                             # r13 = this worker's block
   vmovdqu32 zmm30,[rbx-128]
   vpbroadcastd zmm31,dword ptr [rbx-124]
-  lea r14,[rip+fail]
-  kxnorq k5,k5,k5
 wloop:
   mov ecx,20000
 1:
@@ -456,47 +668,8 @@ wloop:
   jmp wloop
 2:
   mov [r13+24],eax
-  mov r11,[rip+j_head]
-  mov rdi,[rip+j_rdi]
-  mov r12,[rip+j_n]
-  vpbroadcastd zmm27,r12d
-  vpxord zmm16,zmm16,zmm16
-  vmovdqa32 zmm17,zmm16
-  vmovdqa32 zmm18,zmm16
-  vmovdqa32 zmm19,zmm16
-  vmovdqa32 zmm20,zmm16
-  vmovdqa32 zmm21,zmm16
-  vmovdqa32 zmm22,zmm16
-  vmovdqa32 zmm23,zmm16
-  vpxord zmm28,zmm28,zmm28
-  vpslld zmm29,zmm31,31
-  mov rax,[r13]
-  test rax,rax
-  jz 3f
-  kxorq k5,k5,k5                    # warm-up chunk: compute, keep nothing, ignore check failures
-  lea r14,[rip+justret]
-  mov rbp,rax
-  mov ecx,[rbx-708]
-  sub rax,rcx
-  vpbroadcastd zmm26,eax
-  vpaddd zmm26,zmm26,zmm30
-  lea r8,[r13+64]
-  lea r15,[rip+3f]
-  jmp r11
-3:
-  kxnorq k5,k5,k5
-  lea r14,[rip+fail]
-  mov rax,[r13]
-  vpbroadcastd zmm26,eax
-  vpaddd zmm26,zmm26,zmm30
-  mov rbp,[r13+8]
-  mov r8,[r13+16]
-  lea r15,[rip+4f]
-  jmp r11
-4:
-  mov [r13+32],r8                   # where this range's output ended
-  vmovdqu32 [r13+64],zmm28
-  vmovdqu32 [r13+128],zmm29
+  jmp dojob
+wdone:
   lock dec dword ptr [rip+done]
   jnz wloop
   mov eax,202                       # futex(&done, WAKE|PRIVATE, 1)
@@ -506,6 +679,9 @@ wloop:
   syscall
   jmp wloop
 
+softfail:                           # a check failed during a speculative pass: remember, carry on
+  mov dword ptr [rip+f_soft],1
+  ret
 justret:
   ret
 fail:                               # a runtime check failed; return address identifies the stencil
@@ -540,25 +716,32 @@ nthreads: .long 1
 started:  .long 0
 seq:      .long 0
 done:     .long 0
+j_mode:   .long 0
+f_soft:   .long 0
+f_probe:  .long 0
+          .long 0
 frame:    .quad 0
 stksize:  .quad 0
+wbase:    .quad 0
 j_head:   .quad 0
 j_rdi:    .quad 0
 j_n:      .quad 0
 f_stride: .quad 0
 f_bs:     .quad 0
 f_per:    .quad 0
-f_lo:     .quad 0
-f_hi:     .quad 0
-f_r8:     .quad 0
 f_ret:    .quad 0
-f_r8end:  .quad 0
+f_cont:   .quad 0
+f_r13:    .quad 0
+f_r8in:   .quad 0
+f_blk:      .quad 0x4000000000000000   # elements per block: plain lines (everything)
+f_blkscan:  .quad 0x400000             #   lines with scans
+f_blkprobe: .quad 0x10000              #   their first, probing, block
+f_blkout:   .quad 0x400000             #   bytes of output per block
   .balign 64
-scratch:  .fill 64,1,0
+f_a28:    .fill 64,1,0
+f_a29:    .fill 64,1,0
   .balign 64
-wparams:  .fill 192*16,1,0          # per worker: lo, hi, out ptr, last seq | sum acc | max acc
-  .balign 64
-  .fill 64,1,0
+  .fill 128,1,0                     # runtime variables [rbx-768 .. rbx-640)
   .fill 512,1,0
   .long 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
   .fill 20,1,0

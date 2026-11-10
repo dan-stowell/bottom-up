@@ -45,6 +45,7 @@ SETUP = """
   mov dword ptr [rbx-672],1
   mov dword ptr [rbx-704],0
   mov dword ptr [rbx-708],16
+  mov dword ptr [rbx-712],0
   xor eax,eax
   vpbroadcastd zmm27,r12d
   vmovdqa32 zmm26,zmm30
@@ -139,10 +140,10 @@ for d in range(1, 9):
         for sh in (15, 14, 12, 8):
             t += f"  valignd zmm24,zmm{r},zmm25,{sh}\n  {op} zmm{r},zmm{r},zmm24\n"
         return t + f"  {op} zmm{r},zmm{r},zmm{carry}\n  valignd zmm24,zmm{r},zmm{r},15\n  vpbroadcastd zmm{carry},xmm24"
-    st(KW['scan'], d, scan('vpaddd', '  vpxord zmm25,zmm25,zmm25', 16 + r), pre=f'  vpxord zmm{16+r},zmm{16+r},zmm{16+r}\n' + VETO)
-    st(KW['scanmax'], d, scan('vpmaxsd', '  vpslld zmm25,zmm31,31', 8 + r), pre=f'  vpslld zmm{8+r},zmm31,31\n' + VETO)
+    st(KW['scan'], d, scan('vpaddd', '  vpxord zmm25,zmm25,zmm25', 16 + r), pre=f'  vpxord zmm{16+r},zmm{16+r},zmm{16+r}\n  or dword ptr [rbx-712],{1 << r}')
+    st(KW['scanmax'], d, scan('vpmaxsd', '  vpslld zmm25,zmm31,31', 8 + r), pre=f'  vpslld zmm{8+r},zmm31,31\n  or dword ptr [rbx-712],{1 << (8 + r)}')
     st(KW['prev'], d, f"  valignd zmm24,zmm{r},zmm{16+r},15\n  vmovdqa32 zmm{16+r},zmm{r}\n  vmovdqa32 zmm{r},zmm24",
-       pre=f'  vpxord zmm{16+r},zmm{16+r},zmm{16+r}')
+       pre=f'  vpxord zmm{16+r},zmm{16+r},zmm{16+r}\n  or dword ptr [rbx-712],{1 << (16 + r)}')
     if d <= 7: st(KW['dup'], d, f"  vmovdqa32 zmm{d},zmm{r}")
     if d <= 7: st(KW['idx'], d, f"  vmovdqa32 zmm{d},zmm26")       # lane indices i..i+15
     st(GATHER, d, f"  lea rcx,[rbx+{DISP}]" + bounds(r) + f"""
@@ -248,6 +249,10 @@ st(KW['halt'], 1, LOOPEND + "\n  cmp r12,1" + failif('e') + """
   vmovd edi,xmm0
   test edi,edi
   jz 3f
+  test dil,dil                      # the exit status is the low byte; never report success
+  jnz 4f
+  mov edi,1
+4:
   mov eax,231
   syscall
 3:""")
@@ -260,6 +265,7 @@ SETUPB = """
   mov dword ptr [rbx-672],1
   mov dword ptr [rbx-704],0
   mov dword ptr [rbx-708],64
+  mov dword ptr [rbx-712],0
   xor eax,eax
 """
 LOOPHEADB = """
@@ -318,7 +324,7 @@ for d in range(1, 9):
   vpsllq zmm25,zmm{r},8
   vpsrlq zmm24,zmm24,56
   vmovdqa64 zmm{16+r},zmm{r}
-  vporq zmm{r},zmm25,zmm24""", pre=f'  vpxord zmm{16+r},zmm{16+r},zmm{16+r}')
+  vporq zmm{r},zmm25,zmm24""", pre=f'  vpxord zmm{16+r},zmm{16+r},zmm{16+r}\n  or dword ptr [rbx-712],{1 << (16 + r)}')
     # 256-entry table lookup: the prologue narrows the i32 table to bytes once; the body is two vpermi2b
     st(TABLEB, d, f"""  lea rcx,[rbx+{DISP}]
   mov rsi,[rcx+16]

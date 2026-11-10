@@ -2,9 +2,10 @@
 
 REPORT.md ends with the Strand compiler *slower* than scalar C. This file is the follow-up
 question: is there a class of programs for which this model is simply the right tool?
-Short answer: **yes — single-pass map / filter / reduce programs with local context — and
-there it is 6-10x scalar C and 2-10x `gcc -O3 -march=native`, limited by the kernel's I/O
-path rather than by compute.** Everything here is measured on the machine in HARDWARE.md;
+Short answer: **yes — single-pass map / filter / reduce / translate programs with local
+context. There it is 5-12x scalar C; against `gcc -O3 -march=native` it is at least even on
+one core and 2.7-6.7x ahead wherever the loop carries a dependency; and with four cores it
+is limited by the kernel's I/O path rather than by compute.** Everything here is measured on the machine in HARDWARE.md;
 `bench/run.py` reproduces the table.
 
 ## 1. The ceiling, before building anything (`explore/ceiling.c`)
@@ -30,11 +31,12 @@ The same three programs as real Strand binaries, 256 MiB file:
 |---|---|---|---|
 | count newlines, original runtime | 20 ms | 135 ms | 1.76 GB/s |
 | after mapping stdin and streaming stdout | 21 ms | 20 ms | 6.5 GB/s |
-| + thread pool, 4 cores | | | 14 GB/s |
+| + byte lanes | | | 8.4 GB/s |
+| + thread pool, 4 cores | | | 13-14 GB/s |
 
 The generated loop was already running at ~13 GB/s. The stub copied all of stdin into fresh
-heap memory (65,553 page faults) and held all output until exit. Three runtime changes,
-none of which touched the compiler's source:
+heap memory (65,553 page faults) and held all output until exit. Four changes, none of
+which needed a new compiler pass:
 
 1. **Map the input, stream the output.** stdin is `mmap`ed when it is a file; output goes
    through a reused 256 KiB buffer flushed from inside the `out` loop.
@@ -43,50 +45,72 @@ none of which touched the compiler's source:
    line calls a thread pool in the stub, whose workers jump into the *same* loop body with
    their own index range. `prev` stays parallel through a one-chunk warm-up that computes
    but stores nothing; sums and maxima are combined; output is produced in ordered blocks.
+   The compiler's source did not change for this: it is all stencils and stub.
 3. **Streaming filters.** `vals mask outif` compresses straight into the output stream; in
    the pool each thread fills its own region and the regions are written in order.
+4. **Byte lines.** A `bytes` lead runs its line on 64 unsigned byte lanes: byte arithmetic,
+   `prev`, `sel`, 256-entry table lookup (two `vpermi2b`), `vpcompressb` filters,
+   `vpsadbw` sums. Deliberately small: streaming lines only, no named byte vectors. In the
+   compiler it is one table (`BYTEOF[class]`) and three lines of Strand.
 
 ## 3. The map (`bench/run.py 256`)
 
 Whole processes, 256 MiB from the page cache, output to /dev/null, best of 5, GB/s.
-"gcc -O3" is `-O3 -march=native` on the same C source as "scalar C" (`bench/base.c`).
+"gcc -O3" is `-O3 -march=native` on the same C source as "scalar C" (`bench/base.c`);
+both C columns are single-threaded. Outputs of all three are checked identical.
 
-| program | shape | scalar C | gcc -O3 | Strand 1 core | Strand 4 cores | Strand 8 vCPUs | best vs scalar | best vs gcc -O3 |
-|---|---|---|---|---|---|---|---|---|
-| lines | reduce | 1.47 | 5.86 | 5.75 | 12.99 | 13.20 | 9.0x | 2.3x |
-| words | prev + reduce | 1.17 | 1.16 | 5.03 | 9.61 | 10.48 | 9.0x | 9.0x |
-| sum | reduce | 2.22 | 6.09 | 7.02 | 12.33 | 13.14 | 5.9x | 2.2x |
-| pairs ("th") | prev + reduce | 1.14 | 1.14 | 4.52 | 9.49 | 9.96 | 8.7x | 8.7x |
-| nonascii | reduce | 1.56 | 5.85 | 5.64 | 11.29 | 11.32 | 7.3x | 1.9x |
-| upper | map | 1.37 | 6.25 | 3.91 | 8.83 | 13.00 | 9.5x | 2.1x |
-| rot13 | map | 1.05 | 4.57 | 2.93 | 8.34 | 9.70 | 9.2x | 2.1x |
-| letters | filter | 1.40 | 1.39 | 3.39 | 10.29 | 10.18 | 7.3x | 7.4x |
-| maxline | scan + reduce | 1.22 | 0.83 | 2.82 | 2.80 | 2.77 | 2.3x | 3.4x |
-| sum4 | reduce (i32) | 5.53 | 8.33 | 8.96 | 14.88 | 19.59 | 3.5x | 2.4x |
-| sumpos4 | map + reduce (i32) | 4.15 | 8.29 | 8.71 | 14.60 | 17.00 | 4.1x | 2.1x |
-| maxgap4 | prev + reduce (i32) | 3.12 | 4.01 | 8.95 | 16.45 | 19.27 | 6.2x | 4.8x |
-| scale4 | map (i32) | 3.84 | 7.25 | 7.03 | 12.44 | 13.55 | 3.5x | 1.9x |
-| filter4 | filter (i32) | 3.89 | 3.90 | 7.40 | 12.15 | 13.80 | 3.6x | 3.5x |
-| prefix4 | scan (i32) | 3.86 | 5.01 | 6.56 | 6.41 | 6.01 | 1.7x | 1.3x |
+| program | shape | scalar C | gcc -O3 | Strand 1 core | Strand 4 cores | Strand 8 vCPUs | 1 core vs gcc -O3 | best vs scalar | best vs gcc -O3 |
+|---|---|---|---|---|---|---|---|---|---|
+| lines | reduce | 1.46 | 6.01 | 8.35 | 10.47 | 13.98 | 1.4x | 9.6x | 2.3x |
+| lines32 | the same on dword lanes | 1.48 | 5.98 | 5.91 | 11.61 | 13.17 | 1.0x | 8.9x | 2.2x |
+| words | prev + reduce | 1.16 | 1.16 | 7.77 | 14.08 | 13.88 | 6.7x | 12.2x | 12.1x |
+| sum | reduce | 2.31 | 6.00 | 8.56 | 10.64 | 11.58 | 1.4x | 5.0x | 1.9x |
+| pairs ("th") | prev + reduce | 1.15 | 1.15 | 7.53 | 10.93 | 12.51 | 6.6x | 10.9x | 10.9x |
+| nonascii | reduce | 1.61 | 5.96 | 7.83 | 12.33 | 12.68 | 1.3x | 7.9x | 2.1x |
+| upper | map | 1.36 | 6.63 | 6.04 | 11.12 | 11.76 | 0.9x | 8.6x | 1.8x |
+| rot13 | map | 1.05 | 4.81 | 5.29 | 12.46 | 12.23 | 1.1x | 11.8x | 2.6x |
+| swapcase | table lookup | 2.38 | 2.38 | 6.45 | 12.05 | 12.63 | 2.7x | 5.3x | 5.3x |
+| letters | filter | 1.39 | 1.40 | 6.15 | 12.01 | 13.31 | 4.4x | 9.6x | 9.5x |
+| maxline | scan + reduce | 1.22 | 0.83 | 2.84 | 2.81 | 2.87 | 3.4x | 2.3x | 3.5x |
+| sum4 | reduce (i32) | 5.47 | 8.22 | 8.91 | 15.29 | 14.73 | 1.1x | 2.8x | 1.9x |
+| sumpos4 | map + reduce (i32) | 4.13 | 8.04 | 8.61 | 14.49 | 14.13 | 1.1x | 3.5x | 1.8x |
+| maxgap4 | prev + reduce (i32) | 3.14 | 4.00 | 8.93 | 16.84 | 19.95 | 2.2x | 6.4x | 5.0x |
+| scale4 | map (i32) | 3.87 | 7.34 | 7.16 | 14.80 | 16.10 | 1.0x | 4.2x | 2.2x |
+| filter4 | filter (i32) | 3.91 | 3.91 | 7.32 | 18.06 | 15.48 | 1.9x | 4.6x | 4.6x |
+| prefix4 | scan (i32) | 3.91 | 5.06 | 6.42 | 6.30 | 6.48 | 1.3x | 1.7x | 1.3x |
 
-Each Strand program is one or two lines, e.g. `input 32 > dup prev 1 ^ & $W` (count words)
-and `input dup 97 >= over 122 <= & outif` (keep lowercase letters).
+The programs, in full:
+
+```
+bytes 32 > dup prev 1 ^ & $W                         # words: a non-blank whose predecessor is blank
+bytes dup 97 >= over 122 <= & outif                  # letters: keep a..z
+bytes :c 97 >= c 122 <= & c 32 - c sel out           # upper
+~256 :i 223 & :u 65 >= u 90 <= & 32 * i ^ >t         # swapcase: build a 256-entry table ...
+bytes @t out                                         #           ... and translate through it
+input4 dup prev - ^M                                 # maxgap4: largest increase between neighbours
+input4 dup 0 > outif4                                # filter4: keep the positive numbers
+```
 
 ## 4. Reading the map
 
 **The sweet spot** is a single pass in which each output element depends on a bounded
-window of input: maps, reductions, filters, and anything built from `prev`. There Strand is
-on one core already 3-5x scalar C on bytes, and it scales to the machine. The largest
-margins over an optimising C compiler are exactly where C's loop has a carried dependency
-or a data-dependent output position (`words`, `pairs`, `letters`, `filter4`, `maxgap4`):
-gcc cannot vectorise those at all, so the scalar and -O3 columns are identical.
+window of input: maps, reductions, filters, table lookups, and anything built from `prev`.
+On **one core** Strand matches or beats `gcc -O3 -march=native` on every row (one tie),
+and by 2.7-6.7x wherever C's loop has a carried dependency, a data-dependent output
+position or a table lookup (`words`, `pairs`, `letters`, `swapcase`, `maxgap4`,
+`filter4`) — the auto-vectoriser cannot touch those, so the two C columns are identical.
+With the pool it reaches 5-12x scalar C.
 
 **The I/O floor.** `explore/iotest.c`: on this VM the kernel needs 12-20 ms just to make a
-256 MiB cached file accessible (map + fault + unmap, or copy), i.e. 13-21 GB/s. Four cores
-of Strand sit on that floor; eight vCPUs add nothing (the in-memory ceiling test shows the
-same, so there are probably four physical cores).
+256 MiB cached file accessible (map + fault + unmap, or copy), i.e. 13-21 GB/s. Strand hits
+that with two to four cores; eight vCPUs add nothing (the in-memory ceiling test shows the
+same, so there are probably four physical cores). Past this point the numbers measure the
+kernel, not Strand.
 
-**Weak: running sums.** `prefix4` and `maxline` win by 1.3-3.4x and do not scale: a scan's
+**Byte lanes were worth 1.3-1.8x on one core** (`lines` vs `lines32`: 8.35 vs 5.91) and
+nothing at four, exactly as the ceiling test predicted.
+
+**Weak: running sums.** `prefix4` and `maxline` win by 1.3-3.5x and do not scale: a scan's
 carry is a true dependency, the in-register scan is only ~2x a scalar loop (HARDWARE.md),
 and scans veto the thread pool.
 
@@ -95,7 +119,8 @@ histograms and anything else that needs scatter-*add*; data-dependent control fl
 (parsing nested structure, searching with early exit); pointer-chasing. And, as REPORT.md
 shows, *join-shaped* work — tokens looking each other up, names — is expressible through
 gather/scatter but those cost scalar-loop prices on this CPU, which is why the compiler
-itself is not in the sweet spot.
+itself is not in the sweet spot. Nor can a line produce two reductions, so `wc` proper is
+two passes.
 
 ## 5. Negative results and mistakes along the way
 
@@ -111,6 +136,7 @@ itself is not in the sweet spot.
 - **A benchmark regression that was not one**: the 64-copies-of-the-compiler input grew by
   30% because the stub (embedded in every copy) grew. Compare against C on the same file.
 - **Eight vCPUs are not better than four** for anything here.
-- **Not done**: byte lanes (ceiling says up to 2x on one core, little at the I/O floor);
-  parallel scans; parallel compress-to-memory; reading with `pread` per thread (iotest
-  says ~1.5x under the mmap floor at 4 threads).
+- **Not done**: parallel scans (the one shape that does not scale); several reductions in
+  one line; byte lanes for anything but streaming lines (so the compiler's own lexer still
+  runs on dword lanes); parallel compress-to-memory; reading with `pread` per thread
+  (iotest says ~1.5x under the mmap floor at 4 threads).
