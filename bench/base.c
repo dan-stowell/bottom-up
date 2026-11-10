@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
+#include "xlat.h"
 #define BLK (1 << 16)
 static uint8_t in[BLK]; static uint8_t out[BLK * 4 + 64];
 static void put(const void *p, size_t n) { const char *c = p; while (n) { ssize_t w = write(1, c, n); if (w <= 0) _exit(1); c += w; n -= w; } }
@@ -28,6 +29,8 @@ static void put(const void *p, size_t n) { const char *c = p; while (n) { ssize_
 #define P_csv 19
 #define P_idents 20
 #define P_strings 21
+#define P_xlat 22
+#define P_json 23
 static uint8_t ISW[256];
 int main(void) {
   for (int c = 0; c < 256; c++) ISW[c] = (c >= '0' && c <= '9') || ((c | 32) >= 'a' && (c | 32) <= 'z') || c == '_';
@@ -58,8 +61,10 @@ int main(void) {
     for (ssize_t i = 0; i < n; i++) { uint8_t c = in[i]; int m = (c >= 97) & (c <= 122); int x = c - 97 + 13; x -= (x >= 26) * 26; out[i] = m ? x + 97 : c; }
     no = n;
 #elif K == P_swapcase
-    { static uint8_t tab[256]; if (!tab[1]) for (int i = 0; i < 256; i++) { int u = i & 223; tab[i] = i ^ (((u >= 65) & (u <= 90)) * 32); }
-      for (ssize_t i = 0; i < n; i++) out[i] = tab[in[i]]; }
+    for (ssize_t i = 0; i < n; i++) { uint8_t c = in[i]; int u = c & 223; out[i] = c ^ (((u >= 65) & (u <= 90)) * 32); }   // arithmetic, not a table: this vectorises (second audit)
+    no = n;
+#elif K == P_xlat
+    for (ssize_t i = 0; i < n; i++) out[i] = XLAT[in[i]];
     no = n;
 #elif K == P_maxline
     for (ssize_t i = 0; i < n; i++) { if (in[i] == 10) run = 0; else { run++; if ((int32_t)run > mx) mx = run; } }
@@ -96,6 +101,10 @@ int main(void) {
       switch (prev) { case 0: if (c == '#') prev = 1; else if (c == '"') prev = 2; break; case 1: if (c == '\n') prev = 0; break;
                       case 2: if (c == '"') prev = 0; else if (c == '\\') prev = 3; break; default: prev = 2; }
       acc += (prev == 2) & (was == 0); }
+#elif K == P_json         // the structural characters of JSON text: { } [ ] : , outside strings
+    for (ssize_t i = 0; i < n; i++) { uint8_t c = in[i];
+      switch (prev) { case 0: if (c == '"') prev = 1; break; case 1: if (c == '"') prev = 0; else if (c == '\\') prev = 2; break; default: prev = 1; }
+      out[no] = c; no += (prev == 0) & ((c == '{') | (c == '}') | (c == '[') | (c == ']') | (c == ':') | (c == ',')); }
 #elif K == P_csv
     for (ssize_t i = 0; i < n; i++) { uint8_t c = in[i]; prev ^= c == '"'; acc += ((c == ',') | (c == '\n')) & !prev; }
 #endif
@@ -106,7 +115,7 @@ int main(void) {
   }
 #if K == P_maxline || K == P_maxgap4
   put(&mx, 4);
-#elif K != P_swapcase && K != P_upper && K != P_rot13 && K != P_letters && K != P_scale4 && K != P_filter4 && K != P_prefix4 && K != P_strip
+#elif K != P_swapcase && K != P_xlat && K != P_json && K != P_upper && K != P_rot13 && K != P_letters && K != P_scale4 && K != P_filter4 && K != P_prefix4 && K != P_strip
   put(&acc, 4);
 #endif
   return 0;

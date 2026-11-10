@@ -12,6 +12,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "xlat.h"
 // (macros, not an enum: they are compared by the preprocessor)
 #define P_lines 1
 #define P_words 2
@@ -34,6 +35,8 @@
 #define P_csv 19
 #define P_idents 20
 #define P_strings 21
+#define P_xlat 22
+#define P_json 23
 static void put(const void *p, size_t n) { const char *c = p; while (n) { ssize_t w = write(1, c, n); if (w <= 0) _exit(1); c += w; n -= w; } }
 // Split [0,m) among the threads that actually run (not the number asked for).
 #define RANGE int T = omp_get_num_threads(), t = omp_get_thread_num(); size_t per = m / T, lo = t * per, hi = t == T - 1 ? m : lo + per
@@ -97,11 +100,8 @@ int main(void) {
   for (int t = 0; t < TT; t++) { if (!has[t]) { cur += lead[t]; if (cur > best) best = cur; }
     else { if (cur + lead[t] > best) best = cur + lead[t]; if (inner[t] > best) best = inner[t]; cur = tail[t]; if (cur > best) best = cur; } }
   int32_t mx = (int32_t)best; put(&mx, 4);
-#elif K == P_upper || K == P_rot13 || K == P_swapcase
+#elif K == P_upper || K == P_rot13 || K == P_swapcase || K == P_xlat
   uint8_t *out = malloc(BLK);
-  #if K == P_swapcase
-  static uint8_t tab[256]; for (int i = 0; i < 256; i++) { int u = i & 223; tab[i] = i ^ (((u >= 65) & (u <= 90)) * 32); }
-  #endif
   for (size_t b = 0; b < n; b += BLK) { size_t m = n - b < BLK ? n - b : BLK;
     #pragma omp parallel for schedule(static)
     for (size_t i = 0; i < m; i++) { uint8_t c = in[b + i];
@@ -109,8 +109,10 @@ int main(void) {
       out[i] = c - (((c >= 97) & (c <= 122)) << 5);
   #elif K == P_rot13
       int lower = (c >= 97) & (c <= 122); int x = c - 97 + 13; x -= (x >= 26) * 26; out[i] = lower ? x + 97 : c;
+  #elif K == P_swapcase
+      int u = c & 223; out[i] = c ^ (((u >= 65) & (u <= 90)) * 32);       // arithmetic, not a table: this vectorises (second audit)
   #else
-      out[i] = tab[c];
+      out[i] = XLAT[c];
   #endif
     }
     put(out, m); }
@@ -176,6 +178,27 @@ int main(void) {
       { start[0] = s0; for (int u = 0; u < T; u++) start[u + 1] = T > 1 ? fn[u][start[u]] : 0; }
       int s = start[t];
       for (size_t i = lo; i < hi; i++) { uint8_t c = in[b + i]; K_strip_step(s, c) o[k] = c; k += s != 1; }
+      cnt[t] = k; if (t == T - 1) start[T] = s; }
+    s0 = start[TT];
+    for (int t = 0; t < TT; t++) put(reg[t], cnt[t]); }
+#elif K == P_json
+  // the same two passes as strip for the three states of JSON text: 0 outside, 1 in a string, 2 after a backslash
+  #define J_step(s, c) switch (s) { case 0: if (c == '"') s = 1; break; case 1: if (c == '"') s = 0; else if (c == '\\') s = 2; break; default: s = 1; }
+  size_t *cnt = calloc(MT, sizeof *cnt); uint8_t **reg = malloc(MT * sizeof *reg), (*fn)[4] = calloc(MT, 4), *start = calloc(MT + 1, 1); int TT = 1, s0 = 0;
+  for (int t = 0; t < MT; t++) reg[t] = malloc(BLK + 64);
+  for (size_t b = 0; b < n; b += BLK) { size_t m = n - b < BLK ? n - b : BLK;
+    #pragma omp parallel
+    { RANGE; uint8_t *o = reg[t]; size_t k = 0;
+      #pragma omp single
+      TT = T;
+      if (T > 1) { int a = 0, b1 = 1, c2 = 2;
+        for (size_t i = lo; i < hi; i++) { uint8_t c = in[b + i]; J_step(a, c) J_step(b1, c) J_step(c2, c) }
+        fn[t][0] = a; fn[t][1] = b1; fn[t][2] = c2; }
+      #pragma omp barrier
+      #pragma omp single
+      { start[0] = s0; for (int u = 0; u < T; u++) start[u + 1] = T > 1 ? fn[u][start[u]] : 0; }
+      int s = start[t];
+      for (size_t i = lo; i < hi; i++) { uint8_t c = in[b + i]; J_step(s, c) o[k] = c; k += (s == 0) & ((c == '{') | (c == '}') | (c == '[') | (c == ']') | (c == ':') | (c == ',')); }
       cnt[t] = k; if (t == T - 1) start[T] = s; }
     s0 = start[TT];
     for (int t = 0; t < TT; t++) put(reg[t], cnt[t]); }

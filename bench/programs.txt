@@ -7,7 +7,8 @@ pairs    | text | prev+reduce   | bytes :c 104 = c prev 116 = & $C ; ~1 C + out4
 nonascii | text | reduce        | bytes 127 > $C ; ~1 C + out4
 upper    | text | map           | bytes :c 97 >= c 122 <= & c 32 - c sel out
 rot13    | text | map           | bytes :c 97 >= c 122 <= & c 84 - :x 26 >= x 26 - x sel 97 + c sel out
-swapcase | text | table lookup  | ~256 :i 223 & :u 65 >= u 90 <= & 32 * i ^ >t ; bytes @t out
+swapcase | text | map (was a table) | bytes :c 223 & :u 65 >= u 90 <= & 32 * c ^ out
+xlat     | text | table lookup  | 0 1 2 3 156 9 134 127 151 141 142 11 12 13 14 15 16 17 18 19 157 133 8 135 24 25 146 143 28 29 30 31 128 129 130 131 132 10 23 27 136 137 138 139 140 5 6 7 144 145 22 147 148 149 150 4 152 153 154 155 20 21 158 26 32 160 226 228 224 225 227 229 231 241 162 46 60 40 43 124 38 233 234 235 232 237 238 239 236 223 33 36 42 41 59 172 45 47 194 196 192 193 195 197 199 209 166 44 37 95 62 63 248 201 202 203 200 205 206 207 204 96 58 35 64 39 61 34 216 97 98 99 100 101 102 103 104 105 171 187 240 253 254 177 176 106 107 108 109 110 111 112 113 114 170 186 230 184 198 164 181 126 115 116 117 118 119 120 121 122 161 191 208 221 222 174 94 163 165 183 169 167 182 188 189 190 91 93 175 168 180 215 123 65 66 67 68 69 70 71 72 73 173 244 246 242 243 245 125 74 75 76 77 78 79 80 81 82 185 251 252 249 250 255 92 247 83 84 85 86 87 88 89 90 178 212 214 210 211 213 48 49 50 51 52 53 54 55 56 57 179 219 220 217 218 159 =t ; bytes @t out
 maxline  | text | scan+reduce   | input 10 = idx 1 + :p * scanmax p swap - ^M ; ~1 M + out4
 letters  | text | filter        | bytes dup 97 >= over 122 <= & outif
 sum4     | ints | reduce        | input4 $S ; ~1 S + out4
@@ -20,3 +21,4 @@ strip    | code | automaton+filter | ~256 :i 35 = i 34 = 2 * + i 10 = 3 * + i 92
 csv      | csv  | automaton+reduce | ~256 :i 34 = i 44 = i 10 = | 2 * + >cls ; 0 1 0 0  1 0 0 0  0 1 0 0 =q ; bytes @cls :c /q 0 = c 2 = & $N ; ~1 N + out4
 idents   | code | automaton+prev+reduce | ~256 :i 35 = i 34 = 2 * + i 10 = 3 * + i 92 = 4 * + >cls ; 0 1 2 2  1 1 2 2  2 1 0 2  0 0 2 2  0 1 3 2 =dfa ; ~256 :j 223 & :u 65 >= u 90 <= & j 48 >= j 57 <= & | j 95 = | >isw ; bytes :c @cls /dfa 0 = c @isw dup prev 1 ^ & & $N ; ~1 N + out4
 strings  | code | automaton, prev of state | ~256 :i 35 = i 34 = 2 * + i 10 = 3 * + i 92 = 4 * + >cls ; 0 1 2 2  1 1 2 2  2 1 0 2  0 0 2 2  0 1 3 2 =dfa ; bytes @cls /dfa :s 2 = s prev 0 = & $N ; ~1 N + out4
+json     | json | automaton+table+filter | ~256 :i 34 = i 92 = 2 * + >cls ; 0 1 1 0  1 0 1 0  0 2 1 0 =dfa ; ~256 :j 123 = j 125 = | j 91 = | j 93 = | j 58 = | j 44 = | >st ; bytes :c @cls /dfa 0 = c @st & c swap outif
