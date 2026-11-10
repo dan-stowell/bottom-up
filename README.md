@@ -24,7 +24,8 @@ bytes dup @cls /dfa 1 != outif                             # strip comments: 3 G
 
 | read this | for |
 |---|---|
-| [AUDIT.md](AUDIT.md) | correctness and benchmark reproduction audit (2026-11-10), including counterexamples |
+| [AUDIT.md](AUDIT.md) | current audit verdict, investigation backlog, and original correctness/benchmark review |
+| [AUDIT_FOLLOWUP.md](AUDIT_FOLLOWUP.md) | detailed review of the audit response and new automata, with fresh measurements and counterexamples |
 | [REPORT.md](REPORT.md) | what is new, what was measured, what failed, what next |
 | [SWEETSPOT.md](SWEETSPOT.md) | where this beats well-written C (filters, table lookups, small automata: 1.6-5x), where it only ties, and why |
 | [DESIGN.md](DESIGN.md) | the language and why each compiler phase disappears |

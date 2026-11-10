@@ -1,5 +1,89 @@
 # Correctness and measurement audit — November 10, 2026
 
+## Follow-up verdict after the audit response
+
+**Reviewed updated revision `17e317d`.** The original audit below concerns
+`ca01f9d`; do not read its already-fixed defects as findings about the current
+implementation. Full follow-up measurements and counterexamples are in
+`AUDIT_FOLLOWUP.md`, with evidence under `reviews/reaudit-2026-11-10/`.
+
+**There are important qualifications to the performance story, but no finding
+that invalidates the working compiler or the transition-function-scan approach.**
+The response fixes most original defects. The full updated test suite passes,
+including 3,968 pool runs; additional targeted automata/carry tests pass. All
+21 benchmarks passed their per-configuration output checks on freshly generated
+256 MiB inputs. The specified automata still beat the supplied C implementations
+by roughly **3.1–4.2× on one CPU**. Those gains are real for these implementations
+and tasks—not proof of superiority over the best possible C algorithm.
+
+### Findings that materially change the interpretation
+
+1. **“Strongest C” remains too strong.** Swapcase's table-based C loop can be
+   replaced by ordinary arithmetic that auto-vectorizes, with no intrinsics or
+   I/O changes. Strand's measured advantage over that version is
+   **1.11× / 1.63× / 1.15× on 1 / 4 / 8 CPUs**, rather than a general approximately
+   2× task advantage. This repeats the earlier distinction between beating a
+   particular source form and beating a task's strong implementation. It does
+   not disprove an advantage for genuinely arbitrary table translation.
+2. **Automatic parallelism is conditional, not guaranteed for every line.**
+   `input 1 & scan dup prev dup prev + + out4` still falls back to serial on
+   2/3/4/8 CPUs for a simple all-ones fixture. Direct execution-path
+   instrumentation confirms this; unmodified output is correct. The new
+   runtime still does not parallelize every dependent-carry pattern, and existing
+   tests can pass while the advertised optimization falls back. This qualifies
+   the programming-model/performance promise, not the semantic correctness result.
+3. **A supporting measurement is genuinely broken.** The I/O-probe race fix
+   leaves per-thread checksums unconsumed. GCC deletes all mapped-input loads
+   from its “fault-on-touch” worker. That row no longer measures the claimed
+   work. This invalidates that experiment, **not the separate main benchmark
+   table**. The hardware checker also falsely accepts `/bin/true`, and several
+   hardware conclusions still contradict their correction appendix.
+4. **The practical automata scope needs explicit limits.** The source fixture
+   is Python code, but the benchmark recognizes a simplified four-state grammar,
+   not Python syntax. For example, it treats the `#` inside a single-quoted
+   string as a comment. C and Strand agree on the toy grammar; this is not a
+   compiler bug. The gains do not establish correct general-purpose source
+   lexing at those speeds.
+
+**Bottom line:** retain the compiler's validity and the measured advantages on
+the defined filter/automaton workloads. Narrow universal claims about C,
+source-spelling independence, parallelization, and real-language lexing.
+The most important unresolved question is the size and cause of the advantage
+against stronger *task-level* alternatives, not whether the project works at all.
+
+### Further investigations worth carrying through
+
+These are proposed follow-ups, **not completed results**:
+
+- **Highest value: strengthen the task comparisons.** Include arithmetic
+  swapcase in both C baselines, a genuinely arbitrary byte-table fixture, and
+  alternative automata/CSV algorithms. Compare the repository's intrinsic C
+  prototype with Strand under identical whole-process I/O and threading.
+  Separate automatic code-generation convenience from algorithm, layout, and
+  runtime gains; do not assume the remaining gap will survive or disappear.
+- **Make successful parallel execution observable.** Add a test-only fallback
+  counter/path assertion; test chained carries, non-forgetting automata, and
+  boundary lengths. Measure fallback frequency and its performance cost, not
+  just correct final output. Distinguish insufficient carry summaries from
+  unnecessarily strict comparisons of carry state.
+- **Broaden correctness and task coverage.** Exercise all 256 possible
+  four-state transition functions and their pair compositions, plus randomized
+  cross-chunk/thread sequences. For any real-language lexer claim, define the
+  grammar and compare with an independent lexer—not just matching toy C code.
+- **Measure robustness and practical end-to-end use.** Vary input size,
+  distributions, thread counts, and output destinations; repeat timing batches
+  with uncertainty estimates. Include compile-plus-run latency for one-off
+  queries and record fixture/source/toolchain hashes.
+- **Repair, then remeasure the supporting probes.** Consume the I/O checksums;
+  make the instruction checker reject missing probes and wrong instruction
+  families; replace contradictory hardware headlines with the qualified
+  conclusions. These defects are already confirmed and do not require more
+  investigation before fixing.
+
+---
+
+## Original audit: revision ca01f9d
+
 Reviewed revision: `ca01f9d07d5bdf19d7767113740ee258e0c0ee3c`.
 File/line references below refer to that revision unless stated otherwise.
 Experiments used the project's existing VM: EPYC 9554P under KVM, eight allowed
