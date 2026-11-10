@@ -187,6 +187,9 @@ comment-heavy, data-heavy, string-heavy and dense-code inputs are all 1.7-2.7x s
 
 ## Addendum 2: the sweet spot
 
+*Superseded in part by addendum 3: the "3-4x ahead wherever the loop carries context" and
+"15% faster than the scalar C compiler" statements below did not survive the audit.*
+
 Asked where this model *does* win, I built a benchmark suite and fixed what it exposed
 (SWEETSPOT.md). The headline: single-pass map / filter / reduce / translate programs with
 local context run at 6-8 GB/s on one core and 12-20 GB/s on the machine — 3-15x scalar C,
@@ -195,3 +198,46 @@ mmap + OpenMP C wherever the loop carries context or filters. Pure maps and redu
 well-written parallel C at the kernel's I/O floor. The compiler itself, with eight vCPUs,
 is now 15% faster than the scalar C compiler on a 5 MB input, and still slower on one core.
 The cost is a hand-written runtime of ~790 instructions (SCALAR_LEDGER.md, items 15-20).
+
+## Addendum 3: after the audit
+
+An independent audit (AUDIT.md) reproduced the bootstrap, the tests and the single-CPU
+numbers, and broke the main performance explanation: with the first iteration peeled, GCC
+vectorises the `words` loop and the 3-4x lead over parallel C becomes about 1.1x. It also
+found real defects in the timing harness, the C baselines and the hardware probe. All of
+those are fixed (REVIEWS.md, review 4, point by point).
+
+**What is new since.** The question became: is there anything here a well-used C compiler
+does not also do? Measured against C baselines rebuilt to be as strong as I can make them
+without intrinsics (`bench/base_omp.c`), the answer is three classes: table translation
+(1.7-2.3x), filters (1.6-3.9x), and — added in response — **small automata** (3.2-4.1x on
+one core, 2-5x on eight CPUs). `x /t` runs a 4-state automaton over a byte line as an
+in-register scan of transition functions (a function on four states is four bytes; composing
+two is one `vpshufb`), and composes thread ranges the same way. Stripping comments from
+source text with string awareness is one line and runs at 3.1 GB/s on one core against
+0.96 for a C `switch` loop; counting identifiers outside comments and strings, 3.2 against
+0.78. As far as I know the transposed register layout for the scan (SWEETSPOT.md) is not
+from the literature; the idea of lexing by composing transition functions is Hillis and
+Steele's, and the general technique is known from data-parallel finite-state machines
+(Mytkowicz et al.) and simdjson. I did not search the literature for the layout.
+
+**What is measured** (all in SWEETSPOT.md): the 21-program table with medians and bests;
+compile latency of 0.22-0.24 ms against 66-90 ms for `gcc -O3`; five spellings of one C
+loop of which one vectorises (10x apart); the automaton prototype in C at 6.1 GB/s in
+memory against 1.2 for a switch.
+
+**What failed or was withdrawn**: the words/pairs/maxgap4 leads (baseline artefacts); the
+15% compile-time win on eight vCPUs (did not reproduce); the "I/O floor" as a bound (it is
+an observation); two hardware-probe conclusions (HARDWARE.md). Still true: the compiler
+itself is 1.3-1.5x slower than scalar C on one core.
+
+**State of the artefacts**: the compiler source is 10.3 KB of Strand plus 88.9 KB of
+generated tables; the executable is 213 KB; stage1 == stage2 == stage3 (`./build.sh` prints
+the hash). Sizes and hashes in earlier sections describe earlier revisions.
+
+**Next**, in order of expected value: (1) 8- and 16-state automata, which admit UTF-8
+validation and fuller lexers; (2) an automaton on dword lanes, so the compiler's own lexer
+becomes one line and the "compilation as a sweet-spot program" question can be asked again
+with the right primitive; (3) segmented scans and number parsing, which are scans over
+other small monoids; (4) a matched comparison against hand-vectorised C for automata and
+filters, which I expect to be a tie on speed and a large difference in source size.

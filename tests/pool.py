@@ -48,8 +48,10 @@ def gen(n, seed=1):
         s = (s * 1664525 + 1013904223) % (1 << 32); r = s >> 24
         out.append(32 if r < 40 else 10 if r < 46 else 97 + r % 26 if r < 250 else r)
     return bytes(out)
-ncpu = len(os.sched_getaffinity(0))
-cpusets = ['0-1', '0-2', '0-3', '0-%d' % (ncpu - 1)]
+allowed = sorted(os.sched_getaffinity(0)); ncpu = len(allowed)        # the CPUs we may really use, not 0..n-1
+ids = lambda k: ','.join(map(str, allowed[:k]))
+cpusets = sorted({ids(k) for k in (2, 3, 4, ncpu) if 2 <= k <= ncpu}, key=len)
+ONE = str(allowed[0])
 sizes = [64 * ncpu - 1, 64 * ncpu, 64 * ncpu + 1, 4097, 524288 + 1, 9 * (1 << 20) + 77]     # last: >2 scan blocks, >2 out blocks
 files = {}
 for n in sizes:
@@ -67,7 +69,7 @@ for name, src in PROGS.items():
     assert b.returncode == 0, (name, 'does not compile', b.returncode)
     open(exe, 'wb').write(b.stdout); os.chmod(exe, 0o755)
     for n in sizes:
-        want = run([exe], files[n], '0')
+        want = run([exe], files[n], ONE)
         if n <= 4097:
             st, out = strand.interp(src.encode(), open(files[n], 'rb').read())
             assert (st, hashlib.sha256(out).hexdigest()) == want[:2], (name, n, 'serial run disagrees with interpreter')

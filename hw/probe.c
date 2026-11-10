@@ -22,7 +22,9 @@ static volatile int three=3;
 #define OPAQ(v) __asm__ volatile(""::"x"(v):)
 
 
-T("sse2") static void p_sse2(void){ __m128i a=_mm_set1_epi32(three); sink=_mm_cvtsi128_si32(_mm_add_epi32(a,a)); }
+// Four probes are written in assembly: the compiler had turned their intrinsics into something else
+// (scalar adds, plain adc). hw/check_probe.py checks every probe against its disassembly.
+T("sse2") static void p_sse2(void){ __asm__ volatile("paddd %%xmm0,%%xmm0":::"xmm0"); sink=three; }
 T("ssse3") static void p_ssse3(void){ __m128i a=_mm_set1_epi8(three); sink=_mm_cvtsi128_si32(_mm_shuffle_epi8(a,a)); }
 T("sse4.1") static void p_sse41(void){ __m128i a=_mm_set1_epi32(three); sink=_mm_extract_epi32(_mm_mullo_epi32(a,a),1); }
 T("sse4.2") static void p_sse42(void){ sink=_mm_crc32_u64(1,2); }
@@ -30,14 +32,14 @@ T("popcnt") static void p_popcnt(void){ sink=_mm_popcnt_u64(sink|5); }
 T("pclmul") static void p_pclmul(void){ __m128i a=_mm_set1_epi32(three); sink=_mm_cvtsi128_si32(_mm_clmulepi64_si128(a,a,0)); }
 T("aes") static void p_aes(void){ __m128i a=_mm_set1_epi32(three); sink=_mm_cvtsi128_si32(_mm_aesenc_si128(a,a)); }
 T("sha") static void p_sha(void){ __m128i a=_mm_set1_epi32(three); sink=_mm_cvtsi128_si32(_mm_sha1msg1_epu32(a,a)); }
-T("avx") static void p_avx(void){ __m256 a=_mm256_set1_ps(three); sink=(uint64_t)_mm256_cvtss_f32(_mm256_add_ps(a,a)); }
-T("avx2") static void p_avx2(void){ __m256i a=_mm256_set1_epi32(three); sink=_mm256_extract_epi32(_mm256_add_epi32(a,a),5); }
+T("avx") static void p_avx(void){ __asm__ volatile("vaddps %%ymm0,%%ymm0,%%ymm0\n vzeroupper":::"xmm0"); sink=three; }
+T("avx2") static void p_avx2(void){ __asm__ volatile("vpaddd %%ymm0,%%ymm0,%%ymm0\n vzeroupper":::"xmm0"); sink=three; }
 T("fma") static void p_fma(void){ __m256 a=_mm256_set1_ps(three); sink=(uint64_t)_mm256_cvtss_f32(_mm256_fmadd_ps(a,a,a)); }
 T("f16c") static void p_f16c(void){ __m128 a=_mm_set1_ps(three); sink=_mm_cvtsi128_si32(_mm_cvtps_ph(a,0)); }
 T("bmi") static void p_bmi1(void){ sink=_tzcnt_u64(sink|8)+_blsr_u64(sink|3); }
 T("bmi2") static void p_bmi2(void){ sink=_pext_u64(sink|0xff,0xf0f0)+_pdep_u64(sink,0xf0f0)+_bzhi_u64(sink,5); }
 T("lzcnt") static void p_lzcnt(void){ sink=_lzcnt_u64(sink|1); }
-T("adx") static void p_adx(void){ unsigned long long o; sink=_addcarryx_u64(0,sink,sink,&o)+o; }
+T("adx") static void p_adx(void){ __asm__ volatile("adcx %%rax,%%rax\n adox %%rax,%%rax":::"rax","cc"); sink=three; }
 T("movbe") static void p_movbe(void){ uint64_t v=sink; sink=__builtin_bswap64(v); __asm__ volatile("movbe %0,%%rax"::"m"(v):"rax"); }
 T("avx512f") static void p_512f(void){ __m512i a=_mm512_set1_epi32(three); sink=_mm512_reduce_add_epi32(_mm512_add_epi32(a,a)); }
 T("avx512f") static void p_512f_k(void){ __m512i a=_mm512_set1_epi32(three); __mmask16 k=_mm512_cmpeq_epi32_mask(a,a); sink=k; }
@@ -122,7 +124,7 @@ A512 static void k_prefix(void){ __m512i carry=_mm512_setzero_si512(), z=_mm512_
   for(int i=0;i<N;i+=16){ __m512i x=_mm512_load_si512(A+i);
     x=_mm512_add_epi32(x,_mm512_alignr_epi32(x,z,15)); x=_mm512_add_epi32(x,_mm512_alignr_epi32(x,z,14)); x=_mm512_add_epi32(x,_mm512_alignr_epi32(x,z,12)); x=_mm512_add_epi32(x,_mm512_alignr_epi32(x,z,8));
     x=_mm512_add_epi32(x,carry); carry=_mm512_permutexvar_epi32(last,x); _mm512_store_si512(C+i,x);} }
-static void __attribute__((noinline,optimize("no-tree-vectorize"))) k_prefix_scalar(void){ int32_t s=0; for(int i=0;i<N;i++){ s+=A[i]; C[i]=s; } }
+static void __attribute__((noinline,optimize("no-tree-vectorize"))) k_prefix_scalar(void){ uint32_t s=0; for(int i=0;i<N;i++){ s+=(uint32_t)A[i]; C[i]=(int32_t)s; } }
 A512 static void k_prefix_xor_clmul(void){ uint64_t carry=0; uint64_t *a=(uint64_t*)A,*c=(uint64_t*)C; for(int i=0;i<N/2;i++){ __m128i v=_mm_clmulepi64_si128(_mm_cvtsi64_si128(a[i]),_mm_set1_epi8(-1),0); uint64_t r=_mm_cvtsi128_si64(v)^carry; c[i]=r; carry=(uint64_t)((int64_t)r>>63);} }
 A512 static void k_permb(void){ __m512i idx=_mm512_load_si512(BB); for(int i=0;i<N*4;i+=64) _mm512_store_si512((uint8_t*)C+i,_mm512_permutexvar_epi8(idx,_mm512_load_si512(BA+i))); }
 A512 static void k_pshufb(void){ __m512i idx=_mm512_load_si512(BB); for(int i=0;i<N*4;i+=64) _mm512_store_si512((uint8_t*)C+i,_mm512_shuffle_epi8(_mm512_load_si512(BA+i),idx)); }

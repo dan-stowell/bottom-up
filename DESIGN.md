@@ -9,7 +9,9 @@ look like for its own compiler to contain no loops and no branches?**
 ## The bet
 
 A Strand program is a straight-line list of lines. There is no `if`, no `while`, no
-recursion, no functions. Every line is one fused SIMD loop over a flat array of `i32`.
+recursion, no functions. Every line is one fused SIMD loop over a flat array of `i32`
+(or, on a byte line, of bytes). "No loops and no branches" describes the *source language*;
+the generated code and the runtime have both, counted in SCALAR_LEDGER.md.
 So a compiler written in Strand is *by construction* a fixed sequence of data-parallel
 passes: the only loops that exist are the ones the code generator wraps around each line.
 (Branches do exist in the *generated* code: loop back-edges, runtime safety checks, the
@@ -58,9 +60,10 @@ input 64 > $N        # vector line: lead `input`, ops, sink `$N` (sum into scala
 | `end` | sink: discard the result (the line's work was its tees) |
 | `input4` | lead only: stdin as little-endian 32-bit integers |
 | `bytes` | lead only: stdin as bytes on **64 unsigned byte lanes** — a *byte line* (below) |
+| `/abc` | byte lines only: run the 4-state automaton `abc` over the line; each element becomes the state after reading it (below) |
 | `outif`, `outif4` | sink: `vals mask outif` appends the selected values to stdout (a streaming filter) |
 | `out`, `out4` | sink: append to stdout as bytes / as little-endian dwords |
-| `halt` | sink (scalar line): if nonzero, exit with that status and no output |
+| `halt` | sink (scalar line): if nonzero, exit with that status at once. Output is streamed, so whatever earlier lines wrote may already be on stdout |
 | `1 2 "txt" =abc` | data line: `abc` is a constant vector (numbers, string bytes) |
 
 ### Byte lines
@@ -72,14 +75,41 @@ vectors do not exist on a byte line except as chunk-local tees. In the compiler 
 table: a token on a byte line takes class `BYTEOF[class]`, and classes with no byte meaning
 have no stencil, so misuse is the ordinary "no stencil at this depth" error.
 
+### Automata
+
+`x /t` is the one way to carry *state* along a line. `t` is a table of next states:
+`state' = t[(x & 15) * 4 + state] & 3`, four states, up to sixteen input classes, starting
+in state 0; entries past the end of `t` are 0. The result is the state after each element.
+
+```
+~256 :i 35 = i 34 = 2 * + i 10 = 3 * + i 92 = 4 * + >cls     # byte -> class: other # " newline \
+0 1 2 2  1 1 2 2  2 1 0 2  0 0 2 2  0 1 3 2 =dfa             # states: code, comment, string, escape
+bytes dup @cls /dfa 1 != outif                               # strip comments, respecting strings
+```
+
+A state machine is the textbook sequential loop. Here it is a *scan of transition
+functions*: a function on four states is four bytes, so it fits a dword lane and composing
+two is one `vpshufb`; the chunk's 64 functions are composed by a short chain and a
+Kogge-Stone scan, in registers, with no loop (SWEETSPOT.md has the layout). Composition is
+associative, so thread ranges combine the same way running sums do. Like every other
+carry in the language, it is a scan over a small monoid; that is the property the whole
+design leans on.
+
+### Failure and output
+
+A runtime check that fails exits with status 99, `halt` with its own status. Output is
+streamed in 256 KiB pieces, so a failing program may already have written part of its
+output. The interpreter returns no output on failure and the tests compare only the status
+in that case; the streaming behaviour is the definition (AUDIT.md, defect 5).
+
 ### What runs on all cores
 
 Nothing in the language says "parallel". At run time the lead token's prologue marks its
 line splittable and any token that cannot be split (compress into memory, scatter) vetoes
 in its own prologue. A big splittable line calls a thread pool in the startup stub; the
 workers jump into the *same* loop body with their own index range. `prev` is made right by
-a one-chunk warm-up that stores nothing; running sums and maxima by a dry pass, derived
-carries, a real pass and a verification, with a serial fallback (SWEETSPOT.md). The
+a one-chunk warm-up that stores nothing; running sums, maxima and automata by a dry pass,
+derived carries, a real pass and a verification, with a serial fallback (SWEETSPOT.md). The
 compiler's source did not change for any of this.
 
 ## What the design makes disappear

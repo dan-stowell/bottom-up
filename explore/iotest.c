@@ -10,9 +10,9 @@
 #include <time.h>
 #include <unistd.h>
 static double now(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec*1e3+t.tv_nsec*1e-6; }
-static unsigned char*base; static size_t per; static int fd; static volatile unsigned long sink;
-static void* touch(void*a){ long t=(long)a; unsigned long s=0; for(size_t i=0;i<per;i+=4096) s+=base[t*per+i]; sink+=s; return 0; }
-static void* rd(void*a){ long t=(long)a; static __thread unsigned char buf[1<<18]; unsigned long s=0; for(size_t o=0;o<per;o+=sizeof buf){ ssize_t n=pread(fd,buf,sizeof buf,t*per+o); s+=buf[0]+n; } sink+=s; return 0; }
+static unsigned char*base; static size_t per; static int fd; static unsigned long sums[16];   // one result per thread: no shared updates
+static void* touch(void*a){ long t=(long)a; unsigned long s=0; for(size_t i=0;i<per;i+=4096) s+=base[t*per+i]; sums[t]=s; return 0; }
+static void* rd(void*a){ long t=(long)a; static __thread unsigned char buf[1<<18]; unsigned long s=0; for(size_t o=0;o<per;o+=sizeof buf){ ssize_t n=pread(fd,buf,sizeof buf,t*per+o); s+=buf[0]+n; } sums[t]=s; return 0; }
 static double par(void*(*f)(void*),int T,size_t n){ pthread_t th[16]; per=n/T; double t0=now(); for(long t=0;t<T;t++) pthread_create(&th[t],0,f,(void*)t); for(int t=0;t<T;t++) pthread_join(th[t],0); return now()-t0; }
 int main(int c,char**v){ fd=open(v[1],O_RDONLY); struct stat st; fstat(fd,&st); size_t n=st.st_size; int Ts[]={1,2,4,8};
   printf("| strategy | 1 thread | 2 | 4 | 8 |\n|---|---|---|---|---|\n");

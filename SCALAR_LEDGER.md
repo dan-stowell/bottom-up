@@ -92,3 +92,22 @@ comparable with the tables above; the ratio to C on the same input is):
 |---|---|---|---|
 | its own source, 80 KB | 2.94 ms | 4.38 ms (1.49x slower) | same (below the fork threshold) |
 | 5.2 MB (64 renamed copies) | 273 ms | 351 ms (1.29x slower) | 237 ms (**1.15x faster**) |
+
+## Addendum 2: what automata added (after the audit)
+
+| # | island | size / cost | why |
+|---|---|---|---|
+| 21 | **The stub grew again**: constants for the automaton stencils, a dry-pass exit, derivation of carries one chunk before each range, and a warm-up chunk at the start of every real pass. | about 900 instructions, 5,376 bytes (was 787 and 4,480), copied into every binary; per-thread blocks are 8 KiB | Composing ranges and making dependent `prev` carries exact are thread-pool protocol. |
+| 22 | **One data-independent branch per chunk in the automaton stencil** ("is this a dry pass and am I the last carry on the line?"), and a second copy of the loop-end code behind it. | 2 instructions per chunk when not taken | The dry pass needs only the carry; skipping the rest of the loop body roughly halves its cost. |
+| 23 | **The automaton's table is repacked by a scalar-indexed prologue** (four masked loads, four narrowing stores, once per line). | ~25 instructions per line execution | The table is an ordinary i32 vector; the stencil wants 16 dwords of 4 bytes. |
+| 24 | **Automaton lines use 14 scratch registers** (zmm8-13, zmm24-26, k1-k4) and exist only on byte lines, because zmm8-15 are the running-max carries on dword lines. | n/a | The register plan had no spare vector registers. |
+
+The automaton stencil itself is 51 instructions and 329 bytes per stack depth, with no loop
+and no data-dependent branch. Its instruction *encodings* come from GNU as like every other
+stencil (item 8).
+
+Corrections to earlier text in this file, from AUDIT.md: the statement that only eager-mode
+fuzzing covers the runtime predates `tests/pool.py` (32 programs, 3,968 runs at production
+block sizes, compared with the same binary on one CPU); the 4 GiB cumulative output limit
+described earlier is not enforced by the streaming runtime; the input limit is
+`0x7fe00000` bytes exactly; and byte lines are not `i32` lines.

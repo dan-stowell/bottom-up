@@ -65,6 +65,31 @@ Frequency: a scalar spin loop takes the same time (ratio 0.998) immediately afte
 continuous zmm multiplies. **No AVX-512 frequency penalty**, so there is no reason to avoid
 zmm in short bursts.
 
+## Corrections after the audit (2026-11-10)
+
+AUDIT.md, defect 3, found that parts of this file claimed more than `hw/probe.c` measured.
+
+- **Four "executes" probes did not contain their instruction.** The compiler had turned the
+  SSE2, AVX and AVX2 intrinsics into other code and the ADX probe into a plain `adc`. They
+  are now written in assembly, `hw/check_probe.py` checks every probe against its
+  disassembly, and the four still execute. (The audit found two; the check found four.)
+- **The scalar prefix-sum baseline overflowed a signed integer** (undefined behaviour). It
+  now uses unsigned arithmetic; the figure did not move (0.42 against 0.85 ticks/element
+  before, 6.7 per vector against 1.7 per element now).
+- **"64 MiB table, random" is mislabelled.** That gather uses the same 1,024 indices every
+  repetition, so it touches at most 1,024 cache lines below 16 MiB. It measures a gather
+  across many pages, not a memory-bound traversal of 64 MiB.
+- **"40x worse than vpermi2b"** compares two different kernels (a 128-entry byte table
+  against a widened dword gather with four times the output). It is the cost ratio of those
+  two representations, not of one task done two ways.
+- **Costs are for load + operation + store kernels**, not instruction latencies. "Gather
+  costs what a scalar load loop costs" is true of the kernel totals and does not show that
+  gather lanes are serialised inside the CPU.
+- **"No AVX-512 frequency penalty"** rests on one before/after comparison of a scalar loop.
+  It is an observation about that run on this VM.
+- The audit's rerun reproduced most rows closely; two differed: `vpcompressb` to a register
+  8.7 (4.9 here) and `vpscatterdd` 27.6 (20.8 here).
+
 ## What this means for the design
 
 1. **Zen 4's AVX-512 is a better instruction set, not a wider datapath.** zmm costs exactly

@@ -40,7 +40,9 @@ static void put(const void *p, size_t n) { const char *c = p; while (n) { ssize_
 enum { BLK = 4 << 20 };
 #define K_strip_step(s, c) switch (s) { case 0: if (c == '#') s = 1; else if (c == '"') s = 2; break; case 1: if (c == '\n') s = 0; break; \
                                         case 2: if (c == '"') s = 0; else if (c == '\\') s = 3; break; default: s = 2; }
+static uint8_t ISW[256];
 int main(void) {
+  for (int c = 0; c < 256; c++) ISW[c] = (c >= '0' && c <= '9') || ((c | 32) >= 'a' && (c | 32) <= 'z') || c == '_';
   struct stat st; if (fstat(0, &st)) return 1; size_t n = st.st_size;
   const uint8_t *in = n ? mmap(0, n, PROT_READ, MAP_PRIVATE, 0, 0) : (const uint8_t *)""; if (in == MAP_FAILED) return 1;
   size_t n4 = n / 4; const int32_t *w = (const int32_t *)in; (void)n4; (void)w;
@@ -190,9 +192,9 @@ int main(void) {
     { start[0] = 0; for (int u = 0; u < T; u++) start[u + 1] = T > 1 ? fn[u][start[u]] : 0; }
     int s = start[t];
   #if K == P_idents
-    int pw = 0; if (lo) { uint8_t c = in[lo - 1]; pw = (c >= '0' && c <= '9') || ((c | 32) >= 'a' && (c | 32) <= 'z') || c == '_'; }
+    int pw = 0; if (lo) { uint8_t c = in[lo - 1]; pw = ISW[c]; }
     for (size_t i = lo; i < hi; i++) { uint8_t c = in[i]; K_strip_step(s, c)
-      int wc = (c >= '0' && c <= '9') || ((c | 32) >= 'a' && (c | 32) <= 'z') || c == '_';
+      int wc = ISW[c];
       acc += wc & !pw & (s == 0); pw = wc; }
   #else
     for (size_t i = lo; i < hi; i++) { uint8_t c = in[i]; int was = s; K_strip_step(s, c) acc += (s == 2) & (was == 0); }

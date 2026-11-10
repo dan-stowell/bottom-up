@@ -28,7 +28,9 @@ static void put(const void *p, size_t n) { const char *c = p; while (n) { ssize_
 #define P_csv 19
 #define P_idents 20
 #define P_strings 21
+static uint8_t ISW[256];
 int main(void) {
+  for (int c = 0; c < 256; c++) ISW[c] = (c >= '0' && c <= '9') || ((c | 32) >= 'a' && (c | 32) <= 'z') || c == '_';
   uint32_t acc = 0; int32_t mx = INT32_MIN; int prev = 0; int32_t prev4 = 0; uint32_t run = 0; ssize_t n; size_t have = 0;
 #if K == P_words
   prev = 0;
@@ -87,7 +89,7 @@ int main(void) {
     for (ssize_t i = 0; i < n; i++) { uint8_t c = in[i];
       switch (prev) { case 0: if (c == '#') prev = 1; else if (c == '"') prev = 2; break; case 1: if (c == '\n') prev = 0; break;
                       case 2: if (c == '"') prev = 0; else if (c == '\\') prev = 3; break; default: prev = 2; }
-      int wc = (c >= '0' && c <= '9') || ((c | 32) >= 'a' && (c | 32) <= 'z') || c == '_';
+      int wc = ISW[c];
       acc += wc & !prev4 & (prev == 0); prev4 = wc; }
 #elif K == P_strings      // string literals: entries into the string state from code
     for (ssize_t i = 0; i < n; i++) { uint8_t c = in[i]; int was = prev;
