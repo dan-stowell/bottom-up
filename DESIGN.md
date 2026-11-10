@@ -78,8 +78,9 @@ input 64 > $N        # vector line: lead `input`, ops, sink `$N` (sum into scala
 
 ### Scatter-race symbol resolution
 
-Every name token computes a 32-bit polynomial hash (segmented sum = difference of two
-prefix-sum values). Then, with no sorting and no sequential insertion:
+Every name token computes a 64-bit fingerprint: two sums, over the name's bytes, of a mixed
+(byte, offset) value. A per-token sum is a difference of two prefix-sum values, so this is
+one pass. Then, with no sorting and no sequential insertion:
 
 1. every token scatters its own index into `table[key]` — AVX-512 scatter semantics make
    the *last* writer win, deterministically;
@@ -118,15 +119,18 @@ Two things a compiler normally needs an analysis for fall out of the same struct
 One line `a b + 3 * >c` becomes:
 
 ```
-lead    : load a's length, bump-allocate the output, zero the carries, i = 0
-loop    : k7 = active-lane mask for this chunk
+prologues: n = len(a); zmm27 = n; zmm26 = lane indices     ; a   (lead)
+          check len(b) == n                                ; b   (hoisted)
+          out = allocate(n)                                ; >c  (hoisted)
+loop    : k7 = (lane index < n)             one vpcmpud
           zmm0 = a[i..]                      ; push a        depth 1
-          zmm1 = b[i..]  (length checked)    ; push b        depth 2
+          zmm1 = b[i..]                      ; push b        depth 2
           zmm0 = zmm0 + zmm1                 ; +             depth 1
           zmm1 = broadcast(3)                ; push 3        depth 2
           zmm0 = zmm0 * zmm1                 ; *             depth 1
           out[i..] = zmm0 ; i += 16 ; loop   ; >c            depth 0
-          c = (out, n)
+          release c's old block; c = (out, n)
+releases: free any vector whose last occurrence was on this line
 ```
 
 Scans, gathers, compress-stores, scatters and the allocator are stencils *inside* the
