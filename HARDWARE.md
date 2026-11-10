@@ -48,22 +48,22 @@ L1-resident (three 4 KiB arrays), best of 7, one pinned core.
 | **`vpcompressb [mem]{k}`** | **144** | 64 bytes | same trap |
 | `vpexpandd` | 4.9 | 16 elts | |
 | `vpgatherdd` zmm, L1 table | 18.3 | 16 elts | 1.14/elt — **same as a scalar load loop (1.16)** |
-| `vpgatherdd` zmm, 64 MiB table, random | 138 | 16 elts | memory-bound |
+| `vpgatherdd` zmm, 1,024 fixed indices spread over 16 MiB | 138 | 16 elts | a gather across many pages and cache lines; *not* a memory-bound walk of 64 MiB (see corrections) |
 | `vpscatterdd` zmm, L1 | 20.8 | 16 elts | 1.3/elt — **slower than scalar stores (1.08)** |
 | `vpconflictd` zmm | 1.8 | 16 elts | cheap on Zen 4 (it is ~20+ on Intel) |
-| prefix sum, in-register log-step + carry | 6.7 | 16 elts | 0.42/elt vs scalar 0.85: only **2x** |
+| prefix sum, in-register log-step + carry | 6.7 | 16 elts | 0.42/elt vs scalar 0.85 (`-march=native`) or 1.7 (plain `-O2`): **2-4x**, depending on how the scalar loop is compiled |
 | prefix-xor via pclmulqdq | 2.3 | 64 bits | |
 | pext r64 | 0.87 | op | fast on Zen 4 (was microcoded on Zen 1/2) |
 | vpermb / vpshufb zmm | 1.7 | 64 bytes | |
 | byte classify, `vpermi2b` 128-entry table | 1.8 | 64 bytes | 0.03/byte |
 | byte classify, 2 x vpshufb nibble tables | 2.6 | 64 bytes | |
-| byte classify as dwords: widen + gather table | 17.6 | 16 bytes | 1.1/byte — **40x worse than vpermi2b** |
+| byte classify as dwords: widen + gather table | 17.6 | 16 bytes | 1.1/byte; a different kernel from the row above (dword output), about 40x its cost per input byte |
 | vpmovzxbd widen / vpmovdb narrow | 1.7 / 1.0 | 16 elts | |
 | 64 MiB streaming add, zmm vs ymm | 5.9 vs 5.8 | 64 bytes | identical: memory-bound |
 
-Frequency: a scalar spin loop takes the same time (ratio 0.998) immediately after 300 ms of
-continuous zmm multiplies. **No AVX-512 frequency penalty**, so there is no reason to avoid
-zmm in short bursts.
+Frequency: a scalar spin loop took the same time (ratio 0.998) immediately after 300 ms of
+continuous zmm multiplies. One before/after comparison on this VM: no frequency penalty was
+observed, which is weaker than "there is none".
 
 ## Corrections after the audit (2026-11-10)
 
@@ -74,8 +74,11 @@ AUDIT.md, defect 3, found that parts of this file claimed more than `hw/probe.c`
   are now written in assembly, `hw/check_probe.py` checks every probe against its
   disassembly, and the four still execute. (The audit found two; the check found four.)
 - **The scalar prefix-sum baseline overflowed a signed integer** (undefined behaviour). It
-  now uses unsigned arithmetic; the figure did not move (0.42 against 0.85 ticks/element
-  before, 6.7 per vector against 1.7 per element now).
+  now uses unsigned arithmetic. The scalar figure depends on the build: 0.85 ticks/element
+  with `-march=native`, 1.69 with the documented plain `-O2` (five runs each, stable to
+  0.02); the SIMD kernel is 6.7 per 16 elements either way. So the ratio is 2x or 4x, not
+  "2x" as this file said; the second audit caught that my own correction contradicted the
+  table. The table now gives the range.
 - **"64 MiB table, random" is mislabelled.** That gather uses the same 1,024 indices every
   repetition, so it touches at most 1,024 cache lines below 16 MiB. It measures a gather
   across many pages, not a memory-bound traversal of 64 MiB.
@@ -95,14 +98,17 @@ AUDIT.md, defect 3, found that parts of this file claimed more than `hw/probe.c`
 1. **Zen 4's AVX-512 is a better instruction set, not a wider datapath.** zmm costs exactly
    two ymm ops. The win is masks, compress/expand, vpermb, conflict detection, and halved
    loop overhead — not 2x lanes. Design for the *instructions*.
-2. **Gather and scatter are not parallel here.** They cost what a scalar loop costs
-   (gather) or more (scatter). They buy *branch-freedom and fusion*, not speed. Every
-   gather/scatter in the compiler is a serial island in SIMD clothing and is counted as
-   such in SCALAR_LEDGER.md. Classify bytes with compares, never with a gathered table.
+2. **Gather and scatter kernels are no faster than scalar loops here.** A load + gather +
+   store kernel costs what the scalar loop costs, a scatter kernel more. That is a
+   statement about kernel totals; it does not show how the CPU executes the lanes. They buy
+   *branch-freedom and fusion*, not speed, and every gather/scatter in the compiler is
+   counted in SCALAR_LEDGER.md for that reason. Classify bytes with compares or byte
+   permutes, never with a gathered table.
 3. **Compress to a register, store full width.** Output arrays therefore need >= 64 bytes
    of slack after the logical end.
-4. **Prefix sum is only 2x over scalar** (the carry is a real dependency). Scans are the
-   idiom, but they are not free; prefer designs where one scan serves many purposes.
+4. **Prefix sum is 2-4x over scalar** (the carry is a real dependency), far from the 9x of a
+   plain add. Scans are the idiom, but they are not free; prefer designs where one scan
+   serves many purposes.
 5. Arrays that spill L1 (32 KiB = 8192 dwords) triple the cost of everything (5.2 vs 1.9
    ticks for add when three 16 KiB arrays were used). A compiler whose working set is
    "one dword per source byte" leaves L1 at 8 KiB of source. Byte lanes would be 4x denser.
