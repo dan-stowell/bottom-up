@@ -160,7 +160,7 @@ def analyze(src: bytes):
         d = teedef.get(t.slot) if t.isname else None
         t.local = d is not None and ISTEE[d.cls0] == 1 and lastname[d.name].line == d.line and t.line == d.line
         if t.local: t.cls = LOCALOF[t.cls]
-        elif d is not None and t is not d and t.line == d.line and t.cls == VEC: t.cls = VECT   # re-read of a persistent tee
+        elif d is not None and t is not d and t.line == d.line: t.cls = TVOF[t.cls]   # re-read of a persistent tee
 
     depth = 0
     bad = False
@@ -306,8 +306,12 @@ def interp(src: bytes, inp: bytes):
                     k = KEYWORDS[c - BK] if BK <= c < BK + K else None
                     sval = (pool[t.poolidx] if t.lit else sca.get(t.slot, 0)) & 255
                     v = vec.get(t.slot, [])
-                    if k == 'bytes': n = len(inp); st.append(list(inp))
-                    elif c == BYTESV: n = len(v); st.append([x & 255 for x in v])
+                    if k == 'bytes': n = len(inp); st.append(list(inp)); lsrc = st[-1]
+                    elif c == BYTESV: n = len(v); st.append([x & 255 for x in v]); lsrc = list(st[-1])
+                    elif k == 'peek': st.append(lsrc[1:] + [0] * (1 if n else 0))
+                    elif c in (VECBX, VECBXT):
+                        if len(v) != n: raise Fail()
+                        st.append([x & 255 for x in v])
                     elif c == SCALB: st.append([sval] * n)
                     elif c == TABLEB:
                         idx = st.pop()

@@ -83,6 +83,8 @@ class Gen:
             elif ch < .72 and ('p', d) not in used: used.add(('p', d)); toks.append('prev')
             elif ch < .76 and ('p', d) not in used: used.add(('p', d)); toks.append('/' + self.automaton())
             elif ch < .79 and ('p', d) not in used: used.add(('p', d)); toks.append('\\' + self.automaton(8))
+            elif ch < .80 and d < 7: toks.append('peek'); d += 1
+            elif ch < .805 and d < 7 and self.bvecs: toks.append(r.choice(self.bvecs)); d += 1      # a stored byte vector (fails unless its length is the line's)
             elif ch < .82 and d < 7: toks.append(r.choice(['dup', 'over'] if d >= 2 else ['dup'])); d += 1
             elif ch < .84 and d >= 2: toks.append(r.choice(['swap', 'drop'])); d -= toks[-1] == 'drop'
             elif ch < .90:

@@ -6,7 +6,7 @@ The first K classes are the keywords, in prelude order.
 """
 KEYWORDS = ['+', '-', '*', '&', '|', '^', 'min', 'max', '<<', '>>',
             '<', '<=', '>', '>=', '=', '!=', 'sel', 'scan', 'scanmax', 'prev',
-            'dup', 'drop', 'swap', 'over', 'input', 'out', 'out4', 'halt', 'end', 'idx', 'input4', 'outif', 'outif4', 'bytes']
+            'dup', 'drop', 'swap', 'over', 'input', 'out', 'out4', 'halt', 'end', 'idx', 'input4', 'outif', 'outif4', 'bytes', 'peek']
 K = len(KEYWORDS)
 PRELUDE = ' '.join(KEYWORDS)
 
@@ -14,8 +14,8 @@ PRELUDE = ' '.join(KEYWORDS)
  STOREV, STORES, SUM, MAX, COMPRESS, SCATTER, TEE, TEEC, TEEL, VECL, LENL,
  SCALB, TABLEB, SUMB, TEEBX, VECBX, BAD, VECT, FSM, FSMB,
  STOREVB, WHEREB, GATHERB, GATHER4,
- STOREVN, BYTESV, SLSRC, SLICES, SCATTER4, INPUTV, ZEROSV, FSM8, FSM8B) = range(K, K + 41)
-BK = K + 41                         # byte-line variant of keyword k is class BK + k
+ STOREVN, BYTESV, SLSRC, SLICES, SCATTER4, INPUTV, ZEROSV, FSM8, FSM8B, VECBXT) = range(K, K + 42)
+BK = K + 42                         # byte-line variant of keyword k is class BK + k
 NCODE = BK + K                      # classes below this emit code
 DATA, STR, NONE, ERR = NCODE, NCODE + 1, NCODE + 2, NCODE + 3
 NCLS = NCODE + 4
@@ -28,7 +28,7 @@ for k in ['+', '-', '*', '&', '|', '^', 'min', 'max', '<<', '>>', '<', '<=', '>'
     DELTA[KW[k]] = -1
 DELTA[KW['sel']] = -2
 DELTA[KW['outif']] = DELTA[KW['outif4']] = -2
-for k in ['dup', 'over', 'input', 'idx', 'input4', 'bytes']:
+for k in ['dup', 'over', 'input', 'idx', 'input4', 'bytes', 'peek']:
     DELTA[KW[k]] = 1
 for c in [VEC, VECLEAD, SCAL, SCALLEAD, LEN, LENLEAD, IOTA, VECL, LENL]:
     DELTA[c] = 1
@@ -39,7 +39,7 @@ for c in [COMPRESS, SCATTER, TEEC]:
 
 for _k in range(K): DELTA[BK + _k] = DELTA[_k]
 DELTA[SCALB] = 1; DELTA[VECBX] = 1; DELTA[SUMB] = -1; DELTA[VECT] = 1
-DELTA[STOREVB] = -1; DELTA[WHEREB] = -1
+DELTA[STOREVB] = -1; DELTA[WHEREB] = -1; DELTA[VECBXT] = 1
 DELTA[STOREVN] = -1; DELTA[ZEROSV] = -1; DELTA[BYTESV] = 1; DELTA[SLICES] = -3; DELTA[SCATTER4] = -2
 
 LEADOF = list(range(NCLS))          # class a token takes when it is first on its line
@@ -92,7 +92,7 @@ ISTEEC = [0] * NCLS                 # '%' compress-tees: one definition, never r
 ISTEEC[TEEC] = ISTEEC[WHEREB] = 1
 VTYPE = [0] * NCLS                  # what a class requires of its operand name: 1 dword vector, 2 byte vector
 for _c in (VEC, VECLEAD, VECT, GATHER, STOREV, COMPRESS, SCATTER, TEE, TEEC, WHEREB, DATA, TABLEB, FSM, FSMB, FSM8, FSM8B): VTYPE[_c] = 1
-for _c in (STOREVB, TEEBX, GATHERB, GATHER4, STOREVN, BYTESV, SLSRC, SLICES, SCATTER4, INPUTV, ZEROSV): VTYPE[_c] = 2
+for _c in (VECBX, VECBXT, STOREVB, TEEBX, GATHERB, GATHER4, STOREVN, BYTESV, SLSRC, SLICES, SCATTER4, INPUTV, ZEROSV): VTYPE[_c] = 2
 LOCALOF[TEEBX], LOCALOF[VECBX] = TEEL, VECL
 ISTEE = [0] * NCLS                  # ':' tees, before chunk-local classification
 ISTEE[TEE] = ISTEE[TEEBX] = 1
@@ -141,6 +141,12 @@ CARRY[BK + KW['prev']] = 1
 CARRY[FSM8B] = 1
 CARRY[FSMB] = 1                    # the automaton's carry (a transition function) lives in zmm16+r too
 USES[VECT] = 1; READSVEC[VECT] = 1
+# Byte lines read stored byte vectors too: `x` on a byte line pushes the byte vector x, element for
+# element (its length must be the line's). `peek` pushes the line's own source one element ahead:
+# element i is source element i + 1, and 0 for the last. VECBXT is to VECBX what VECT is to VEC.
+USES[VECBXT] = 1; READSVEC[VECBXT] = 1
+TVOF = list(range(NCLS))            # the class a push takes when it re-reads a persistent tee on the tee's own line
+TVOF[VEC] = VECT; TVOF[VECBX] = VECBXT
 
 MAXNAME = 16                        # longest name: four dwords, which *are* the name
 MAXDIGITS = 9

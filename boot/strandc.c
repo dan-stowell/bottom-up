@@ -161,7 +161,7 @@ int main(void) {
     Tok *t = &tok[i]; int d = t->isname ? teetok[t->slot] - 1 : -1;
     t->local = d >= 0 && T_istee[tok[d].cls0] && tok[names[tok[d].name].last].line == tok[d].line && t->line == tok[d].line;
     if (t->local) t->cls = T_localof[t->cls];
-    else if (d >= 0 && d != i && tok[d].line == t->line && t->cls == C_VEC) t->cls = C_VECT;   // re-read of a persistent tee
+    else if (d >= 0 && d != i && tok[d].line == t->line) t->cls = T_tvof[t->cls];   // re-read of a persistent tee
   }
 
   // ---- depth, stencils

@@ -35,7 +35,7 @@ CASES = [
  (b'input end\n', 0),
  # byte lines
  (b'bytes 10 = $N\n~1 N + out4\n', 0), (b'bytes dup prev - out\n', 0), (b'bytes :c 97 >= c 122 <= & c 32 - c sel out\n', 0),
- (b'bytes dup 64 > outif\n', 0), (b'bytes scan out\n', E_STENCIL), (b'bytes >x\n', 0), (b'input >x\nbytes x + out\n', E_STENCIL),
+ (b'bytes dup 64 > outif\n', 0), (b'bytes scan out\n', E_STENCIL), (b'bytes >x\n', 0), (b'input >x\nbytes x + out\n', E_TYPE),
  (b'bytes :c end\nc out\n', E_TYPE), (b'bytes idx + out\n', E_STENCIL), (b'input bytes + out\n', E_STENCIL), (b'bytes 3 * 300 + out\n', 0),
  (b'~256 255 swap - >t\nbytes @t out\n', 0), (b'~255 >t\nbytes @t out\n', 0),
  # automata

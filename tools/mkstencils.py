@@ -426,7 +426,25 @@ LOOPENDB = """
   jmp r15
 8:"""
 FLUSHCHK = "  cmp r8,[rbx-56]\n  jb 3f\n  call [rbx-648]\n3:\n"
-st(BKW('bytes'), 0, LOOPHEADB + "  mov rsi,[rbx-16]\n  vmovdqu8 zmm0{k7}{z},[rsi+rax]", pre="  mov r12,[rbx-8]\n" + SETUPB)
+st(BKW('bytes'), 0, LOOPHEADB + "  mov rsi,[rbx-16]\n  mov [rbx-752],rsi\n  vmovdqu8 zmm0{k7}{z},[rsi+rax]", pre="  mov r12,[rbx-8]\n" + SETUPB)
+# `peek`: the line's source one element ahead (0 past the end). The lead leaves its source pointer in
+# [rbx-752] every chunk; the load is masked to the elements that exist, so it never touches a byte
+# beyond the source.
+for d in range(1, 8):
+    st(BKW('peek'), d, f"""  mov rsi,[rbx-752]
+  mov rcx,r12
+  sub rcx,rax
+  dec rcx
+  mov edx,64
+  cmp rcx,rdx
+  cmova rcx,rdx
+  mov rdx,-1
+  bzhi rdx,rdx,rcx
+  kmovq k1,rdx
+  vmovdqu8 zmm{d}{{k1}}{{z}},[rsi+rax+1]""")
+    # a stored byte vector, element for element
+    st(VECBX, d, f"  mov rsi,[rbx+{DISP}]\n  vmovdqu8 zmm{d}{{k7}}{{z}},[rsi+rax]", pre=f"  cmp r12,[rbx+{DISP8}]" + failif('e'))
+    st(VECBXT, d, f"  mov rsi,[rbx+{DISP}]\n  vmovdqu8 zmm{d}{{k7}}{{z}},[rsi+rax]", pre=f"  cmp r12,[rbx+{DISP8}]" + failif('e') + "\n" + VETO)
 BBIN = {'+': 'vpaddb', '-': 'vpsubb', '&': 'vpandd', '|': 'vpord', '^': 'vpxord', 'min': 'vpminub', 'max': 'vpmaxub'}
 for d in range(2, 9):
     a, b = d - 2, d - 1
@@ -684,7 +702,7 @@ st(INPUTV, 0, f"  lea rcx,[rbx+{DISP}]" + RELEASE + """
   mov rsi,[rbx-8]
   mov [rcx+8],rsi""")
 # a byte line over a byte vector
-st(BYTESV, 0, LOOPHEADB + f"  mov rsi,[rbx+{DISP}]\n  vmovdqu8 zmm0{{k7}}{{z}},[rsi+rax]", pre=f"  mov r12,[rbx+{DISP8}]\n" + SETUPB)
+st(BYTESV, 0, LOOPHEADB + f"  mov rsi,[rbx+{DISP}]\n  mov [rbx-752],rsi\n  vmovdqu8 zmm0{{k7}}{{z}},[rsi+rax]", pre=f"  mov r12,[rbx+{DISP8}]\n" + SETUPB)
 # ---- the bridge to dword lines (spec.py). `>x` on a byte line keeps the bytes as a vector.
 st(STOREVB, 1, pre=ALLOC('rdi'), text="  vmovdqu8 [rdi+rax]{k6},zmm0" + LOOPENDB + f"""
   lea rcx,[rbx+{DISP}]""" + RELEASE + """
@@ -809,7 +827,7 @@ with open(f'{ROOT}/src/tables.strand', 'w') as f:
     f.write(data('delta', [x + 4 for x in DELTA]))      # biased by 4: literals are unsigned
     f.write(data('leadof', LEADOF)); f.write(data('localof', LOCALOF)); f.write(data('byteof', BYTEOF)); f.write(data('istee', ISTEE)); f.write(data('reread', REREAD)); f.write(data('clstab', CLSTAB))
     f.write(data('opctab', [opclass(c) for c in range(128)])); f.write(data('sigtab', [sigil(c) for c in range(128)]))
-    f.write(data('isteec', ISTEEC)); f.write(data('vtype', VTYPE)); f.write(data('isblead', ISBLEAD)); f.write(data('isscat', ISSCAT)); f.write(data('defines', DEFINES)); f.write(data('uses', USES)); f.write(data('readsvec', READSVEC)); f.write(data('carry', CARRY))
+    f.write(data('isteec', ISTEEC)); f.write(data('vtype', VTYPE)); f.write(data('tvof', TVOF)); f.write(data('isblead', ISBLEAD)); f.write(data('isscat', ISSCAT)); f.write(data('defines', DEFINES)); f.write(data('uses', USES)); f.write(data('readsvec', READSVEC)); f.write(data('carry', CARRY))
     f.write(data('pow10', [10 ** i for i in range(MAXDIGITS)]))
     f.write(f"{len(stub)} >Stublen\n")
     for nm, v in [('Rels', rels), ('Rell', rell), ('Relp', relp), ('Kn', K), ('Ncode', NCODE), ('Cdata', DATA), ('Cstr', STR), ('Cnone', NONE), ('Cerr', ERR),
