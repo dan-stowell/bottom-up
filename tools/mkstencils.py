@@ -293,7 +293,8 @@ st(SCATTER4, 2, pre=VETO, text=f"  lea rcx,[rbx+{DISP}]" + """
   kortestw k2,k2""" + failif('z') + """
   mov rsi,[rcx]
   vpscatterdd [rsi+zmm1*1]{k1},zmm0""" + LOOPEND)
-# `s n d )dst`: one slice per lane from the line's source to dst. The lanes are walked one at a time
+# `s n d )dst`: one slice per lane from the line's source to dst. A lane with n = 0 does nothing and is
+# skipped by mask; the others are walked one at a time
 # (the output position of a slice is data), each as masked 64-byte moves: this is a loop over elements
 # with vector copies in it, not a vector operation, and SCALAR_LEDGER.md counts it as such.
 for d in range(4, 9):
@@ -305,15 +306,16 @@ for d in range(4, 9):
   vmovdqu32 [rsp-192],zmm{a}
   vmovdqu32 [rsp-128],zmm{b}
   vmovdqu32 [rsp-64],zmm{c}
-  kmovw r10d,k7
+  vptestmd k1{{k7}},zmm{b},zmm{b}
+  kmovw r10d,k1
   lea rcx,[rbx+{DISP}]
   mov rbp,[rcx]
   cmp rbp,[rbx-736]""" + failif('ne') + """
   cmp rbp,[rbx-16]""" + failif('ne') + """
-  xor edx,edx
 3:
-  bt r10d,edx
-  jnc 5f
+  tzcnt edx,r10d
+  jc 5f
+  blsr r10d,r10d
   mov esi,[rsp-192+rdx*4]
   mov r9d,[rsp-128+rdx*4]
   mov eax,[rsp-64+rdx*4]
@@ -326,8 +328,6 @@ for d in range(4, 9):
 6:
   call r14
 7:
-  test r9,r9
-  jz 5f
   add rsi,[rbx-736]
   add rax,[rcx]
 4:
@@ -343,10 +343,8 @@ for d in range(4, 9):
   add rax,r11
   sub r9,r11
   jnz 4b
+  jmp 3b
 5:
-  inc edx
-  cmp edx,16
-  jb 3b
   pop r12
   pop r11
   pop rbp

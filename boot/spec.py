@@ -77,7 +77,7 @@ BYTEOF[STOREV] = STOREVB; BYTEOF[TEEC] = WHEREB
 #   `'x`                 (lead) a byte line over the byte vector x, as `bytes` is over stdin
 #   `s n d (src )dst`    copy n bytes from src[s..] to dst[d..], one slice per lane, in lane order.
 #                        `(src` names the source for its line (it leaves the stack alone); `)dst` pops
-#                        the three operands and the line goes on. A slice outside either vector, a
+#                        the three operands and the line goes on. n = 0 does nothing. A slice outside either vector, a
 #                        negative operand, or src and dst being one vector is a runtime failure.
 #   `v p }x`             (sink) store the dword v at byte offset p of x; a negative p is a masked-off
 #                        lane, p + 4 > len a runtime failure. Overlapping stores land in lane order.

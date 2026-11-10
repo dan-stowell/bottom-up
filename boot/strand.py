@@ -418,6 +418,7 @@ def interp(src: bytes, inp: bytes):
                     dst = vec.setdefault(t.slot, [])
                     if slsrc == t.slot or isinstance(dst, RO): raise Fail()
                     for so, l, do in zip(s, ln_, d):
+                        if l == 0: continue          # an empty slice does nothing and checks nothing
                         if so < 0 or l < 0 or do < 0 or so + l > len(src) or do + l > len(dst): raise Fail()
                         dst[do:do + l] = [x & 255 for x in src[so:so + l]]
                 elif c == SCATTER4:
