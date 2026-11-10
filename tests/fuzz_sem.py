@@ -121,6 +121,10 @@ class Gen:
             self.lines.append(' '.join(str(self.r.randrange(1000)) for _ in range(n)) + ' =' + v); self.tabs.append(v)
         return self.r.choice(self.tabs)
     def line(self):
+        if self.r.random() < .03:                 # the input as a byte vector, or a vector of zero bytes
+            if not hasattr(self, 'bvecs'): self.bvecs = []
+            v = 'b%d' % self.nv; self.nv += 1; self.bvecs.append(v)
+            self.lines.append('<' + v if self.r.random() < .5 else self.r.choice(['0', '1', '63', '64', '65', '1000', '5000']) + ' ,' + v); return
         if self.r.random() < .12: return self.byteline()
         self.pending = []
         self._line()

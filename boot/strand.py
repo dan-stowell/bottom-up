@@ -290,6 +290,7 @@ def interp(src: bytes, inp: bytes):
         s = lt[-1]
         if s.cls == DATA: vec[s.slot] = pool[lt[0].poolidx:s.poolidx]
     out = bytearray()
+    class RO(list): pass                 # the input as a vector: read-only
     try:
         for ln in sorted(lines):
             lt = lines[ln]
@@ -345,7 +346,8 @@ def interp(src: bytes, inp: bytes):
                     continue
                 sval = (pool[t.poolidx] if t.lit else sca.get(t.slot, 0))
                 v = vec.get(t.slot, [])
-                if c == VECLEAD: n = len(v); st.append(list(v))
+                if c == INPUTV: vec[t.slot] = RO(inp)
+                elif c == VECLEAD: n = len(v); st.append(list(v))
                 elif c == SCALLEAD: n = 1; st.append([sval])
                 elif c == LENLEAD: n = 1; st.append([len(v)])
                 elif c == IOTA:
@@ -403,19 +405,25 @@ def interp(src: bytes, inp: bytes):
                 elif c == COMPRESS:
                     m = st.pop(); a = st.pop()
                     vec[t.slot] = [x for x, q in zip(a, m) if q]
+                elif c == ZEROSV:
+                    a = st.pop()
+                    if n != 1 or a[0] < 0: raise Fail()
+                    if a[0] > 4 * MAXN: raise TooBig()
+                    vec[t.slot] = [0] * a[0]
                 elif c == STOREVN: vec[t.slot] = [x & 255 for x in st.pop()]
                 elif c == SLSRC: pass
                 elif c == SLICES:
                     d = st.pop(); ln_ = st.pop(); s = st.pop()
                     src = vec.get(slsrc, []) if slsrc is not None else []
                     dst = vec.setdefault(t.slot, [])
-                    if slsrc == t.slot: raise Fail()
+                    if slsrc == t.slot or isinstance(dst, RO): raise Fail()
                     for so, l, do in zip(s, ln_, d):
                         if so < 0 or l < 0 or do < 0 or so + l > len(src) or do + l > len(dst): raise Fail()
                         dst[do:do + l] = [x & 255 for x in src[so:so + l]]
                 elif c == SCATTER4:
                     idx = st.pop(); a = st.pop()
                     tgt = vec.setdefault(t.slot, [])
+                    if isinstance(tgt, RO): raise Fail()
                     for x, i in zip(a, idx):
                         if i < 0: continue
                         if i + 4 > len(tgt): raise Fail()

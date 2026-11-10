@@ -1,0 +1,69 @@
+# link2.strand -- the same linker with imports resolved by 64-bit fingerprint instead of (unit, ordinal):
+# relocations as dword stores. Input: the job file of explore/linkjob.c. Output: the linked image.
+<raw
+~1 {raw >U
+~1 4 + {raw >Ne
+~1 8 + {raw >Ni
+~1 12 + {raw >Nr
+20 >Ousize
+U 4 * Ousize + >Ouexp
+U 4 * Ouexp + >Oexunit
+Ne 4 * Oexunit + >Oexoff
+Ne 16 * Oexunit + >Oimu
+Ni 4 * Oimu + >Oimo
+Ni 16 * Oimu + >Orunit
+Nr 4 * Orunit + >Oroff
+Nr 4 * Oroff + >Orimp
+Nr 4 * Orimp + >Ocode
+# layout: where each unit's code is in the file, and where it goes (aligned to 64)
+~U 4 * Ousize + {raw :usz dup scan swap - >inb
+usz 63 + 6 >> 6 << :al dup scan swap - >ubase
+al $Tot
+~U 4 * Ouexp + {raw dup scan swap - >exbase
+# every export's address, then every import's
+~Ne 4 * :e4 Oexunit + {raw @ubase e4 Oexoff + {raw + >exaddr
+# imports by fingerprint: a join, with no names in it. Exports race for a slot in each of four tables
+# (the last writer owns it; those that read themselves back are placed, the rest go on to the next table);
+# an import looks in each table and keeps the export whose fingerprint is its own.
+Ne 4 * Oexoff + >Oefp1
+Ne 4 * Oefp1 + >Oefp2
+Ni 4 * Oimo + >Oifp1
+Ni 4 * Oifp1 + >Oifp2
+0 1 - >Neg
+Ne dup 1 >> | dup 2 >> | dup 4 >> | dup 8 >> | dup 16 >> | 2 * 1 + >Mask
+Mask 1 + >Tabm
+~Ne 4 * Oefp1 + {raw >ea
+~Ne 4 * Oefp2 + {raw >eb
+~Ni 4 * Oifp1 + {raw >ia
+~Ni 4 * Oifp2 + {raw >ib
+~Ne 0 * 1 + >act
+~Ni 0 * 1 - >res
+~Tabm 0 * 1 - >tab0
+act ea 1 * eb 961748927 * + 8 >> Mask & Neg sel >key
+~Ne key !tab0
+key 0 max @tab0 idx = act & 1 ^ act & >act
+ia 1 * ib 961748927 * + 8 >> Mask & @tab0 :cand0 0 max :cz0 @ea ia = cz0 @eb ib = & cand0 0 >= & res 0 < & cand0 res sel >res
+~Tabm 0 * 1 - >tab1
+act ea 40503 * eb 314159265 * + 8 >> Mask & Neg sel >key
+~Ne key !tab1
+key 0 max @tab1 idx = act & 1 ^ act & >act
+ia 40503 * ib 314159265 * + 8 >> Mask & @tab1 :cand1 0 max :cz1 @ea ia = cz1 @eb ib = & cand1 0 >= & res 0 < & cand1 res sel >res
+~Tabm 0 * 1 - >tab2
+act ea 48271 * eb 271828183 * + 8 >> Mask & Neg sel >key
+~Ne key !tab2
+key 0 max @tab2 idx = act & 1 ^ act & >act
+ia 48271 * ib 271828183 * + 8 >> Mask & @tab2 :cand2 0 max :cz2 @ea ia = cz2 @eb ib = & cand2 0 >= & res 0 < & cand2 res sel >res
+~Tabm 0 * 1 - >tab3
+act ea 69621 * eb 141421357 * + 8 >> Mask & Neg sel >key
+~Ne key !tab3
+key 0 max @tab3 idx = act & 1 ^ act & >act
+ia 69621 * ib 141421357 * + 8 >> Mask & @tab3 :cand3 0 max :cz3 @ea ia = cz3 @eb ib = & cand3 0 >= & res 0 < & cand3 res sel >res
+act $Lost
+res 0 < $Unres
+Lost Unres + 0 > 9 * halt
+res @exaddr >imaddr
+# the image: one slice per unit, then one dword per relocation
+Tot ,img
+~U :ui dup @inb Ocode + usz ui @ubase (raw )img end
+~Nr 4 * :r4 Orimp + {raw @imaddr r4 Orunit + {raw @ubase r4 Oroff + {raw + :pl - pl }img
+'img out

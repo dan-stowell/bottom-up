@@ -17,6 +17,13 @@ echo "--- thread pool at production block sizes, 2..all CPUs, file and pipe"
 python3 tests/pool.py build/stage2
 echo "--- all 256 four-state transition functions"
 python3 tests/fsm_all.py build/stage2
+echo "--- a linker written in Strand against the C reference (explore/linkjob.c), both ways of resolving imports"
+gcc -O2 -o build/linkjob explore/linkjob.c && ./build/linkjob gen 40 > build/job40
+for l in link link2; do
+  ./build/stage2 < examples/$l.strand > build/$l && chmod +x build/$l
+  ./build/$l < build/job40 > build/$l.out; ./build/linkjob ref < build/job40 | cmp - build/$l.out
+  echo "PASS $l"
+done
 echo "--- big inputs: the three compilers agree"
 for f in big8 many; do
   [ $f = big8 ] && python3 tools/mkbig.py 8 > build/big8.strand

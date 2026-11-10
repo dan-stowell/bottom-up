@@ -79,12 +79,68 @@ does what link-time optimisation, section GC or identical code folding do; those
 problems and I have not looked for a shape for them. And the two things a real linker
 spends much of its time on, reading inputs and writing the output, are untouched.
 
+## The linker, written in Strand
+
+The reshaped link is now a Strand program, `examples/link.strand`, 30 lines, checked byte for
+byte against a plain C linker (`explore/linkjob.c ref`) on a job file both read: 2,000 units
+of 64-192 KiB, 1,000,000 exports, 3,000,000 imports, 12,150,000 relocations, a 262 MB image.
+The whole of it:
+
+```
+<raw                                              # the job file, as a byte vector (not copied)
+...                                               # header fields and section offsets: scalar lines
+~U 4 * Ousize + {raw :usz dup scan swap - >inb    # where each unit's code is in the file
+usz 63 + 6 >> 6 << :al dup scan swap - >ubase     # where it goes: a prefix sum of aligned sizes
+al $Tot
+~U 4 * Ouexp + {raw dup scan swap - >exbase
+~Ne 4 * :e4 Oexunit + {raw @ubase e4 Oexoff + {raw + >exaddr                 # every export's address
+~Ni 4 * :i4 Oimu + {raw @exbase i4 Oimo + {raw + @exaddr >imaddr             # every import's: (unit, ordinal)
+Tot ,img                                                                     # the image: zero bytes
+~U :ui dup @inb Ocode + usz ui @ubase (raw )img end                          # one slice per unit
+~Nr 4 * :r4 Orimp + {raw @imaddr r4 Orunit + {raw @ubase r4 Oroff + {raw + :pl - pl }img   # one dword per relocation
+'img out
+```
+
+`examples/link2.strand` is the same linker with imports resolved by 64-bit fingerprint
+instead of ordinal: exports race for slots in four tables, each import keeps the export
+whose fingerprint matches. Same image.
+
+Whole processes, the job in the page cache, output to /dev/null, median of 7, ms:
+
+| linker | 1 CPU | 8 CPUs |
+|---|---|---|
+| plain C, copy and patch unit by unit | 264-268 | (one thread) |
+| Strand, imports by (unit, ordinal) | 294-300 | 279-285 |
+| Strand, imports by fingerprint | 397-407 | 304-315 |
+
+What that shows, and what it does not:
+
+- **The reshaped link is expressible, and it is short.** Every step is a line: prefix sums,
+  gathers, a slice copy, a dword store. It took five new primitives (`<x`, `,x`, `(src )dst`,
+  `}x`, `'x`), all of which the compiler's own back end now uses or could.
+- **It does not beat the scalar C linker; it is 1.1x slower on one core.** Both spend about
+  150 of their milliseconds in the kernel, faulting in the 262 MB image. Of Strand's user
+  time, relocations are about 80 ms (6.5 ns each: four reads of the job, two table gathers,
+  one store), the copy 40, imports 28.
+- **Eight cores barely help**, because the two lines that do the work, the slice copy and
+  the dword store, run on one thread: the runtime cannot know that their destinations do
+  not overlap. They do not (offsets are sorted and disjoint), and that is checkable with one
+  comparison against the previous element, so "an ordered sink may run in parallel when its
+  destinations are increasing" is the next thing to build. An earlier version that zero-filled
+  the image with a parallel line was *faster* on eight CPUs (210 ms) for one reason: the page
+  faults were taken on eight threads.
+- **The join costs what the prototype said**: about 110 ms more for 4,000,000 names by
+  fingerprint, nothing by ordinal.
+- A job this shape is bounded by memory traffic and page faults, not by arithmetic. SIMD
+  buys little here; what the reshaping buys is that nothing in the link is a string or a
+  hash-table probe, and that every line is one whose parallel form is mechanical.
+
 ## What this suggests for Strand
 
-- **An `expand` primitive** (the inverse of `outif`'s compress): blend a stream of values
-  into the lanes selected by a mask. It is the relocation step above, and it is also what
-  the compiler's own back end does the slow way today: twelve scatter lines put operand
-  bytes into the code, and each is a pass.
+- **Slices and dword stores** turned out to matter more than the `expand` I first proposed:
+  the copy is the larger part, and a dword store at a byte position is one instruction.
+  Both are built (above), and the compiler's own back end uses them.
+- **Ordered sinks in parallel under a monotonicity check** (above).
 - **Separate compilation by slot number.** A Strand unit already refers to its vectors by
   slot; two units could share names as `(unit, slot)` and be joined by layout and expand,
   with no name table in the output. That would be a linker written in Strand whose every

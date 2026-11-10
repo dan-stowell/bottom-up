@@ -86,6 +86,8 @@ RELEASE = """
   mov rsi,[rcx]
   cmp rsi,[rbx-40]
   jb 4f
+  cmp rsi,[rbx-64]
+  jae 4f
   mov rdx,[rsi-8]
   mov r9,[rdx]
   mov [rsi],r9
@@ -256,6 +258,20 @@ def outifsink(narrow, store, adv):
 st(KW['outif'], 2, outifsink("  vpmovdb xmm24,zmm24\n", "vmovdqu8 [r8],xmm24", "add r8,rcx"), pre="  mov r8,[rbx-32]\n  mov dword ptr [rbx-704],1")
 st(KW['outif4'], 2, outifsink("", "vmovdqu32 [r8],zmm24", "lea r8,[r8+rcx*4]"), pre="  mov r8,[rbx-32]\n  mov dword ptr [rbx-704],4")
 st(KW['end'], 1, LOOPEND)
+# `N ,x`: N zero bytes. Memory taken from the top of the heap has never been touched and is zero already
+# (and stays untouched: no page faults until it is written); a recycled block is cleared.
+_az = ALLOC('rdi'); assert _az.count("  jmp 6f\n") == 1
+_az = _az.replace("  jmp 6f\n", "  mov r9,rdi\n  lea rcx,[r12*4]\n  xor eax,eax\n  rep stosb\n  mov rdi,r9\n  jmp 6f\n")
+st(ZEROSV, 1, LOOPEND + "\n  cmp r12,1" + failif('e') + """
+  vmovd eax,xmm0
+  test eax,eax""" + failif('ns') + """
+  mov r8,rax
+  lea r12,[rax+3]
+  shr r12,2""" + _az + f"""
+  mov r12d,1
+  lea rcx,[rbx+{DISP}]""" + RELEASE + """
+  mov [rcx],rdi
+  mov [rcx+8],r8""")
 # `v .x`: the low bytes of a dword line, as a byte vector
 st(STOREVN, 1, pre=ALLOC('rdi'), text="  vpmovdb xmm24,zmm0\n  vmovdqu8 [rdi+rax]{k6},xmm24" + LOOPEND + f"""
   lea rcx,[rbx+{DISP}]""" + RELEASE + """
@@ -263,6 +279,8 @@ st(STOREVN, 1, pre=ALLOC('rdi'), text="  vpmovdb xmm24,zmm0\n  vmovdqu8 [rdi+rax
   mov [rcx+8],r12""")
 # `v p }x`: a dword at a byte offset. One vpscatterdd with scale 1; lanes are written in order.
 st(SCATTER4, 2, pre=VETO, text=f"  lea rcx,[rbx+{DISP}]" + """
+  mov rsi,[rcx]
+  cmp rsi,[rbx-16]""" + failif('ne') + """
   mov edx,[rcx+8]
   sub edx,3
   mov esi,0
@@ -291,6 +309,7 @@ for d in range(4, 9):
   lea rcx,[rbx+{DISP}]
   mov rbp,[rcx]
   cmp rbp,[rbx-736]""" + failif('ne') + """
+  cmp rbp,[rbx-16]""" + failif('ne') + """
   xor edx,edx
 3:
   bt r10d,edx
@@ -585,6 +604,12 @@ st(BKW('outif'), 2, FLUSHCHK + """  vptestmb k1{k6},zmm1,zmm1
   popcnt rcx,rcx
   add r8,rcx""" + LOOPENDB + "\n  mov [rbx-32],r8", pre="  mov r8,[rbx-32]\n  mov dword ptr [rbx-704],1")
 st(BKW('end'), 1, LOOPENDB)
+# `<x`: x is the program's input, as a byte vector, without copying it. A line of its own, no loop.
+st(INPUTV, 0, f"  lea rcx,[rbx+{DISP}]" + RELEASE + """
+  mov rsi,[rbx-16]
+  mov [rcx],rsi
+  mov rsi,[rbx-8]
+  mov [rcx+8],rsi""")
 # a byte line over a byte vector
 st(BYTESV, 0, LOOPHEADB + f"  mov rsi,[rbx+{DISP}]\n  vmovdqu8 zmm0{{k7}}{{z}},[rsi+rax]", pre=f"  mov r12,[rbx+{DISP8}]\n" + SETUPB)
 # ---- the bridge to dword lines (spec.py). `>x` on a byte line keeps the bytes as a vector.

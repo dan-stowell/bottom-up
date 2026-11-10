@@ -14,8 +14,8 @@ PRELUDE = ' '.join(KEYWORDS)
  STOREV, STORES, SUM, MAX, COMPRESS, SCATTER, TEE, TEEC, TEEL, VECL, LENL,
  SCALB, TABLEB, SUMB, TEEBX, VECBX, BAD, VECT, FSM, FSMB,
  STOREVB, WHEREB, GATHERB, GATHER4,
- STOREVN, BYTESV, SLSRC, SLICES, SCATTER4) = range(K, K + 37)
-BK = K + 37                         # byte-line variant of keyword k is class BK + k
+ STOREVN, BYTESV, SLSRC, SLICES, SCATTER4, INPUTV, ZEROSV) = range(K, K + 39)
+BK = K + 39                         # byte-line variant of keyword k is class BK + k
 NCODE = BK + K                      # classes below this emit code
 DATA, STR, NONE, ERR = NCODE, NCODE + 1, NCODE + 2, NCODE + 3
 NCLS = NCODE + 4
@@ -40,7 +40,7 @@ for c in [COMPRESS, SCATTER, TEEC]:
 for _k in range(K): DELTA[BK + _k] = DELTA[_k]
 DELTA[SCALB] = 1; DELTA[VECBX] = 1; DELTA[SUMB] = -1; DELTA[VECT] = 1
 DELTA[STOREVB] = -1; DELTA[WHEREB] = -1
-DELTA[STOREVN] = -1; DELTA[BYTESV] = 1; DELTA[SLICES] = -3; DELTA[SCATTER4] = -2
+DELTA[STOREVN] = -1; DELTA[ZEROSV] = -1; DELTA[BYTESV] = 1; DELTA[SLICES] = -3; DELTA[SCATTER4] = -2
 
 LEADOF = list(range(NCLS))          # class a token takes when it is first on its line
 LEADOF[VEC], LEADOF[SCAL], LEADOF[LEN] = VECLEAD, SCALLEAD, LENLEAD
@@ -70,6 +70,9 @@ BYTEOF[FSM] = FSMB
 # failure. A name is a byte vector or a dword vector for the whole program (E_TYPE).
 BYTEOF[STOREV] = STOREVB; BYTEOF[TEEC] = WHEREB
 # Building byte vectors from dword lines -- what a code generator and a linker do.
+#   `<x`                 (a line of its own) x is the program's input as a byte vector; nothing is copied,
+#                        and x is read-only: `)x` or `}x` on it is a runtime failure
+#   `N ,x`               (sink of a one-element line) x is N zero bytes; fresh memory is not touched
 #   `v .x`               (sink) the low byte of every lane, stored as the byte vector x
 #   `'x`                 (lead) a byte line over the byte vector x, as `bytes` is over stdin
 #   `s n d (src )dst`    copy n bytes from src[s..] to dst[d..], one slice per lane, in lane order.
@@ -87,7 +90,7 @@ ISTEEC = [0] * NCLS                 # '%' compress-tees: one definition, never r
 ISTEEC[TEEC] = ISTEEC[WHEREB] = 1
 VTYPE = [0] * NCLS                  # what a class requires of its operand name: 1 dword vector, 2 byte vector
 for _c in (VEC, VECLEAD, VECT, GATHER, STOREV, COMPRESS, SCATTER, TEE, TEEC, WHEREB, DATA, TABLEB, FSM, FSMB): VTYPE[_c] = 1
-for _c in (STOREVB, TEEBX, GATHERB, GATHER4, STOREVN, BYTESV, SLSRC, SLICES, SCATTER4): VTYPE[_c] = 2
+for _c in (STOREVB, TEEBX, GATHERB, GATHER4, STOREVN, BYTESV, SLSRC, SLICES, SCATTER4, INPUTV, ZEROSV): VTYPE[_c] = 2
 LOCALOF[TEEBX], LOCALOF[VECBX] = TEEL, VECL
 ISTEE = [0] * NCLS                  # ':' tees, before chunk-local classification
 ISTEE[TEE] = ISTEE[TEEBX] = 1
@@ -105,7 +108,7 @@ def opclass(c):
     if 48 <= c <= 57: return O_DIGIT
     if c == 34: return O_QUOTE
     return O_OTHER
-SIGILS = '>@~?!$^&=:%/[{.\'()}'                # sigil index = position + 1
+SIGILS = '>@~?!$^&=:%/[{.\'()}<,'                # sigil index = position + 1
 def sigil(c):
     return SIGILS.index(chr(c)) + 1 if c < 128 and chr(c) in SIGILS else 0
 
@@ -121,11 +124,11 @@ _s('$', O_UPPER, SUM); _s('^', O_UPPER, MAX)
 _s('&', O_LOWER, LEN); _s('=', O_LOWER, DATA)
 _s(':', O_LOWER, TEE); _s('%', O_LOWER, TEEC); _s('/', O_LOWER, FSM)
 _s('[', O_LOWER, GATHERB); _s('{', O_LOWER, GATHER4)
-_s('.', O_LOWER, STOREVN); _s("'", O_LOWER, BYTESV); _s('(', O_LOWER, SLSRC); _s(')', O_LOWER, SLICES); _s('}', O_LOWER, SCATTER4)
+_s('<', O_LOWER, INPUTV); _s(',', O_LOWER, ZEROSV); _s('.', O_LOWER, STOREVN); _s("'", O_LOWER, BYTESV); _s('(', O_LOWER, SLSRC); _s(')', O_LOWER, SLICES); _s('}', O_LOWER, SCATTER4)
 
 # which classes define / use their operand variable
 DEFINES = [0] * NCLS
-for c in [STOREV, STORES, SUM, MAX, COMPRESS, DATA, TEE, TEEC, TEEL, SUMB, TEEBX, STOREVB, WHEREB, STOREVN]: DEFINES[c] = 1
+for c in [STOREV, STORES, SUM, MAX, COMPRESS, DATA, TEE, TEEC, TEEL, SUMB, TEEBX, STOREVB, WHEREB, STOREVN, INPUTV, ZEROSV]: DEFINES[c] = 1
 USES = [0] * NCLS
 for c in [VEC, VECLEAD, SCAL, SCALLEAD, LEN, LENLEAD, GATHER, IOTA, SCATTER, VECL, LENL, SCALB, TABLEB, VECBX, FSM, FSMB, GATHERB, GATHER4, BYTESV, SLSRC, SLICES, SCATTER4]: USES[c] = 1
 READSVEC = [0] * NCLS               # reads vector *contents* (conflicts with an in-place scatter)

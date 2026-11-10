@@ -167,6 +167,7 @@ rddone:
   mov [rbx-16],r13
   lea r13,[r13+r12+127]
   and r13,-64
+  mov [rbx-40],r13                  # the input is below the heap base now: never released
 inputdone:
   add rsp,160
   mov [rbx-8],r12

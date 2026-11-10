@@ -129,6 +129,9 @@ value position }cb                           # a dword at a byte position
 'cb out                                      # a byte line over a byte vector
 ```
 
+- `<x`, a line of its own, makes the program's input the byte vector `x` without copying
+  it. It is read-only: `)x` or `}x` on it fails at run time. `N ,x` makes `x` a vector of
+  `N` zero bytes without touching fresh memory.
 - `v .x` (sink) stores the low byte of each lane as the byte vector `x`; `'x` (lead) starts
   a byte line over a byte vector, as `bytes` does over stdin.
 - `s n d (src )dst` copies `n` bytes from `src[s..]` to `dst[d..]`, one slice per lane, in

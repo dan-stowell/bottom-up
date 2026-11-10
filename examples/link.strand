@@ -1,0 +1,30 @@
+# link.strand -- a linker: layout by prefix sums, imports by (unit, ordinal), code by slices,
+# relocations as dword stores. Input: the job file of explore/linkjob.c. Output: the linked image.
+<raw
+~1 {raw >U
+~1 4 + {raw >Ne
+~1 8 + {raw >Ni
+~1 12 + {raw >Nr
+20 >Ousize
+U 4 * Ousize + >Ouexp
+U 4 * Ouexp + >Oexunit
+Ne 4 * Oexunit + >Oexoff
+Ne 16 * Oexunit + >Oimu
+Ni 4 * Oimu + >Oimo
+Ni 16 * Oimu + >Orunit
+Nr 4 * Orunit + >Oroff
+Nr 4 * Oroff + >Orimp
+Nr 4 * Orimp + >Ocode
+# layout: where each unit's code is in the file, and where it goes (aligned to 64)
+~U 4 * Ousize + {raw :usz dup scan swap - >inb
+usz 63 + 6 >> 6 << :al dup scan swap - >ubase
+al $Tot
+~U 4 * Ouexp + {raw dup scan swap - >exbase
+# every export's address, then every import's
+~Ne 4 * :e4 Oexunit + {raw @ubase e4 Oexoff + {raw + >exaddr
+~Ni 4 * :i4 Oimu + {raw @exbase i4 Oimo + {raw + @exaddr >imaddr
+# the image: one slice per unit, then one dword per relocation
+Tot ,img
+~U :ui dup @inb Ocode + usz ui @ubase (raw )img end
+~Nr 4 * :r4 Orimp + {raw @imaddr r4 Orunit + {raw @ubase r4 Oroff + {raw + :pl - pl }img
+'img out
