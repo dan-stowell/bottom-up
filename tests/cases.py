@@ -21,6 +21,9 @@ CASES = [
  (b'input >x\nx x !x\n', E_ALIAS), (b'input >x\n~3 dup @x swap !x\n', E_ALIAS), (b'input >x\n~3 &x + dup !x\n', 0),
  (b'x out\n', E_UNDEF), (b'~N out\n', E_UNDEF), (b'input @x out\n', E_UNDEF), (b'input &x + out\n', E_UNDEF), (b'~3 dup !x\n', E_UNDEF),
  (b'x out\ninput >x\n', 0),
+ (b'bytes :t dup 32 > %p end\np [t out\np {t out4\n', 0), (b'bytes >t\nt out\n', E_TYPE), (b'input >t\n~3 [t out\n', E_TYPE), (b'bytes >t\n~3 @t out\n', E_TYPE),
+ (b'bytes >t\ninput >t\n', E_TYPE), (b'bytes dup %p end\n~2 {p out\n', E_TYPE), (b'bytes %p\n', E_STENCIL), (b'bytes dup %p %p end\n', E_DEPTH), (b'bytes dup dup %p %p end\n', E_TEE),
+ (b'bytes dup %p end\np out4\n&p >N\nN out4\n', 0), (b'bytes >t\n&t >N\nN out4\n~1 [t out\n', 0), (b'input [t out\n', E_UNDEF),
  (b'input :a 1 + :b end\na b + out\n', 0), (b'input :a a + out\n', 0), (b'input :a &a + out\n', 0),
  (b'input >a\na :a end\n', E_TEE), (b'input :a end\ninput >a\n', E_TEE), (b'input :a :a end\n', E_TEE),
  (b'input >b\nb a + :a end\n', E_TEE), (b'input :a @a end\n', E_TEE), (b'input dup 1 & %k 5 end\n', E_DEPTH),
@@ -28,8 +31,8 @@ CASES = [
  (b'input end\n', 0),
  # byte lines
  (b'bytes 10 = $N\n~1 N + out4\n', 0), (b'bytes dup prev - out\n', 0), (b'bytes :c 97 >= c 122 <= & c 32 - c sel out\n', 0),
- (b'bytes dup 64 > outif\n', 0), (b'bytes scan out\n', E_STENCIL), (b'bytes >x\n', E_DEPTH), (b'input >x\nbytes x + out\n', E_STENCIL),
- (b'bytes :c end\nc out\n', E_STENCIL), (b'bytes idx + out\n', E_STENCIL), (b'input bytes + out\n', E_STENCIL), (b'bytes 3 * 300 + out\n', 0),
+ (b'bytes dup 64 > outif\n', 0), (b'bytes scan out\n', E_STENCIL), (b'bytes >x\n', 0), (b'input >x\nbytes x + out\n', E_STENCIL),
+ (b'bytes :c end\nc out\n', E_TYPE), (b'bytes idx + out\n', E_STENCIL), (b'input bytes + out\n', E_STENCIL), (b'bytes 3 * 300 + out\n', 0),
  (b'~256 255 swap - >t\nbytes @t out\n', 0), (b'~255 >t\nbytes @t out\n', 0),
  # automata
  (b'0 1 2 2 1 1 2 2 2 1 0 2 0 0 2 2 0 1 3 2 =d\nbytes 7 & /d 48 + out\n', 0), (b'=d\nbytes /d 65 + out\n', 0), (b'3 =d\nbytes 0 & /d out\n', 0),

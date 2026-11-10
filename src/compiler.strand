@@ -108,7 +108,7 @@ ln1 @lbt clsd @byteof clsd - * clsd + >clso
 # chunk-local vectors: a ':x' whose last occurrence (its canonical token) is on the tee's own line never
 # needs an array. Its occurrences there switch class, and keep just the current chunk in x's slot.
 ~S1 0 * >tdef
-~NT 1 + clso @istee clso Cteec = | slot Neg sel !tdef
+~NT 1 + clso @istee clso @isteec | slot Neg sel !tdef
 slot @tdef :td1 1 - 0 max :td @clso @istee td1 0 > & isname & td @rep @ln1 td @ln1 = & ln1 td @ln1 = & :loc clso @localof clso - * clso + >clsl
 # ... and a ':x' that does outlive its line but is pushed again on it: that push reads the array while it
 # is being written, so it takes a class that keeps the line on one thread
@@ -144,6 +144,11 @@ Eu 0 > 12 * halt
 td1 0 > cls @defines & slot @ldef idx != & $Et1
 td @clso @istee clso @reread & idx td > & 1 ^ td1 0 > isname & idx td != & ln1 td @ln1 = & & $Et2
 Et1 Et2 + 0 > 13 * halt
+# a name is a byte vector or a dword vector, never both: every typed use scatters its type to the slot
+~S1 0 * >vty
+cls @vtype dup 0 > isname & slot Neg sel !vty
+slot @vty cls @vtype :vt != vt 0 > & isname & $Ety
+Ety 0 > 14 * halt
 
 # ---------------------------------------------------------------- data image: slots, then pool
 lit S1 Slot * pidx 4 * + slot Slot * sel >disp

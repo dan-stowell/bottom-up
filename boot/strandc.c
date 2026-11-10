@@ -156,7 +156,7 @@ int main(void) {
   }
   // ---- chunk-local vectors: a ':x' whose name's last occurrence is on the tee's own line
   int *teetok = calloc(nslots + 1, sizeof(int));
-  for (int i = 0; i < nt; i++) { tok[i].cls0 = tok[i].cls; if (T_istee[tok[i].cls] || tok[i].cls == C_TEEC) teetok[tok[i].slot] = i + 1; }
+  for (int i = 0; i < nt; i++) { tok[i].cls0 = tok[i].cls; if (T_istee[tok[i].cls] || T_isteec[tok[i].cls]) teetok[tok[i].slot] = i + 1; }
   for (int i = 0; i < nt; i++) {
     Tok *t = &tok[i]; int d = t->isname ? teetok[t->slot] - 1 : -1;
     t->local = d >= 0 && T_istee[tok[d].cls0] && tok[names[tok[d].name].last].line == tok[d].line && t->line == tok[d].line;
@@ -195,6 +195,12 @@ int main(void) {
       Tok *t = &tok[i]; int d = t->isname ? teetok[t->slot] - 1 : -1;
       if (d >= 0 && d != i && tok[d].line == t->line && !(T_istee[tok[d].cls0] && T_reread[t->cls0] && i > d)) ERR(13);
     }
+  }
+  die();
+  {                                        // a name is a byte vector or a dword vector, never both
+    unsigned char *vt = calloc(nslots + 1, 1);
+    for (int i = 0; i < nt; i++) if (tok[i].isname && T_vtype[tok[i].cls]) vt[tok[i].slot] = T_vtype[tok[i].cls];
+    for (int i = 0; i < nt; i++) if (tok[i].isname && T_vtype[tok[i].cls] && vt[tok[i].slot] != T_vtype[tok[i].cls]) ERR(14);
   }
   die();
 

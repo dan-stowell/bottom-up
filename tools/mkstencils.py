@@ -153,6 +153,27 @@ for d in range(1, 9):
   vpxord zmm24,zmm24,zmm24
   vpgatherdd zmm24{{k1}},[rsi+zmm{r}*4]
   vmovdqa32 zmm{r},zmm24""")
+    # reading a byte vector from a dword line: `i [x` one byte, `i {x` four (bytes past the end are 0).
+    # Blocks have at least 127 bytes of slack, so the gather itself never leaves the block.
+    st(GATHERB, d, f"  lea rcx,[rbx+{DISP}]" + bounds(r) + f"""
+  mov rsi,[rcx]
+  vpxord zmm24,zmm24,zmm24
+  vpgatherdd zmm24{{k1}},[rsi+zmm{r}*1]
+  vpslld zmm24,zmm24,24
+  vpsrld zmm{r},zmm24,24""")
+    st(GATHER4, d, f"  lea rcx,[rbx+{DISP}]" + bounds(r) + f"""
+  mov rsi,[rcx]
+  vpxord zmm24,zmm24,zmm24
+  vpgatherdd zmm24{{k1}},[rsi+zmm{r}*1]
+  vpbroadcastd zmm25,dword ptr [rcx+8]
+  vpsubd zmm25,zmm25,zmm{r}
+  vpslld zmm{r},zmm31,2
+  vpminud zmm25,zmm25,zmm{r}
+  vpslld zmm25,zmm25,3
+  vpslld zmm{r},zmm{r},3
+  vpsubd zmm25,zmm{r},zmm25
+  vpsllvd zmm24,zmm24,zmm25
+  vpsrlvd zmm{r},zmm24,zmm25""")
     if d <= 7:
         st(VEC, d, f"  mov rsi,[rbx+{DISP}]\n  vmovdqu32 zmm{d}{{k7}}{{z}},[rsi+rax*4]",
            pre=f"  cmp r12,[rbx+{DISP8}]" + failif('e'))       # length check hoisted out of the loop
@@ -481,6 +502,33 @@ st(BKW('outif'), 2, FLUSHCHK + """  vptestmb k1{k6},zmm1,zmm1
   popcnt rcx,rcx
   add r8,rcx""" + LOOPENDB + "\n  mov [rbx-32],r8", pre="  mov r8,[rbx-32]\n  mov dword ptr [rbx-704],1")
 st(BKW('end'), 1, LOOPENDB)
+# ---- the bridge to dword lines (spec.py). `>x` on a byte line keeps the bytes as a vector.
+st(STOREVB, 1, pre=ALLOC('rdi'), text="  vmovdqu8 [rdi+rax]{k6},zmm0" + LOOPENDB + f"""
+  lea rcx,[rbx+{DISP}]""" + RELEASE + """
+  mov [rcx],rdi
+  mov [rcx+8],r12""")
+for d in range(1, 9):     # ':x' on a byte line, when x is read after the line: the same store, as a tee
+    st(TEEBX, d, f"  mov rsi,[rbx+{DISP}]\n  vmovdqu8 [rsi+rax]{{k6}},zmm{d-1}",
+       pre=ALLOC('rsi') + f"\n  lea rcx,[rbx+{DISP}]\n  mov [rcx],rsi\n  mov [rcx+8],r12")
+# `m %x` on a byte line appends the positions of the nonzero lanes to the dword vector x: four
+# compresses of the lane indices, 16 lanes each. Like the dword '%' tee it keeps its cursor in the
+# slot and keeps the line on one thread.
+for d in range(2, 9):    # never at depth 1: a line must not end on a tee
+    r = d - 1
+    st(WHEREB, d, f"""  lea rcx,[rbx+{DISP}]
+  vptestmb k1{{k7}},zmm{r},zmm{r}
+  mov rsi,[rcx]
+  mov rdx,[rcx+8]
+  vpbroadcastd zmm24,eax
+  vpaddd zmm24,zmm24,zmm30""" + """
+  vpcompressd zmm25{k1}{z},zmm24
+  vmovdqu32 [rsi+rdx*4],zmm25
+  kmovw r10d,k1
+  popcnt r10d,r10d
+  add rdx,r10
+  kshiftrq k1,k1,16
+  vpaddd zmm24,zmm24,dword ptr [rbx-44]{1to16}""" * 4 + """
+  mov [rcx+8],rdx""", pre=ALLOC('rsi') + f"\n  lea rcx,[rbx+{DISP}]\n  mov [rcx],rsi\n  mov qword ptr [rcx+8],0\n" + VETO)
 
 asm = ".intel_syntax noprefix\n.text\n"
 for kind, D in (('S', S), ('Q', PRE)):
@@ -558,7 +606,7 @@ with open(f'{ROOT}/src/tables.strand', 'w') as f:
     f.write(data('delta', [x + 2 for x in DELTA]))      # biased by 2: literals are unsigned
     f.write(data('leadof', LEADOF)); f.write(data('localof', LOCALOF)); f.write(data('byteof', BYTEOF)); f.write(data('istee', ISTEE)); f.write(data('reread', REREAD)); f.write(data('clstab', CLSTAB))
     f.write(data('opctab', [opclass(c) for c in range(128)])); f.write(data('sigtab', [sigil(c) for c in range(128)]))
-    f.write(data('defines', DEFINES)); f.write(data('uses', USES)); f.write(data('readsvec', READSVEC)); f.write(data('carry', CARRY))
+    f.write(data('isteec', ISTEEC)); f.write(data('vtype', VTYPE)); f.write(data('defines', DEFINES)); f.write(data('uses', USES)); f.write(data('readsvec', READSVEC)); f.write(data('carry', CARRY))
     f.write(data('pow10', [10 ** i for i in range(MAXDIGITS)]))
     f.write(f"{len(stub)} >Stublen\n")
     for nm, v in [('Rels', rels), ('Rell', rell), ('Relp', relp), ('Kn', K), ('Ncode', NCODE), ('Cdata', DATA), ('Cstr', STR), ('Cnone', NONE), ('Cerr', ERR),

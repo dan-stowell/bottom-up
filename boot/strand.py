@@ -155,7 +155,7 @@ def analyze(src: bytes):
     teedef = {}
     for t in toks:
         t.cls0 = t.cls
-        if ISTEE[t.cls] or t.cls == TEEC: teedef[t.slot] = t  # the last tee of a slot, like the scatter
+        if ISTEE[t.cls] or ISTEEC[t.cls]: teedef[t.slot] = t  # the last tee of a slot, like the scatter
     for t in toks:
         d = teedef.get(t.slot) if t.isname else None
         t.local = d is not None and ISTEE[d.cls0] == 1 and lastname[d.name].line == d.line and t.line == d.line
@@ -201,6 +201,12 @@ def analyze(src: bytes):
         d = teedef.get(t.slot) if t.isname else None
         if d is not None and t is not d and t.line == d.line:
             if not (ISTEE[d.cls0] and REREAD[t.cls0] and t.idx > d.idx): raise CompileError(E_TEE)
+
+    # a name is a byte vector or a dword vector, never both
+    vty = {}
+    for t in toks:
+        if t.isname and VTYPE[t.cls]: vty[t.slot] = VTYPE[t.cls]
+    if any(t.isname and VTYPE[t.cls] and vty[t.slot] != VTYPE[t.cls] for t in toks): raise CompileError(E_TYPE)
 
     for t in toks:
         t.disp = SLOT * (nslots + 1) + 4 * t.poolidx if t.lit else SLOT * t.slot
@@ -330,6 +336,9 @@ def interp(src: bytes, inp: bytes):
                     elif k == 'outif':
                         m = st.pop(); a = st.pop(); out += bytes(x for x, q in zip(a, m) if q)
                     elif k == 'end': st.pop()
+                    elif c == STOREVB: vec[t.slot] = st.pop()
+                    elif c == TEEBX: vec[t.slot] = list(st[-1])
+                    elif c == WHEREB: vec[t.slot] = [i for i, q in enumerate(st.pop()) if q]
                     else: raise AssertionError(c)
                     continue
                 sval = (pool[t.poolidx] if t.lit else sca.get(t.slot, 0))
@@ -353,6 +362,11 @@ def interp(src: bytes, inp: bytes):
                     idx = st.pop()
                     if any(not 0 <= i < len(v) for i in idx): raise Fail()
                     st.append([v[i] for i in idx])
+                elif c in (GATHERB, GATHER4):
+                    idx = st.pop()
+                    if any(not 0 <= i < len(v) for i in idx): raise Fail()
+                    if c == GATHERB: st.append([v[i] & 255 for i in idx])
+                    else: st.append([w32(sum((v[i + k] & 255) << (8 * k) for k in range(4) if i + k < len(v))) for i in idx])
                 elif c < K and KEYWORDS[c] in BINOPS:
                     b = st.pop(); a = st.pop(); f = BINOPS[KEYWORDS[c]]
                     st.append([f(x, y) for x, y in zip(a, b)])

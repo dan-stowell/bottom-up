@@ -55,6 +55,10 @@ class Gen:
                 op = r.choice(['scan', 'scanmax', 'prev'])
                 key = ('m' if op == 'scanmax' else 's', d)
                 if key not in used: used.add(key); toks.append(op)
+            elif ch < .83 and getattr(self, 'bvecs', None) and d < depth_budget - 2:     # read a byte vector by index
+                v = r.choice(self.bvecs); g = r.choice('[{')
+                if r.random() < .97: toks += ["0", "max", "&" + v, "1", "-", "min", g + v]   # clamped (still fails on an empty vector)
+                else: toks.append(g + v)
             elif ch < .85 and d < depth_budget: toks.append(r.choice(['dup', 'over', 'idx'] if d >= 2 else ['dup', 'idx'])); d += 1
             elif ch < .88 and d >= 2: toks.append('swap')
             elif ch < .90 and d >= 2: toks.append('drop'); d -= 1
@@ -66,7 +70,8 @@ class Gen:
         return toks
     def byteline(self):
         """a streaming byte line: 64 lanes, byte arithmetic, table lookups, local tees, streaming sinks"""
-        r = self.r; toks = ['bytes']; d = 1; used = set(); teed = []
+        r = self.r; toks = ['bytes']; d = 1; used = set(); teed = []; newvecs = []
+        if not hasattr(self, 'bvecs'): self.bvecs = []
         BOPS = ['+', '-', '*', '&', '|', '^', 'min', 'max', '<', '<=', '>', '>=', '=', '!=']
         for _ in range(r.randrange(0, 14)):
             ch = r.random()
@@ -80,18 +85,25 @@ class Gen:
             elif ch < .84 and d >= 2: toks.append(r.choice(['swap', 'drop'])); d -= toks[-1] == 'drop'
             elif ch < .90:
                 v = 'l%d' % self.nv; self.nv += 1; toks.append(':' + v); teed.append(v)   # chunk-local by construction
-            elif ch < .94 and teed and d < 7: toks.append(r.choice(teed)); d += 1
+            elif ch < .93 and teed and d < 7: toks.append(r.choice(teed)); d += 1
+            elif ch < .95 and d >= 2:              # positions of the nonzero lanes, as a dword vector
+                v = 'w%d' % self.nv; self.nv += 1; toks.append('%' + v); d -= 1; newvecs.append(v)
+            elif ch < .97 and d < 7:               # a byte tee that outlives the line: a byte vector
+                v = 'b%d' % self.nv; self.nv += 1; toks.append(':' + v); self.bvecs.append(v)
             else: toks.append('@' + self.table256())
         while d > 2: toks.append(r.choice(BOPS)); d -= 1
         k = r.random()
         if d == 2:
             if k < .5: toks += ['dup', '1', '&'][0:0] + ['outif']
             else: toks += [r.choice(BOPS), r.choice(['out', 'end'])]
-        elif k < .45: toks.append('out')
+        elif k < .40: toks.append('out')
+        elif k < .50:
+            v = 'b%d' % self.nv; self.nv += 1; toks.append('>' + v); self.bvecs.append(v)
         elif k < .9:
             sn = 'S%d' % self.ns; self.ns += 1; toks.append('$' + sn); self.scal.append(sn)
         else: toks.append('end')
         self.lines.append(' '.join(toks))
+        for v in newvecs: self.vecs[v] = self.newcls()
     def automaton(self):
         if not hasattr(self, 'autos'): self.autos = []
         if not self.autos or self.r.random() < .4:

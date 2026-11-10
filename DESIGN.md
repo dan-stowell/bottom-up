@@ -95,6 +95,28 @@ associative, so thread ranges combine the same way running sums do. Like every o
 carry in the language, it is a scan over a small monoid; that is the property the whole
 design leans on.
 
+### From bytes to tokens: the bridge
+
+A byte line can leave two kinds of vector behind, and a dword line can read both:
+
+```
+bytes :text dup 32 > dup prev 1 ^ & %start end   # keep the bytes; record where words begin
+start [text out                                  # first byte of every word
+start {text out4                                 # first four bytes of every word, as one dword
+```
+
+- `>x` (or the tee `:x`) on a byte line stores the bytes as a **byte vector**.
+- `m %x` on a byte line appends the **positions** of the nonzero lanes of `m` to the dword
+  vector `x`. This is what turns "this byte starts a token" into a token stream.
+- `i [x` on a dword line is the byte of `x` at index `i`; `i {x` is the little-endian dword
+  starting there, with bytes past the end of `x` read as 0. An index outside the vector is a
+  runtime failure, as for `@x`.
+- A name is a byte vector or a dword vector for the whole program. Using one as the other is
+  a compile error (`E_TYPE`, 14), checked the same way as every other rule: each typed use
+  scatters its type to the name's slot and every use compares.
+
+`%x` keeps its line on one thread, like the dword `%` tee.
+
 ### Failure and output
 
 A runtime check that fails exits with status 99, `halt` with its own status. Output is
