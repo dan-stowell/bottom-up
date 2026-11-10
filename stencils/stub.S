@@ -3,6 +3,7 @@
 # See SCALAR_LEDGER.md.
 #
 # Layout contract with the stencils (rbx = address of the first byte after this blob):
+#   [rbx-708] chunk size of the current line: 16 (dword lanes) or 64 (byte lanes)
 #   [rbx-704] out stride of the current line: 0 = no out sink, 1 = out, 4 = out4
 #   [rbx-696] fork threshold: lines with at least this many elements may run on all cores
 #   [rbx-688] address of the exit routine
@@ -162,7 +163,7 @@ inputdone:
   vmovdqu32 zmm30,[rbx-128]
   vpbroadcastd zmm31,dword ptr [rbx-124]
   lea r14,[rip+fail]
-  kxnorw k5,k5,k5                   # keep results (cleared only for warm-up chunks)
+  kxnorq k5,k5,k5                   # keep results (cleared only for warm-up chunks)
   xor r15d,r15d
   mov eax,[rbx]
   lea rcx,[rbx+rax]
@@ -272,13 +273,13 @@ fblock:
   jne 4f
   dec rax                           # always leave at least one element for the serial tail
 4:
-  shr rax,4
+  shr rax,6
   xor edx,edx
   mov r9d,[rip+nthreads]
-  div r9                            # chunks per thread
+  div r9                            # 64-element units per thread
   test rax,rax
   jz fdone
-  shl rax,4
+  shl rax,6
   mov [rip+f_per],rax
   lea r10,[rip+wparams]
   mov rdx,rsi
@@ -316,18 +317,19 @@ fblock:
   syscall
   mov rdi,[rip+j_rdi]
   mov r11,[rip+j_head]
-  kxorw k5,k5,k5                    # warm-up chunk: compute, keep nothing, ignore check failures
+  kxorq k5,k5,k5                    # warm-up chunk: compute, keep nothing, ignore check failures
   lea r14,[rip+justret]
   mov rax,[rip+f_lo]
-  sub rax,16
+  mov rbp,rax
+  mov ecx,[rbx-708]
+  sub rax,rcx
   vpbroadcastd zmm26,eax
   vpaddd zmm26,zmm26,zmm30
-  lea rbp,[rax+16]
   lea r8,[rip+scratch]
   lea r15,[rip+6f]
   jmp r11
 6:
-  kxnorw k5,k5,k5
+  kxnorq k5,k5,k5
   lea r14,[rip+fail]
   mov rax,[rip+f_lo]
   vpbroadcastd zmm26,eax
@@ -435,7 +437,7 @@ worker:                             # r13 = this worker's parameter block
   vmovdqu32 zmm30,[rbx-128]
   vpbroadcastd zmm31,dword ptr [rbx-124]
   lea r14,[rip+fail]
-  kxnorw k5,k5,k5
+  kxnorq k5,k5,k5
 wloop:
   mov ecx,20000
 1:
@@ -471,17 +473,18 @@ wloop:
   mov rax,[r13]
   test rax,rax
   jz 3f
-  kxorw k5,k5,k5                    # warm-up chunk: compute, keep nothing, ignore check failures
+  kxorq k5,k5,k5                    # warm-up chunk: compute, keep nothing, ignore check failures
   lea r14,[rip+justret]
-  sub rax,16
+  mov rbp,rax
+  mov ecx,[rbx-708]
+  sub rax,rcx
   vpbroadcastd zmm26,eax
   vpaddd zmm26,zmm26,zmm30
-  lea rbp,[rax+16]
   lea r8,[r13+64]
   lea r15,[rip+3f]
   jmp r11
 3:
-  kxnorw k5,k5,k5
+  kxnorq k5,k5,k5
   lea r14,[rip+fail]
   mov rax,[r13]
   vpbroadcastd zmm26,eax

@@ -64,7 +64,42 @@ class Gen:
                 else: toks.append('@' + v)                                                 # may fail: fine
         while d > 1: toks.append(r.choice(BIN)); d -= 1
         return toks
+    def byteline(self):
+        """a streaming byte line: 64 lanes, byte arithmetic, table lookups, local tees, streaming sinks"""
+        r = self.r; toks = ['bytes']; d = 1; used = set(); teed = []
+        BOPS = ['+', '-', '*', '&', '|', '^', 'min', 'max', '<', '<=', '>', '>=', '=', '!=']
+        for _ in range(r.randrange(0, 14)):
+            ch = r.random()
+            if ch < .25 and d < 7:
+                toks.append(r.choice(self.scal) if self.scal and r.random() < .3 else r.choice(['0', '1', '10', '32', '64', '97', '122', '127', '128', '255', '256', '300', str(r.randrange(256))])); d += 1
+            elif ch < .55 and d >= 2: toks.append(r.choice(BOPS)); d -= 1
+            elif ch < .62 and d >= 3: toks.append('sel'); d -= 2
+            elif ch < .72 and ('p', d) not in used: used.add(('p', d)); toks.append('prev')
+            elif ch < .80 and d < 7: toks.append(r.choice(['dup', 'over'] if d >= 2 else ['dup'])); d += 1
+            elif ch < .84 and d >= 2: toks.append(r.choice(['swap', 'drop'])); d -= toks[-1] == 'drop'
+            elif ch < .90:
+                v = 'l%d' % self.nv; self.nv += 1; toks.append(':' + v); teed.append(v)   # chunk-local by construction
+            elif ch < .94 and teed and d < 7: toks.append(r.choice(teed)); d += 1
+            else: toks.append('@' + self.table256())
+        while d > 2: toks.append(r.choice(BOPS)); d -= 1
+        k = r.random()
+        if d == 2:
+            if k < .5: toks += ['dup', '1', '&'][0:0] + ['outif']
+            else: toks += [r.choice(BOPS), r.choice(['out', 'end'])]
+        elif k < .45: toks.append('out')
+        elif k < .9:
+            sn = 'S%d' % self.ns; self.ns += 1; toks.append('$' + sn); self.scal.append(sn)
+        else: toks.append('end')
+        self.lines.append(' '.join(toks))
+    def table256(self):
+        if not hasattr(self, 'tabs'): self.tabs = []
+        if not self.tabs or self.r.random() < .3:
+            v = 'tb%d' % self.nv; self.nv += 1
+            n = self.r.choice([256, 256, 256, 300, 255])            # 255: the lookup must fail at run time
+            self.lines.append(' '.join(str(self.r.randrange(1000)) for _ in range(n)) + ' =' + v); self.tabs.append(v)
+        return self.r.choice(self.tabs)
     def line(self):
+        if self.r.random() < .12: return self.byteline()
         self.pending = []
         self._line()
         for v, c in self.pending: self.vecs[v] = self.newcls() if c is None or c == -1 else c; self.teenames.add(v)

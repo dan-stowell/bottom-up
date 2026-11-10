@@ -5,13 +5,15 @@ The first K classes are the keywords, in prelude order.
 """
 KEYWORDS = ['+', '-', '*', '&', '|', '^', 'min', 'max', '<<', '>>',
             '<', '<=', '>', '>=', '=', '!=', 'sel', 'scan', 'scanmax', 'prev',
-            'dup', 'drop', 'swap', 'over', 'input', 'out', 'out4', 'halt', 'end', 'idx', 'input4', 'outif', 'outif4']
+            'dup', 'drop', 'swap', 'over', 'input', 'out', 'out4', 'halt', 'end', 'idx', 'input4', 'outif', 'outif4', 'bytes']
 K = len(KEYWORDS)
 PRELUDE = ' '.join(KEYWORDS)
 
 (VEC, VECLEAD, SCAL, SCALLEAD, LEN, LENLEAD, GATHER, IOTA,
- STOREV, STORES, SUM, MAX, COMPRESS, SCATTER, TEE, TEEC, TEEL, VECL, LENL) = range(K, K + 19)
-NCODE = K + 19                      # classes below this emit code
+ STOREV, STORES, SUM, MAX, COMPRESS, SCATTER, TEE, TEEC, TEEL, VECL, LENL,
+ SCALB, TABLEB, SUMB, TEEBX, VECBX, BAD) = range(K, K + 25)
+BK = K + 25                         # byte-line variant of keyword k is class BK + k
+NCODE = BK + K                      # classes below this emit code
 DATA, STR, NONE, ERR = NCODE, NCODE + 1, NCODE + 2, NCODE + 3
 NCLS = NCODE + 4
 ND = 9                              # depth-before ranges over 0..8
@@ -23,7 +25,7 @@ for k in ['+', '-', '*', '&', '|', '^', 'min', 'max', '<<', '>>', '<', '<=', '>'
     DELTA[KW[k]] = -1
 DELTA[KW['sel']] = -2
 DELTA[KW['outif']] = DELTA[KW['outif4']] = -2
-for k in ['dup', 'over', 'input', 'idx', 'input4']:
+for k in ['dup', 'over', 'input', 'idx', 'input4', 'bytes']:
     DELTA[KW[k]] = 1
 for c in [VEC, VECLEAD, SCAL, SCALLEAD, LEN, LENLEAD, IOTA, VECL, LENL]:
     DELTA[c] = 1
@@ -32,6 +34,9 @@ for c in [STOREV, STORES, SUM, MAX]:
 for c in [COMPRESS, SCATTER, TEEC]:
     DELTA[c] = -2
 
+for _k in range(K): DELTA[BK + _k] = DELTA[_k]
+DELTA[SCALB] = 1; DELTA[VECBX] = 1; DELTA[SUMB] = -1
+
 LEADOF = list(range(NCLS))          # class a token takes when it is first on its line
 LEADOF[VEC], LEADOF[SCAL], LEADOF[LEN] = VECLEAD, SCALLEAD, LENLEAD
 
@@ -39,7 +44,20 @@ LEADOF[VEC], LEADOF[SCAL], LEADOF[LEN] = VECLEAD, SCALLEAD, LENLEAD
 # its occurrences on that line use these classes, which keep just the current 64-byte chunk in x's slot.
 LOCALOF = list(range(NCLS))
 LOCALOF[TEE], LOCALOF[VEC], LOCALOF[LEN] = TEEL, VECL, LENL
-SLOT = 64                           # bytes per slot: {ptr, len} or one zmm chunk
+SLOT = 64                           # bytes per slot: {ptr, len, byte-table ptr} or one zmm chunk
+
+# Byte lines. A line whose lead is `bytes` runs with 64 unsigned byte lanes per chunk instead of 16
+# dword lanes. Every token on it takes the class BYTEOF[cls]; classes with no byte meaning map to BAD,
+# which has no stencil. Named vectors do not exist in byte lines except as chunk-local tees.
+BYTEOF = list(range(NCLS))
+for _c in range(NCODE): BYTEOF[_c] = BAD
+for _k in range(K): BYTEOF[_k] = BK + _k
+BYTEOF[SCAL], BYTEOF[GATHER], BYTEOF[SUM], BYTEOF[TEE], BYTEOF[VEC] = SCALB, TABLEB, SUMB, TEEBX, VECBX
+LOCALOF[TEEBX], LOCALOF[VECBX] = TEEL, VECL
+ISTEE = [0] * NCLS                  # ':' tees, before chunk-local classification
+ISTEE[TEE] = ISTEE[TEEBX] = 1
+REREAD = [0] * NCLS                 # what may re-read a ':' tee later on its own line
+REREAD[VEC] = REREAD[LEN] = REREAD[VECBX] = 1
 
 # lexical classes of a byte
 O_OTHER, O_LOWER, O_UPPER, O_DIGIT, O_QUOTE = range(5)
@@ -67,13 +85,14 @@ _s(':', O_LOWER, TEE); _s('%', O_LOWER, TEEC)
 
 # which classes define / use their operand variable
 DEFINES = [0] * NCLS
-for c in [STOREV, STORES, SUM, MAX, COMPRESS, DATA, TEE, TEEC, TEEL]: DEFINES[c] = 1
+for c in [STOREV, STORES, SUM, MAX, COMPRESS, DATA, TEE, TEEC, TEEL, SUMB, TEEBX]: DEFINES[c] = 1
 USES = [0] * NCLS
-for c in [VEC, VECLEAD, SCAL, SCALLEAD, LEN, LENLEAD, GATHER, IOTA, SCATTER, VECL, LENL]: USES[c] = 1
+for c in [VEC, VECLEAD, SCAL, SCALLEAD, LEN, LENLEAD, GATHER, IOTA, SCATTER, VECL, LENL, SCALB, TABLEB, VECBX]: USES[c] = 1
 READSVEC = [0] * NCLS               # reads vector *contents* (conflicts with an in-place scatter)
-for c in [VEC, VECLEAD, GATHER, VECL]: READSVEC[c] = 1
+for c in [VEC, VECLEAD, GATHER, VECL, TABLEB, VECBX]: READSVEC[c] = 1
 CARRY = [0] * NCLS                  # 1: uses sum-carry register of its depth, 2: max-carry
 CARRY[KW['scan']] = 1; CARRY[KW['prev']] = 1; CARRY[KW['scanmax']] = 2
+CARRY[BK + KW['prev']] = 1
 
 MAXNAME = 64                        # longest name (hash weight table size)
 MAXDIGITS = 9

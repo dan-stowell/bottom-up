@@ -27,7 +27,7 @@ def digest(cmd, path):
     assert p.wait() == 0, cmd
     return h.hexdigest()
 print(f'input {mib} MiB from the page cache, output to /dev/null, best of {reps}, GB/s of input; {ncpu} vCPUs\n')
-print('| program | shape | scalar C | gcc -O3 | Strand, 1 core | Strand, 4 cores | Strand, all | vs scalar | vs gcc -O3 |\n|---|---|---|---|---|---|---|---|---|')
+print('| program | shape | scalar C | gcc -O3 | Strand, 1 core | Strand, 4 cores | Strand, all | 1 core vs gcc -O3 | best vs scalar | best vs gcc -O3 |\n|---|---|---|---|---|---|---|---|---|---|')
 for line in open(f'{H}/programs.txt'):
     if line.startswith('#') or not line.strip(): continue
     name, kind, shape, prog = [x.strip() for x in line.split('|', 3)]
@@ -41,4 +41,4 @@ for line in open(f'{H}/programs.txt'):
     c, v = gbps(f'{B}/c_{name}', data[kind], '3'), gbps(f'{B}/v_{name}', data[kind], '3')
     s1, s4, s8 = gbps(f'{B}/st_{name}', data[kind], '3'), gbps(f'{B}/st_{name}', data[kind], '0-3'), gbps(f'{B}/st_{name}', data[kind], f'0-{ncpu-1}')
     best = max(s1, s4, s8)
-    print(f'| {name} | {shape} | {c:.2f} | {v:.2f} | {s1:.2f} | {s4:.2f} | {s8:.2f} | {best/c:.1f}x | {best/v:.1f}x |', flush=True)
+    print(f'| {name} | {shape} | {c:.2f} | {v:.2f} | {s1:.2f} | {s4:.2f} | {s8:.2f} | {s1/v:.1f}x | {best/c:.1f}x | {best/v:.1f}x |', flush=True)

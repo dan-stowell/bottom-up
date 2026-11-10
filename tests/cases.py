@@ -26,6 +26,11 @@ CASES = [
  (b'input >b\nb a + :a end\n', E_TEE), (b'input :a @a end\n', E_TEE), (b'input dup 1 & %k 5 end\n', E_DEPTH),
  (b'input 7 over 1 & %k end\nk out\n', 0), (b'input 7 over 1 & %k k + end\n', E_TEE), (b'input dup 1 & %k\n', E_STENCIL), (b'input idx + out\n', 0), (b'idx out\n', E_STENCIL), (b'input :a dup !a\n', E_TEE),
  (b'input end\n', 0),
+ # byte lines
+ (b'bytes 10 = $N\n~1 N + out4\n', 0), (b'bytes dup prev - out\n', 0), (b'bytes :c 97 >= c 122 <= & c 32 - c sel out\n', 0),
+ (b'bytes dup 64 > outif\n', 0), (b'bytes scan out\n', E_STENCIL), (b'bytes >x\n', E_DEPTH), (b'input >x\nbytes x + out\n', E_STENCIL),
+ (b'bytes :c end\nc out\n', E_STENCIL), (b'bytes idx + out\n', E_STENCIL), (b'input bytes + out\n', E_STENCIL), (b'bytes 3 * 300 + out\n', 0),
+ (b'~256 255 swap - >t\nbytes @t out\n', 0), (b'~255 >t\nbytes @t out\n', 0),
  # release-on-overwrite, self-reassignment, replacing static data, scatter into static data
  (b'input >x\nx 1 + >x\nx 1 + >x\nx out\n', 0), (b'1 2 3 =d\nd 1 + >d\nd out4\n', 0), (b'1 2 3 =d\nd idx !d\nd out4\n', E_ALIAS),
  (b'1 2 3 =d\n~3 9 + idx !d\nd out4\n', 0), (b'input >a\na >b\na >c\nb >a\nc >b\na b + out\n', 0),

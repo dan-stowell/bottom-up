@@ -149,12 +149,17 @@ int main(void) {
     i = j + 1;
   }
   die();
+  for (int i = 0; i < nt;) {               // byte lines: a `bytes` lead switches its whole line to byte-lane classes
+    int j = i; while (!tok[j].last) j++;
+    if (tok[i].cls == C_BYTES) for (int k = i; k <= j; k++) tok[k].cls = T_byteof[tok[k].cls];
+    i = j + 1;
+  }
   // ---- chunk-local vectors: a ':x' whose name's last occurrence is on the tee's own line
   int *teetok = calloc(nslots + 1, sizeof(int));
-  for (int i = 0; i < nt; i++) { tok[i].cls0 = tok[i].cls; if (tok[i].cls == C_TEE || tok[i].cls == C_TEEC) teetok[tok[i].slot] = i + 1; }
+  for (int i = 0; i < nt; i++) { tok[i].cls0 = tok[i].cls; if (T_istee[tok[i].cls] || tok[i].cls == C_TEEC) teetok[tok[i].slot] = i + 1; }
   for (int i = 0; i < nt; i++) {
     Tok *t = &tok[i]; int d = t->isname ? teetok[t->slot] - 1 : -1;
-    t->local = d >= 0 && tok[d].cls0 == C_TEE && tok[names[tok[d].name].last].line == tok[d].line && t->line == tok[d].line;
+    t->local = d >= 0 && T_istee[tok[d].cls0] && tok[names[tok[d].name].last].line == tok[d].line && t->line == tok[d].line;
     if (t->local) t->cls = T_localof[t->cls];
   }
 
@@ -187,7 +192,7 @@ int main(void) {
     for (int s = 1; s <= nslots; s++) if (teetok[s] && nd[s] != 1) ERR(13);
     for (int i = 0; i < nt; i++) {
       Tok *t = &tok[i]; int d = t->isname ? teetok[t->slot] - 1 : -1;
-      if (d >= 0 && d != i && tok[d].line == t->line && !(tok[d].cls0 == C_TEE && (t->cls0 == C_VEC || t->cls0 == C_LEN) && i > d)) ERR(13);
+      if (d >= 0 && d != i && tok[d].line == t->line && !(T_istee[tok[d].cls0] && T_reread[t->cls0] && i > d)) ERR(13);
     }
   }
   die();

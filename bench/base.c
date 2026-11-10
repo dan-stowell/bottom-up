@@ -22,6 +22,8 @@ static void put(const void *p, size_t n) { const char *c = p; while (n) { ssize_
 #define P_scale4 13
 #define P_filter4 14
 #define P_prefix4 15
+#define P_swapcase 16
+#define P_lines32 17
 int main(void) {
   uint32_t acc = 0; int32_t mx = INT32_MIN; int prev = 0; int32_t prev4 = 0; uint32_t run = 0; ssize_t n; size_t have = 0;
 #if K == P_words
@@ -29,7 +31,7 @@ int main(void) {
 #endif
   while ((n = read(0, in + have, BLK - have)) > 0) {
     n += have; size_t n4 = n / 4; int32_t *w = (int32_t *)in; int32_t *o4 = (int32_t *)out; size_t no = 0;
-#if K == P_lines
+#if K == P_lines || K == P_lines32
     for (ssize_t i = 0; i < n; i++) acc += in[i] == 10;
 #elif K == P_words
     for (ssize_t i = 0; i < n; i++) { int nb = in[i] > 32; acc += nb & !prev; prev = nb; }
@@ -44,6 +46,10 @@ int main(void) {
     no = n;
 #elif K == P_rot13
     for (ssize_t i = 0; i < n; i++) { uint8_t c = in[i]; int m = (c >= 97) & (c <= 122); int x = c - 97 + 13; x -= (x >= 26) * 26; out[i] = m ? x + 97 : c; }
+    no = n;
+#elif K == P_swapcase
+    { static uint8_t tab[256]; if (!tab[1]) for (int i = 0; i < 256; i++) { int u = i & 223; tab[i] = i ^ (((u >= 65) & (u <= 90)) * 32); }
+      for (ssize_t i = 0; i < n; i++) out[i] = tab[in[i]]; }
     no = n;
 #elif K == P_maxline
     for (ssize_t i = 0; i < n; i++) { if (in[i] == 10) run = 0; else { run++; if ((int32_t)run > mx) mx = run; } }
@@ -72,7 +78,7 @@ int main(void) {
   }
 #if K == P_maxline || K == P_maxgap4
   put(&mx, 4);
-#elif K != P_upper && K != P_rot13 && K != P_letters && K != P_scale4 && K != P_filter4 && K != P_prefix4
+#elif K != P_swapcase && K != P_upper && K != P_rot13 && K != P_letters && K != P_scale4 && K != P_filter4 && K != P_prefix4
   put(&acc, 4);
 #endif
   return 0;

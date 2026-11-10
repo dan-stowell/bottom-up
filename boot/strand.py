@@ -143,6 +143,11 @@ def analyze(src: bytes):
             elif t.cls == STR or (t.cls == DATA and not t.last): bad = True
     if bad: raise CompileError(E_DATA)
 
+    # byte lines: a `bytes` lead switches every token of its line to the byte-lane class
+    for lt in lines.values():
+        if lt[0].cls == KW['bytes']:
+            for t in lt: t.cls = BYTEOF[t.cls]
+
     # chunk-local vectors: a ':x' whose name's last occurrence is on the tee's own line
     lastname = {}
     for t in toks:
@@ -150,10 +155,10 @@ def analyze(src: bytes):
     teedef = {}
     for t in toks:
         t.cls0 = t.cls
-        if t.cls in (TEE, TEEC): teedef[t.slot] = t           # the last tee of a slot, like the scatter
+        if ISTEE[t.cls] or t.cls == TEEC: teedef[t.slot] = t  # the last tee of a slot, like the scatter
     for t in toks:
         d = teedef.get(t.slot) if t.isname else None
-        t.local = d is not None and d.cls0 == TEE and lastname[d.name].line == d.line and t.line == d.line
+        t.local = d is not None and ISTEE[d.cls0] == 1 and lastname[d.name].line == d.line and t.line == d.line
         if t.local: t.cls = LOCALOF[t.cls]
 
     depth = 0
@@ -194,7 +199,7 @@ def analyze(src: bytes):
     for t in toks:
         d = teedef.get(t.slot) if t.isname else None
         if d is not None and t is not d and t.line == d.line:
-            if not (d.cls0 == TEE and t.cls0 in (VEC, LEN) and t.idx > d.idx): raise CompileError(E_TEE)
+            if not (ISTEE[d.cls0] and REREAD[t.cls0] and t.idx > d.idx): raise CompileError(E_TEE)
 
     for t in toks:
         t.disp = SLOT * (nslots + 1) + 4 * t.poolidx if t.lit else SLOT * t.slot
@@ -284,8 +289,41 @@ def interp(src: bytes, inp: bytes):
             if not lt[0].code: continue
             st = []
             n = None
+            byteline = lt[0].cls == BK + KW['bytes']
             for t in lt:
                 c = t.cls
+                if byteline and c not in (TEEL, VECL):
+                    # 64 unsigned byte lanes: all arithmetic is mod 256, comparisons are unsigned
+                    k = KEYWORDS[c - BK] if BK <= c < BK + K else None
+                    sval = (pool[t.poolidx] if t.lit else sca.get(t.slot, 0)) & 255
+                    v = vec.get(t.slot, [])
+                    if k == 'bytes': n = len(inp); st.append(list(inp))
+                    elif c == SCALB: st.append([sval] * n)
+                    elif c == TABLEB:
+                        idx = st.pop()
+                        if len(v) < 256: raise Fail()
+                        st.append([v[i] & 255 for i in idx])
+                    elif k in BINOPS:
+                        b = st.pop(); a = st.pop(); f = BINOPS[k]
+                        st.append([f(x, y) & 255 for x, y in zip(a, b)])
+                    elif k == 'sel':
+                        b = st.pop(); a = st.pop(); cnd = st.pop()
+                        st.append([x if q else y for q, x, y in zip(cnd, a, b)])
+                    elif k == 'prev': a = st.pop(); st.append(([0] + a)[:len(a)])
+                    elif k == 'dup': st.append(list(st[-1]))
+                    elif k == 'drop': st.pop()
+                    elif k == 'swap': st[-1], st[-2] = st[-2], st[-1]
+                    elif k == 'over': st.append(list(st[-2]))
+                    elif c == SUMB:
+                        acc = 0
+                        for x in st.pop(): acc = w32(acc + x)
+                        sca[t.slot] = acc
+                    elif k == 'out': out += bytes(st.pop())
+                    elif k == 'outif':
+                        m = st.pop(); a = st.pop(); out += bytes(x for x, q in zip(a, m) if q)
+                    elif k == 'end': st.pop()
+                    else: raise AssertionError(c)
+                    continue
                 sval = (pool[t.poolidx] if t.lit else sca.get(t.slot, 0))
                 v = vec.get(t.slot, [])
                 if c == VECLEAD: n = len(v); st.append(list(v))

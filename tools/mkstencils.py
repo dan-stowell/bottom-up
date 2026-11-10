@@ -44,6 +44,7 @@ VETO = "  mov dword ptr [rbx-672],0"      # this token cannot be split across th
 SETUP = """
   mov dword ptr [rbx-672],1
   mov dword ptr [rbx-704],0
+  mov dword ptr [rbx-708],16
   xor eax,eax
   vpbroadcastd zmm27,r12d
   vmovdqa32 zmm26,zmm30
@@ -113,6 +114,7 @@ PRE = {}   # (cls, d0) -> prologue stencil (runs once, before the line's loop)
 # Operand placeholders: DISP = slot/pool displacement, DISP8 = the same + 8 (a vector's length field).
 DISP8 = '0x1122334c'
 DISPL = '0x11223384'                # the same + 64: offset of a chunk-local vector from rsp
+DISP16 = '0x11223354'               # the same + 16: a vector's byte-table pointer
 def st(cls, d, text, pre=None):
     S[(cls, d)] = text
     if pre is not None: PRE[(cls, d)] = pre
@@ -250,6 +252,124 @@ st(KW['halt'], 1, LOOPEND + "\n  cmp r12,1" + failif('e') + """
   syscall
 3:""")
 
+# ------------------------------------------------------------------ byte lines: 64 u8 lanes per chunk
+# Same loop skeleton, stepping 64. The active-lane mask comes from the remaining count (bzhi);
+# zmm26 (lane indices, unused here) serves as a third temporary.
+BKW = lambda k: BK + KW[k]
+SETUPB = """
+  mov dword ptr [rbx-672],1
+  mov dword ptr [rbx-704],0
+  mov dword ptr [rbx-708],64
+  xor eax,eax
+"""
+LOOPHEADB = """
+  mov rbp,r12
+  lea r11,[rip+7f]
+  cmp dword ptr [rbx-672],0
+  je 7f
+  cmp r12,[rbx-696]
+  jb 7f
+  call [rbx-656]
+7:
+  mov rcx,r12
+  sub rcx,rax
+  mov edx,64
+  cmp rcx,rdx
+  cmova rcx,rdx
+  mov rdx,-1
+  bzhi rdx,rdx,rcx
+  kmovq k7,rdx
+  kandq k6,k7,k5
+"""
+LOOPENDB = """
+  add rax,64
+  cmp rax,rbp
+  jae 1f
+  jmp r11
+1:
+  test r15,r15
+  jz 8f
+  jmp r15
+8:"""
+FLUSHCHK = "  cmp r8,[rbx-56]\n  jb 3f\n  call [rbx-648]\n3:\n"
+st(BKW('bytes'), 0, LOOPHEADB + "  mov rsi,[rbx-16]\n  vmovdqu8 zmm0{k7}{z},[rsi+rax]", pre="  mov r12,[rbx-8]\n" + SETUPB)
+BBIN = {'+': 'vpaddb', '-': 'vpsubb', '&': 'vpandd', '|': 'vpord', '^': 'vpxord', 'min': 'vpminub', 'max': 'vpmaxub'}
+for d in range(2, 9):
+    a, b = d - 2, d - 1
+    for k, ins in BBIN.items(): st(BKW(k), d, f"  {ins} zmm{a},zmm{a},zmm{b}")
+    for k, imm in CMP.items(): st(BKW(k), d, f"  vpcmpub k1,zmm{a},zmm{b},{imm}\n  vpmovm2b zmm{a},k1\n  vpabsb zmm{a},zmm{a}")
+    st(BKW('*'), d, f"""  vpmullw zmm24,zmm{a},zmm{b}
+  vpsrlw zmm25,zmm{a},8
+  vpsrlw zmm26,zmm{b},8
+  vpmullw zmm25,zmm25,zmm26
+  vpsllw zmm25,zmm25,8
+  vpsllw zmm24,zmm24,8
+  vpsrlw zmm24,zmm24,8
+  vpord zmm{a},zmm24,zmm25""")
+    st(BKW('drop'), d, "  nop")
+    st(BKW('swap'), d, f"  vmovdqa32 zmm24,zmm{a}\n  vmovdqa32 zmm{a},zmm{b}\n  vmovdqa32 zmm{b},zmm24")
+    if d <= 7: st(BKW('over'), d, f"  vmovdqa32 zmm{d},zmm{a}")
+for d in range(3, 9):
+    c, a, b = d - 3, d - 2, d - 1
+    st(BKW('sel'), d, f"  vptestmb k1,zmm{c},zmm{c}\n  vpblendmb zmm{c}{{k1}},zmm{b},zmm{a}")
+for d in range(1, 9):
+    r = d - 1
+    st(BKW('prev'), d, f"""  valignq zmm24,zmm{r},zmm{16+r},7
+  vpsllq zmm25,zmm{r},8
+  vpsrlq zmm24,zmm24,56
+  vmovdqa64 zmm{16+r},zmm{r}
+  vporq zmm{r},zmm25,zmm24""", pre=f'  vpxord zmm{16+r},zmm{16+r},zmm{16+r}')
+    # 256-entry table lookup: the prologue narrows the i32 table to bytes once; the body is two vpermi2b
+    st(TABLEB, d, f"""  lea rcx,[rbx+{DISP}]
+  mov rsi,[rcx+16]
+  vmovdqa64 zmm24,zmm{r}
+  vmovdqu8 zmm25,[rsi]
+  vpermi2b zmm24,zmm25,[rsi+64]
+  vmovdqa64 zmm26,zmm{r}
+  vmovdqu8 zmm25,[rsi+128]
+  vpermi2b zmm26,zmm25,[rsi+192]
+  vpmovb2m k1,zmm{r}
+  vpblendmb zmm{r}{{k1}},zmm24,zmm26""", pre=f"""  lea rcx,[rbx+{DISP}]
+  cmp qword ptr [rcx+8],256""" + failif('ae') + """
+  mov rsi,[rcx]
+  mov rdx,r13
+  add r13,256
+  cmp r13,[rbx-64]
+  jbe 7f
+  call r14
+7:
+  mov [rcx+16],rdx
+  xor r10d,r10d
+5:
+  vmovdqu32 zmm24,[rsi+r10*4]
+  vpmovdb [rdx+r10],zmm24
+  add r10,16
+  cmp r10,256
+  jb 5b""")
+    if d <= 7:
+        st(BKW('dup'), d, f"  vmovdqa32 zmm{d},zmm{r}")
+        st(SCALB, d, f"  vpbroadcastb zmm{d},byte ptr [rbx+{DISP}]")
+st(SUMB, 1, """  vmovdqu8 zmm24{k6}{z},zmm0
+  vpxord zmm25,zmm25,zmm25
+  vpsadbw zmm24,zmm24,zmm25
+  vpaddd zmm28,zmm28,zmm24""" + LOOPENDB + hred(28, 'vpaddd') + f"\n  mov dword ptr [rbx+{DISP}],eax", pre="  vpxord zmm28,zmm28,zmm28")
+st(BKW('out'), 1, FLUSHCHK + "  vmovdqu8 [r8]{k6},zmm0\n  add r8,64" + LOOPENDB + """
+  lea rcx,[r12+63]
+  shr rcx,6
+  cmp rcx,1
+  adc rcx,0
+  shl rcx,6
+  sub rcx,r12
+  sub r8,rcx
+  mov [rbx-32],r8""", pre="  mov r8,[rbx-32]\n  mov dword ptr [rbx-704],1")
+st(BKW('outif'), 2, FLUSHCHK + """  vptestmb k1{k6},zmm1,zmm1
+  vpcompressb zmm24{k1}{z},zmm0
+  vmovdqu8 [r8],zmm24
+  kmovq rcx,k1
+  popcnt rcx,rcx
+  add r8,rcx""" + LOOPENDB + "\n  mov [rbx-32],r8", pre="  mov r8,[rbx-32]\n  mov dword ptr [rbx-704],1")
+st(BKW('end'), 1, LOOPENDB)
+
 asm = ".intel_syntax noprefix\n.text\n"
 for kind, D in (('S', S), ('Q', PRE)):
     for (cls, d), text in sorted(D.items()):
@@ -269,7 +389,7 @@ def assemble(name):
     return open(f'{B}/{name}.bin', 'rb').read(), syms
 
 code, syms = assemble('stencils')
-PH = {bytes.fromhex('44332211'): 0, bytes.fromhex('4c332211'): 8, bytes.fromhex('84332211'): 64}
+PH = {bytes.fromhex('44332211'): 0, bytes.fromhex('4c332211'): 8, bytes.fromhex('84332211'): 64, bytes.fromhex('54332211'): 16}
 def extract(blob):
     """find the (at most one) operand placeholder; return (bytes with it zeroed, pos+1 or 0, addend)"""
     blob = bytearray(blob); pos, add = 0, 0
@@ -324,13 +444,13 @@ with open(f'{ROOT}/src/tables.strand', 'w') as f:
     for n in tabs: f.write(data(n, tabs[n]))
     f.write(data('tail', tail)); f.write(data('stub', stub)); f.write(data('ehdr', ehdr))
     f.write(data('delta', [x + 2 for x in DELTA]))      # biased by 2: literals are unsigned
-    f.write(data('leadof', LEADOF)); f.write(data('localof', LOCALOF)); f.write(data('clstab', CLSTAB))
+    f.write(data('leadof', LEADOF)); f.write(data('localof', LOCALOF)); f.write(data('byteof', BYTEOF)); f.write(data('istee', ISTEE)); f.write(data('reread', REREAD)); f.write(data('clstab', CLSTAB))
     f.write(data('opctab', [opclass(c) for c in range(128)])); f.write(data('sigtab', [sigil(c) for c in range(128)]))
     f.write(data('defines', DEFINES)); f.write(data('uses', USES)); f.write(data('readsvec', READSVEC)); f.write(data('carry', CARRY))
     f.write(data('pow10', [10 ** i for i in range(MAXDIGITS)]))
     f.write(f"{len(stub)} >Stublen\n")
     for nm, v in [('Rels', rels), ('Rell', rell), ('Relp', relp), ('Kn', K), ('Ncode', NCODE), ('Cdata', DATA), ('Cstr', STR), ('Cnone', NONE), ('Cerr', ERR),
-                  ('Cscatter', SCATTER), ('Ctee', TEE), ('Cteec', TEEC), ('Cvec', VEC), ('Clen', LEN), ('Nsig5', 5), ('Slot', SLOT), ('Nd', ND), ('Vbase', VBASE), ('Maxname', MAXNAME), ('Maxdig', MAXDIGITS),
+                  ('Cscatter', SCATTER), ('Ctee', TEE), ('Cteec', TEEC), ('Cbytes', KW['bytes']), ('Cvec', VEC), ('Clen', LEN), ('Nsig5', 5), ('Slot', SLOT), ('Nd', ND), ('Vbase', VBASE), ('Maxname', MAXNAME), ('Maxdig', MAXDIGITS),
                   ('Ha1', HA1), ('Hb1', HB1), ('Hs1', HS1), ('Ha2', HA2), ('Hb2', HB2), ('Hs2', HS2)]\
                  + [('Ru%d' % r, RACE_U[r]) for r in range(ROUNDS)] + [('Rv%d' % r, RACE_V[r]) for r in range(ROUNDS)]:
         f.write(f"{v} >{nm}\n")

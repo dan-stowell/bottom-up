@@ -100,12 +100,16 @@ Et 0 > 6 * halt
 cls4 last ln1 Neg sel !lsk
 ln1 @lsk Cdata = last 1 ^ & :ditem sgi 0 = lit & cls4 Cstr = | 1 ^ & cls4 Cdata = last 1 ^ & cls4 Cstr = | ditem 1 ^ & | $Ed
 Ed 0 > 7 * halt
-ditem Cnone cls4 sel >clso
+ditem Cnone cls4 sel >clsd
+# byte lines: a `bytes` lead switches every token of its line to the byte-lane class
+~NL2 0 * >lbt
+clsd Cbytes = first ln1 Neg sel !lbt
+ln1 @lbt clsd @byteof clsd - * clsd + >clso
 # chunk-local vectors: a ':x' whose last occurrence (its canonical token) is on the tee's own line never
 # needs an array. Its occurrences there switch class, and keep just the current chunk in x's slot.
 ~S1 0 * >tdef
-~NT 1 + clso Ctee = clso Cteec = | slot Neg sel !tdef
-slot @tdef :td1 1 - 0 max :td @clso Ctee = td1 0 > & isname & td @rep @ln1 td @ln1 = & ln1 td @ln1 = & :loc clso @localof clso - * clso + >cls
+~NT 1 + clso @istee clso Cteec = | slot Neg sel !tdef
+slot @tdef :td1 1 - 0 max :td @clso @istee td1 0 > & isname & td @rep @ln1 td @ln1 = & ln1 td @ln1 = & :loc clso @localof clso - * clso + >cls
 
 # ---------------------------------------------------------------- stack depth = register allocation, by one scan
 cls @delta 2 - :dlt scan :da dlt - :d0 0 < d0 8 > | da 0 = last != | cls Ncode < :code & $Edp
@@ -135,7 +139,7 @@ Eu 0 > 12 * halt
 ~S1 0 * >ldef
 ~NT cls @defines slot Neg sel !ldef
 td1 0 > cls @defines & slot @ldef idx != & $Et1
-td @clso Ctee = clso Cvec = clso Clen = | & idx td > & 1 ^ td1 0 > isname & idx td != & ln1 td @ln1 = & & $Et2
+td @clso @istee clso @reread & idx td > & 1 ^ td1 0 > isname & idx td != & ln1 td @ln1 = & & $Et2
 Et1 Et2 + 0 > 13 * halt
 
 # ---------------------------------------------------------------- data image: slots, then pool
