@@ -25,9 +25,10 @@ class CompileError(Exception):
 class Tok:
     pass
 
+KWB = {k.encode(): i for i, k in enumerate(KEYWORDS)}
 def analyze(src: bytes):
     """Lex and classify. Returns (tokens, nslots, pool). Raises CompileError(lowest failing check)."""
-    text = PRELUDE.encode() + b'\n' + src + b'\n'
+    text = src + b'\n'
     errs = set()
     toks = []
     pool = []
@@ -95,10 +96,10 @@ def analyze(src: bytes):
     # latest wins the slot and is resolved; the others try the next round's key.
     fp = {}
     for t in toks:
-        if t.isname: fp.setdefault(t.name, name_hash(t.name))
+        if t.isname and t.name not in KWB: fp.setdefault(t.name, name_hash(t.name))
     classes = {}
     for t in toks:
-        if t.isname: classes[fp[t.name]] = t.idx
+        if t.isname and t.name not in KWB: classes[fp[t.name]] = t.idx
     mask = race_mask(len(toks))
     active = dict(classes)
     for r in range(ROUNDS):
@@ -114,7 +115,7 @@ def analyze(src: bytes):
     lastocc = {}
     for t in toks:
         if t.isname: lastocc[t.name] = t.idx
-    kwnames = {toks[i].name: i for i in range(K)}
+    kwnames = KWB
     slot_of = {}
     for name, _ in sorted(lastocc.items(), key=lambda kv: kv[1]):
         if name not in kwnames: slot_of[name] = len(slot_of) + 1
@@ -125,7 +126,6 @@ def analyze(src: bytes):
         iskw = t.isname and t.name in kwnames
         if iskw: cls = kwnames[t.name] if t.sgi == 0 else ERR
         if t.first: cls = LEADOF[cls]
-        if t.idx < K: cls = NONE
         t.cls = cls
         t.slot = slot_of.get(t.name, 0) if t.isname else 0
     if any(t.cls == ERR for t in toks): raise CompileError(E_TOKEN)
@@ -215,7 +215,7 @@ def analyze(src: bytes):
     for t in toks:
         if t.isname: lastocc_tok[t.name] = t.idx
     for t in toks:
-        t.dying = (t.isname and t.slot > 0 and t.opc == O_LOWER and t.idx >= K and lastocc_tok[t.name] == t.idx
+        t.dying = (t.isname and t.slot > 0 and t.opc == O_LOWER and lastocc_tok[t.name] == t.idx
                    and not t.local)
     return toks, lines, nslots, pool
 

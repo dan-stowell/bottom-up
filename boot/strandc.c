@@ -32,8 +32,8 @@ static int intern(const unsigned char *s, int len) {
 static int by_last(const void *a, const void *b) { return names[*(const int *)a].last - names[*(const int *)b].last; }
 
 int main(void) {
-  size_t cap = 1 << 16, n = strlen(PRELUDE);
-  text = malloc(cap); memcpy(text, PRELUDE, n);
+  size_t cap = 1 << 16, n = 0;
+  text = malloc(cap);
   for (size_t r; (r = fread(text + n, 1, cap - n - 1, stdin)) > 0;) { n += r; if (n + 1 >= cap) text = realloc(text, cap *= 2); }
   text[n++] = '\n'; T = (int)n;
   tok = malloc(sizeof(Tok) * (T / 2 + 2)); pool = malloc(sizeof(uint32_t) * (T + 1));
@@ -85,17 +85,19 @@ int main(void) {
   // Names with equal fingerprints form one class (found by sorting); classes race for table slots.
   {
     for (int i = 0; i < nn; i++) {
-      uint32_t h1 = 0, h2 = 0;
-      for (int k = 0; k < names[i].len; k++) {
-        uint32_t x = text[names[i].off + k] + 256u * k, a;
+      uint32_t h1 = 0, h2 = 0; unsigned char b[16] = {0};      // the name as four dwords, zero-padded
+      memcpy(b, text + names[i].off, names[i].len < 16 ? names[i].len : 16);
+      for (int j = 0; j < 4; j++) {
+        uint32_t w, x, a; memcpy(&w, b + 4 * j, 4); x = w + j;
         a = x * HA1; h1 += (a ^ (a >> HS1)) * HB1;
         a = x * HA2; h2 += (a ^ (a >> HS2)) * HB2;
       }
-      names[i].h1 = h1; names[i].h2 = h2; names[i].active = 1; names[i].clast = names[i].last;
+      for (int k = 0; k < K; k++) if ((int)strlen(KWS[k]) == names[i].len && !memcmp(KWS[k], text + names[i].off, names[i].len)) names[i].kw = k + 1;
+      names[i].h1 = h1; names[i].h2 = h2; names[i].active = !names[i].kw; names[i].clast = names[i].last;
     }
     int collision = 0;                     // equal fingerprint, different name: O(n) via a second hash table
     int *ft = malloc(sizeof(int) * (hmask + 1)); memset(ft, -1, sizeof(int) * (hmask + 1));
-    for (int i = 0; i < nn; i++) {
+    for (int i = 0; i < nn; i++) if (!names[i].kw) {
       uint32_t k = (names[i].h1 * 2654435761u ^ names[i].h2) & hmask;
       for (;; k = (k + 1) & hmask) {
         int j = ft[k];
@@ -121,8 +123,7 @@ int main(void) {
   }
   die();
 
-  // ---- names: keywords are the first K tokens; slots in order of last occurrence
-  for (int k = 0; k < K; k++) names[tok[k].name].kw = k + 1;
+  // ---- names: slots in order of last occurrence (keywords have none)
   int *order = malloc(sizeof(int) * (nn + 1)), nslots = 0;
   for (int i = 0; i < nn; i++) order[i] = i;
   qsort(order, nn, sizeof(int), by_last);
@@ -133,7 +134,6 @@ int main(void) {
     Tok *t = &tok[i]; int cls = T_clstab[t->sgi * 5 + t->opc];
     if (t->isname && names[t->name].kw) cls = t->sgi ? C_ERR : names[t->name].kw - 1;
     if (t->first) cls = T_leadof[cls];
-    if (i < K) cls = C_NONE;
     if (cls == C_ERR) ERR(6);
     t->cls = cls; t->slot = t->isname ? names[t->name].slot : 0;
   }
@@ -211,7 +211,7 @@ int main(void) {
   for (int i = 0; i < nt; i++) {
     Tok *t = &tok[i];
     t->disp = t->lit ? SLOT * (nslots + 1) + 4 * t->pidx : SLOT * t->slot;
-    t->dying = t->isname && t->slot > 0 && t->opc == 1 && i >= K && names[t->name].last == i && !t->local;
+    t->dying = t->isname && t->slot > 0 && t->opc == 1 && names[t->name].last == i && !t->local;
   }
   // ---- code: per line, prologues, bodies, releases
   unsigned char *code = malloc((size_t)nt * 512 + 16); size_t cl = 0;

@@ -11,7 +11,7 @@ CASES = [
  (b'input >x # trailing "comment" with quotes\nx out\n', 0),
  (b'"abc =d\n', E_QUOTE), (b'1 a"b" =d\n', E_QUOTE), (b'"a"b =d\n', E_QUOTE), (b'"a""b" =d\n', E_QUOTE),
  (b'12a >A\n', E_LEX), (b'1234567890 >A\n', E_LEX), (b'999999999 >A\n', 0), (b'~1x out\n', E_LEX),
- (b'1 >' + b'A' * 64 + b'\n', 0), (b'1 >' + b'A' * 65 + b'\n', E_NAMELEN), (b'input >' + b'x' * 65 + b'\n', E_NAMELEN),
+ (b'1 >' + b'A' * 16 + b'\n', 0), (b'1 >' + b'A' * 17 + b'\n', E_NAMELEN), (b'input >' + b'x' * 17 + b'\n', E_NAMELEN),
  (b'input %% out\n', E_TOKEN), (b'input >scan\n', E_TOKEN), (b'input @Out out\n', E_TOKEN), (b'1 >a\n', 0), (b'1 $a\n', E_TOKEN),
  (b'input "x" & out\n', E_DATA), (b'1 input =d\n', E_DATA), (b'1 =d 2\n', E_DATA), (b'1 >A =d\n', E_DATA), (b'~3 4 =d\n', E_DATA),
  (b'input input out\n', E_DEPTH), (b'input\n', E_DEPTH), (b'input out out\n', E_DEPTH), (b'input 1 2 3 4 5 6 7 8 + + + + + + + + out\n', E_DEPTH),
@@ -49,7 +49,7 @@ CASES = [
  # Four-round race loss: a 16-name collision-witness tree (not a fingerprint collision).
  # Each unresolved name has a later blocker in each round. See reviews/audit_checks.py.
  (b''.join(b'0 >X%d\n' % n for n in
-           (1, 419, 444, 813, 892, 1337, 1388, 1827, 1846, 1858, 2124, 2129, 2563, 2713, 2816, 2835)), E_RACE),
+           (8806, 34724, 3291, 15615, 9114, 30380, 32583, 31619, 25728, 13517, 6970, 32025, 1628, 25831, 27855, 329)), E_RACE),
 ]
 def main():
     comp = sys.argv[1]

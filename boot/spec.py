@@ -1,4 +1,5 @@
 """Strand: the constants every implementation must agree on.
+The program text is the source followed by one newline; tokens are numbered from 0.
 
 Class numbers index the stencil table (tid = cls*9 + depth_before).
 The first K classes are the keywords, in prelude order.
@@ -118,7 +119,7 @@ CARRY[BK + KW['prev']] = 1
 CARRY[FSMB] = 1                    # the automaton's carry (a transition function) lives in zmm16+r too
 USES[VECT] = 1; READSVEC[VECT] = 1
 
-MAXNAME = 64                        # longest name (hash weight table size)
+MAXNAME = 16                        # longest name: four dwords, which *are* the name
 MAXDIGITS = 9
 
 # ---- name resolution is part of the language definition -------------------------------------------
@@ -131,14 +132,23 @@ HA2, HB2, HS2 = 951274213, 246822519, 13
 RACE_U = [1, 40503, 48271, 69621]
 RACE_V = [961748927, 314159265, 271828183, 141421357]
 ROUNDS = 4
+def name_words(name: bytes):
+    """a name as four little-endian dwords, zero-padded (a name has no zero bytes and at most 16)"""
+    b = name[:MAXNAME].ljust(MAXNAME, b'\0')
+    return [int.from_bytes(b[4 * j:4 * j + 4], 'little') for j in range(4)]
 def name_hash(name: bytes):
-    """fingerprint = two sums over the name's bytes of a mixed (byte, offset) value"""
+    """fingerprint = two sums over the name's four dwords of a mixed (dword + position) value.
+    The whole name is visible from its token as four gathers, so nothing here needs a pass over bytes."""
     h1 = h2 = 0
-    for k, c in enumerate(name):
-        x = c + 256 * k
+    for j, w in enumerate(name_words(name)):
+        x = (w + j) & M32
         a = (x * HA1) & M32; h1 = (h1 + (a ^ (a >> HS1)) * HB1) & M32
         a = (x * HA2) & M32; h2 = (h2 + (a ^ (a >> HS2)) * HB2) & M32
     return h1, h2
+# Keywords are names with a fixed meaning. They take no part in the race and have no slot. How an
+# implementation recognises them is its own business; for table-driven ones, KWSHIFT is a shift for
+# which (h1 >> KWSHIFT) & 255 is different for every keyword.
+KWSHIFT = next(s for s in range(25) if len({(name_hash(k.encode())[0] >> s) & 255 for k in KEYWORDS}) == K)
 def race_mask(ntokens):
     """table size - 1: twice the smallest power of two above the token count"""
     m = ntokens

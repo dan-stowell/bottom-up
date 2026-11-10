@@ -150,7 +150,9 @@ its programs takes. The compiler's source did not change for any of this.
 | Register allocation | graph colouring / linear scan | **Stack depth is the register number.** `depth = scan(delta[kind])`. A token at depth d works on `zmm(d-1)`, `zmm(d)`. One prefix sum allocates every register in the program. Because every line must end at depth 0, the scan never needs resetting per line. |
 | Type checking / inference | dataflow in dependency order | **Case is the type.** `abc` is a vector, `Abc` a scalar; the sink sigil gives the line's shape. Each token is typed by looking at itself. |
 | Symbol table | hash map built sequentially | **Scatter race** (below). |
-| Keyword recognition | trie / perfect hash | **Self-join with a prelude.** The compiler prepends a line listing every operator name. Operators are then ordinary names, and "is a keyword" means "its canonical occurrence lies in the prelude". No keyword table, no string compare. |
+| Lexing | a character loop with a state variable | **One automaton on byte lanes**, then positions. `text @lcls /ldfa` gives every byte's state (code, comment, string); token starts and ends are where "token character" changes; `%` hands their positions to dword lines. Nothing per byte is kept but the byte. |
+| Token text (names, numbers) | pointer + length, read byte by byte | **Four dwords per token.** A name has at most 16 bytes and a literal 9 digits, so four gathers from a token's first byte hold all of it. Equality is four compares; a decimal value is three 4-digit groups evaluated in place. |
+| Keyword recognition | trie / perfect hash | A perfect hash, generated with the tables: one lookup by the name's fingerprint, confirmed by comparing the four dwords. (Until the front end moved to byte lanes this was a self-join with a prelude line of operator names; the join cost a pass over the bytes.) |
 | Instruction selection | tree pattern matching | One token = one stencil, selected by `(kind, depth, line shape)`. |
 | Instruction encoding | variable-length, operand-dependent | **Copy-and-patch as gather + scatter.** Stencils are pre-assembled for every (op, depth). Sizes are prefix-summed to offsets; every output byte gathers its stencil byte; operand displacements are scattered in. |
 | Branch offsets | fixups in address order | Loop back-edges jump through a register (`jmp r11`) loaded at loop head. No relative branch ever crosses a stencil. Nothing to fix up. |
@@ -158,9 +160,8 @@ its programs takes. The compiler's source did not change for any of this.
 
 ### Scatter-race symbol resolution
 
-Every name token computes a 64-bit fingerprint: two sums, over the name's bytes, of a mixed
-(byte, offset) value. A per-token sum is a difference of two prefix-sum values, so this is
-one pass. Then, with no sorting and no sequential insertion:
+Every name token computes a 64-bit fingerprint: two sums, over the name's four dwords, of a
+mixed (dword + position) value. Then, with no sorting and no sequential insertion:
 
 1. every token scatters its own index into `table[key]` — AVX-512 scatter semantics make
    the *last* writer win, deterministically;
@@ -168,9 +169,9 @@ one pass. Then, with no sorting and no sequential insertion:
    yes, the winner is the canonical occurrence of my name — its last occurrence. All
    occurrences of one name agree, because they collide with each other on purpose;
 3. names that lost to a *different* name race again under the next round's key (4 rounds);
-4. finally every byte of every name is compared against the corresponding byte of its
-   canonical occurrence (one gather), so a fingerprint collision is a detected compile
-   error, never a miscompile.
+4. finally the four dwords of every name are compared with those of its canonical
+   occurrence (four gathers), so a fingerprint collision is a detected compile error, never
+   a miscompile.
 
 A name's slot number is then the running count of canonical occurrences.
 
