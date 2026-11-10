@@ -121,9 +121,9 @@ int main(void) {
   die();
   for (int i = 0; i < nt;) {               // per-line checks
     int j = i; while (!tok[j].last) j++;
-    int seen = 0;
+    long seen = 0;
     for (int k = i; k <= j; k++) if (tok[k].code && T_carry[tok[k].cls]) {
-      int bit = 1 << ((T_carry[tok[k].cls] - 1) * 9 + tok[k].d0);
+      long bit = 1L << ((T_carry[tok[k].cls] - 1) * 9 + tok[k].d0);
       if (seen & bit) ERR(10); seen |= bit;
     }
     if (tok[j].cls == C_SCATTER) for (int k = i; k <= j; k++) if (T_readsvec[tok[k].cls] && tok[k].slot == tok[j].slot) ERR(11);
@@ -132,6 +132,16 @@ int main(void) {
   die();
   for (int i = 0; i < nt; i++) if (T_defines[tok[i].cls]) names[tok[i].name].defined = 1;
   for (int i = 0; i < nt; i++) if (T_uses[tok[i].cls] && tok[i].isname && !names[tok[i].name].defined) ERR(12);
+  die();
+  {                                        // tee rules
+    int *teetok = calloc(nslots + 1, sizeof(int)), *nd = calloc(nslots + 1, sizeof(int));
+    for (int i = 0; i < nt; i++) { if (tok[i].cls == C_TEE || tok[i].cls == C_TEEC) teetok[tok[i].slot] = i + 1; if (T_defines[tok[i].cls]) nd[tok[i].slot]++; }
+    for (int s = 1; s <= nslots; s++) if (teetok[s] && nd[s] != 1) ERR(13);
+    for (int i = 0; i < nt; i++) {
+      Tok *t = &tok[i]; int d = t->isname ? teetok[t->slot] - 1 : -1;
+      if (d >= 0 && d != i && tok[d].line == t->line && !(tok[d].cls == C_TEE && (t->cls == C_VEC || t->cls == C_LEN) && i > d)) ERR(13);
+    }
+  }
   die();
 
   // ---- data image

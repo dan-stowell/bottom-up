@@ -17,7 +17,7 @@ from spec import *
 
 JUNK = [b'"', b'#', b' ', b'\n', b'\t', b'>', b'@', b'~', b'?', b'!', b'$', b'^', b'&', b'=', b'0', b'9', b'A', b'z', b'_',
         b'\xff', b'\x00', b'+', b'scan', b'prev', b'scanmax', b'out', b'halt', b'input', b'drop', b'dup', b'sel', b'>x', b'=d', b'1234567890',
-        b'x' * 64, b'x' * 65, b'"a b"', b'>scan', b'@out', b'~0', b'!v0', b'\r']
+        b'x' * 64, b'x' * 65, b'"a b"', b'>scan', b'@out', b'~0', b'!v0', b'\r', b':v0', b'%v0', b':t', b'end', b'%', b':']
 
 def mutate(rnd, src):
     b = bytearray(src)

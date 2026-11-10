@@ -152,6 +152,18 @@ def analyze(src: bytes):
     for t in toks:
         if USES[t.cls] and t.isname and t.slot not in defined: raise CompileError(E_UNDEF)
 
+    # tee rules: a tee-defined name has exactly one definition; on the tee's own line it may only be
+    # re-read (pushed, or its length taken) after a ':' tee, never around a '%' tee
+    teedef = {t.slot: t for t in toks if t.cls in (TEE, TEEC)}
+    ndefs = {}
+    for t in toks:
+        if DEFINES[t.cls]: ndefs[t.slot] = ndefs.get(t.slot, 0) + 1
+    if any(ndefs[s] != 1 for s in teedef): raise CompileError(E_TEE)
+    for t in toks:
+        d = teedef.get(t.slot) if t.isname else None
+        if d is not None and t is not d and t.line == d.line:
+            if not (d.cls == TEE and t.cls in (VEC, LEN) and t.idx > d.idx): raise CompileError(E_TEE)
+
     for t in toks:
         t.disp = 16 * (nslots + 1) + 4 * t.poolidx if t.lit else 16 * t.slot
     # liveness without analysis: a vector's storage is dead after the line holding its last occurrence
@@ -297,6 +309,11 @@ def interp(src: bytes, inp: bytes):
                     for x, i in zip(a, idx):
                         if not 0 <= i < len(tgt): raise Fail()
                         tgt[i] = x
+                elif c == TEE: vec[t.slot] = list(st[-1])
+                elif c == TEEC:
+                    m = st.pop(); a = st.pop()
+                    vec[t.slot] = [x for x, q in zip(a, m) if q]
+                elif c == KW['end']: st.pop()
                 elif c == KW['out']: out += bytes(x & 255 for x in st.pop())
                 elif c == KW['out4']:
                     for x in st.pop(): out += struct.pack('<I', x & 0xffffffff)

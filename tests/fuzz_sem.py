@@ -29,11 +29,17 @@ class Gen:
         return self.r.choice(self.scal) if self.scal and self.r.random() < .5 else self.lit()
     def expr(self, lcls, depth_budget=7):
         """tokens after the lead; stack starts at depth 1; ends at depth 1 (or 2 if want2)."""
-        r = self.r; toks = []; d = 1; used = set()
+        r = self.r; toks = []; d = 1; used = set(); teed = []
         same = [v for v, c in self.vecs.items() if c == lcls]
         for _ in range(r.randrange(0, 12)):
             ch = r.random()
-            if ch < .25 and d < depth_budget:
+            if ch < .05:                         # tee store: value stays on the stack
+                v = 't%d' % self.nv; self.nv += 1; toks.append(':' + v); self.pending.append((v, lcls)); teed.append(v)
+            elif ch < .08 and d >= 2 and d < depth_budget:   # tee compress, mid-line
+                v = 'k%d' % self.nv; self.nv += 1; toks += ['dup', '1', '&', '%' + v]; d -= 1; self.pending.append((v, None))
+            elif ch < .11 and teed and d < depth_budget:      # re-read a tee'd vector later on its own line
+                toks.append(r.choice(teed) if r.random() < .8 else '&' + r.choice(teed)); d += 1
+            elif ch < .25 and d < depth_budget:
                 if same and r.random() < .6: toks.append(r.choice(same))
                 elif self.vecs and r.random() < .004: toks.append(r.choice(list(self.vecs)))   # likely length mismatch
                 elif r.random() < .2 and self.vecs: toks.append('&' + r.choice(list(self.vecs)))
@@ -59,6 +65,10 @@ class Gen:
         while d > 1: toks.append(r.choice(BIN)); d -= 1
         return toks
     def line(self):
+        self.pending = []
+        self._line()
+        for v, c in self.pending: self.vecs[v] = self.newcls() if c is None or c == -1 else c
+    def _line(self):
         r = self.r
         ch = r.random()
         if ch < .08:
@@ -84,7 +94,7 @@ class Gen:
         if k < .45:
             v = 'v%d' % self.nv; self.nv += 1; toks.append('>' + v); self.vecs[v] = lcls
         elif k < .60:
-            toks += self.expr(lcls)[0:0] + [self.scalar(), r.choice(BIN)] + ['dup', '1', '&'] 
+            toks += [self.scalar(), r.choice(BIN)] + ["dup", "1", "&"]
             v = 'c%d' % self.nv; self.nv += 1; toks.append('?' + v); self.vecs[v] = self.newcls()
         elif k < .72 and [v for v in self.vecs if v not in toks and '@' + v not in toks]:
             v = r.choice([v for v in self.vecs if v not in toks and '@' + v not in toks])
@@ -93,7 +103,7 @@ class Gen:
             toks.append('!' + v)
         elif k < .80:
             s = 'S%d' % self.ns; self.ns += 1; toks.append(r.choice('$^') + s); self.scal.append(s)
-        else: toks.append(r.choice(['out', 'out', 'out4']))
+        else: toks.append(r.choice(['out', 'out', 'out4', 'end']))
         self.lines.append(' '.join(toks))
     def program(self):
         for _ in range(self.r.randrange(1, 25)): self.line()

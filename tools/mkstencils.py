@@ -14,25 +14,28 @@ os.makedirs(B, exist_ok=True)
 DISP = '0x11223344'
 
 # Allocation. Blocks are [64-byte header | data]; header[-8] = address of the free-list head the block
-# belongs to. Capacity is a power of two > 4n+127 bytes. SETUP only *peeks*: the sink commits (COMMIT),
-# so lines that store nothing allocate nothing. r10 = list head, rbp = capacity, r9 = next link.
+# belongs to. Capacity is a power of two > 4n+127 bytes. Storing tokens allocate in their prologue.
 FLOFF = 640
-# SETUP runs once per line, after r12 = n: allocate, clear carries, zmm27 = n, zmm26 = lane indices.
-SETUP = f"""
+def ALLOC(R):   # R = a block for r12 elements: pop the size class's free list, else bump
+    return f"""
   lea rcx,[r12*4+127]
   bsr rcx,rcx
   mov ebp,2
   shlx rbp,rbp,rcx
   lea r10,[rbx+rcx*8-{FLOFF}]
-  mov rdi,[r10]
-  test rdi,rdi
-  jnz 5f
-  lea rdi,[r13+64]
+  mov {R},[r10]
+  test {R},{R}
+  jz 5f
+  mov rcx,[{R}]
+  mov [r10],rcx
   jmp 6f
 5:
-  mov r9,[rdi]
-6:
-  mov r8,rdi
+  lea {R},[r13+64]
+  mov [{R}-8],r10
+  lea r13,[{R}+rbp]
+6:"""
+# SETUP runs once per line, after r12 = n: clear carries, zmm27 = n, zmm26 = lane indices.
+SETUP = """
   xor eax,eax
 """ + ''.join(f"  vpxord zmm{r},zmm{r},zmm{r}\n" for r in range(16, 24)) + """
   vpslld zmm29,zmm31,31
@@ -53,16 +56,6 @@ LOOPEND = """
   jae 1f
   jmp r11
 1:"""
-COMMIT = """
-  lea rcx,[r13+64]
-  cmp rdi,rcx
-  jne 5f
-  mov [rdi-8],r10
-  lea r13,[rdi+rbp]
-  jmp 6f
-5:
-  mov [r10],r9
-6:"""
 RELEASE = """
   mov rsi,[rcx]
   cmp rsi,[rbx-40]
@@ -142,19 +135,19 @@ st(SCALLEAD, 0, LOOPHEAD + f"  vpbroadcastd zmm0,dword ptr [rbx+{DISP}]", pre=" 
 st(LENLEAD, 0, LOOPHEAD + f"  vpbroadcastd zmm0,dword ptr [rbx+{DISP8}]", pre="  mov r12d,1\n" + SETUP)
 st(IOTA, 0, LOOPHEAD + "  vmovdqa32 zmm0,zmm26", pre=f"  mov r12d,dword ptr [rbx+{DISP}]\n  test r12d,r12d" + failif('ns') + SETUP)
 st(KW['input'], 0, LOOPHEAD + "  mov rsi,[rbx-16]\n  vpmovzxbd zmm0{k7}{z},xmmword ptr [rsi+rax]", pre="  mov r12,[rbx-8]\n" + SETUP)
-st(STOREV, 1, "  vmovdqu32 [rdi+rax*4]{k7},zmm0" + LOOPEND + COMMIT + f"""
+st(STOREV, 1, pre=ALLOC('rdi'), text="  vmovdqu32 [rdi+rax*4]{k7},zmm0" + LOOPEND + f"""
   lea rcx,[rbx+{DISP}]""" + RELEASE + """
   mov [rcx],rdi
   mov [rcx+8],r12""")
 st(STORES, 1, LOOPEND + "\n  cmp r12,1" + failif('e') + f"\n  vmovd dword ptr [rbx+{DISP}],xmm0")
 st(SUM, 1, "  vpaddd zmm28{k7},zmm28,zmm0" + LOOPEND + hred(28, 'vpaddd') + f"\n  mov dword ptr [rbx+{DISP}],eax")
 st(MAX, 1, "  vpmaxsd zmm29{k7},zmm29,zmm0" + LOOPEND + hred(29, 'vpmaxsd') + f"\n  mov dword ptr [rbx+{DISP}],eax")
-st(COMPRESS, 2, """  vptestmd k1{k7},zmm1,zmm1
+st(COMPRESS, 2, pre=ALLOC('rdi') + "\n  mov r8,rdi", text="""  vptestmd k1{k7},zmm1,zmm1
   vpcompressd zmm24{k1}{z},zmm0
   vmovdqu32 [r8],zmm24
   kmovw ecx,k1
   popcnt ecx,ecx
-  lea r8,[r8+rcx*4]""" + LOOPEND + COMMIT + f"""
+  lea r8,[r8+rcx*4]""" + LOOPEND + f"""
   lea rcx,[rbx+{DISP}]""" + RELEASE + """
   mov [rcx],rdi
   sub r8,rdi
@@ -167,6 +160,21 @@ st(KW['out'], 1, """  mov rsi,[rbx-32]
   vpmovdb xmm24,zmm0
   vmovdqu8 [rsi+rax]{k7},xmm24""" + LOOPEND + "\n  add [rbx-32],r12")
 st(KW['out4'], 1, "  mov rsi,[rbx-32]\n  vmovdqu32 [rsi+rax*4]{k7},zmm0" + LOOPEND + "\n  lea rsi,[rsi+r12*4]\n  mov [rbx-32],rsi")
+st(KW['end'], 1, LOOPEND)
+# tee stores: keep the value on the stack and keep the loop going, so one line can define many vectors
+for d in range(1, 9):
+    st(TEE, d, f"  mov rsi,[rbx+{DISP}]\n  vmovdqu32 [rsi+rax*4]{{k7}},zmm{d-1}",
+       pre=ALLOC('rsi') + f"\n  lea rcx,[rbx+{DISP}]\n  mov [rcx],rsi\n  mov [rcx+8],r12")
+for d in range(2, 9):
+    st(TEEC, d, f"""  lea rcx,[rbx+{DISP}]
+  vptestmd k1{{k7}},zmm{d-1},zmm{d-1}
+  vpcompressd zmm24{{k1}}{{z}},zmm{d-2}
+  mov rsi,[rcx]
+  mov rdx,[rcx+8]
+  vmovdqu32 [rsi+rdx*4],zmm24
+  kmovw esi,k1
+  popcnt esi,esi
+  add [rcx+8],rsi""", pre=ALLOC('rsi') + f"\n  lea rcx,[rbx+{DISP}]\n  mov [rcx],rsi\n  mov qword ptr [rcx+8],0")
 st(KW['halt'], 1, LOOPEND + "\n  cmp r12,1" + failif('e') + """
   vmovd edi,xmm0
   test edi,edi
@@ -255,7 +263,7 @@ with open(f'{ROOT}/src/tables.strand', 'w') as f:
     f.write(data('hashw', hashw)); f.write(data('pow10', [10 ** i for i in range(MAXDIGITS)]))
     f.write(f"{len(stub)} >Stublen\n")
     for nm, v in [('Rels', rels), ('Rell', rell), ('Relp', relp), ('Kn', K), ('Ncode', NCODE), ('Cdata', DATA), ('Cstr', STR), ('Cnone', NONE), ('Cerr', ERR),
-                  ('Cscatter', SCATTER), ('Nd', ND), ('Vbase', VBASE), ('Tabm', TABM), ('Maxname', MAXNAME),
+                  ('Cscatter', SCATTER), ('Ctee', TEE), ('Cteec', TEEC), ('Cvec', VEC), ('Clen', LEN), ('Nsig5', 5), ('Nd', ND), ('Vbase', VBASE), ('Tabm', TABM), ('Maxname', MAXNAME),
                   ('Maxdig', MAXDIGITS), ('Mult1', RACE_MULT[1]), ('Mult2', RACE_MULT[2])]:
         f.write(f"{v} >{nm}\n")
 print(f"stencils: {len(S)} bodies + {len(PRE)} prologues, {len(sten)} bytes; stub {len(stub)} bytes; tables.strand {os.path.getsize(f'{ROOT}/src/tables.strand')} bytes")

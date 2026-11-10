@@ -3,6 +3,8 @@
 set -e
 cd "$(dirname "$0")"
 python3 tools/mkstencils.py
+python3 tools/mkheader.py
+gcc -O2 -Ibuild -o build/strandc_scalar boot/strandc.c
 cat src/tables.strand src/compiler.strand > build/strandc.strand
 python3 boot/strand.py compile build/strandc.strand > build/stage1
 chmod +x build/stage1

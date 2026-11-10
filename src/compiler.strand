@@ -38,14 +38,14 @@ Eq1 Eq2 + Eq3 + 0 > halt
 
 # ---------------------------------------------------------------- tokens
 i ts ?start
-i te ?end
+i te ?tend
 &start >NT
 NT 1 - >NTm
 ~NT >t
 ts scan 1 - >bt
 start @text >c0
 start 1 + @text >c1
-end start - >len
+tend start - >len
 c0 127 min @opctab >o0
 c1 127 min @opctab >o1
 c0 127 min @sigtab >s0
@@ -65,7 +65,7 @@ t 1 + NTm min @first t NTm = | >last
 # token properties seen from each byte
 bt @lit tc & >blit
 bt @ns >bns
-bt @end >bend
+bt @tend >bend
 i bns >= tc & >bop
 # E_LEX: literal operands are 1..9 digits.  E_NAMELEN: names are at most 64 bytes
 text 48 >= text 57 <= & 1 ^ blit & bop & $El1
@@ -78,7 +78,7 @@ En 0 > 3 * halt
 bend 1 - i - 0 max 8 min @pow10 >pw
 text 48 - pw * blit * bop * >dv
 dv scan >dp
-end 1 - @dp ns @dp - ns @dv + lit * >val
+tend 1 - @dp ns @dp - ns @dv + lit * >val
 i 1 + bend = tc & blit & >u1
 par q 1 ^ & >u2
 u1 u2 | >isu
@@ -92,7 +92,7 @@ start @ucx >pidx
 # h = sum over name bytes of byte * weight[offset]: a segmented sum is a difference of two scan values
 i bns - 0 max 63 min @hashw text * bop * >hv
 hv scan >hp
-end 1 - @hp ns @hp - ns @hv + >h
+tend 1 - @hp ns @hp - ns @hv + >h
 Tabm 1 + >Tabm1
 ~Tabm1 0 * >tab
 t 0 * >rep
@@ -193,6 +193,20 @@ cls @defines slot S1 sel >didx
 t 0 * 1 + didx !def
 slot @def 0 = cls @uses & isname & $Eu
 Eu 0 > 12 * halt
+# tee rules: a tee-defined name has exactly one definition, and on the tee's own line it may only be
+# re-read after a ':' tee
+cls Ctee = cls Cteec = | >ist
+~S2 0 * >tdef
+ist slot S1 sel >tix
+t 1 + tix !tdef
+~S2 0 * >ldef
+t didx !ldef
+slot @tdef >td1
+td1 0 > cls @defines & slot @ldef t != & $Et1
+td1 1 - 0 max >td
+td1 0 > isname & t td != & ln1 td @ln1 = & >same
+td @cls Ctee = cls Cvec = cls Clen = | & t td > & 1 ^ same & $Et2
+Et1 Et2 + 0 > 13 * halt
 
 # ---------------------------------------------------------------- data image: slots, then pool
 lit S1 16 * pidx 4 * + slot 16 * sel >disp
