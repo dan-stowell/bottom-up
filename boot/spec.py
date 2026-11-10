@@ -10,8 +10,8 @@ K = len(KEYWORDS)
 PRELUDE = ' '.join(KEYWORDS)
 
 (VEC, VECLEAD, SCAL, SCALLEAD, LEN, LENLEAD, GATHER, IOTA,
- STOREV, STORES, SUM, MAX, COMPRESS, SCATTER, TEE, TEEC) = range(K, K + 16)
-NCODE = K + 16                      # classes below this emit code
+ STOREV, STORES, SUM, MAX, COMPRESS, SCATTER, TEE, TEEC, TEEL, VECL, LENL) = range(K, K + 19)
+NCODE = K + 19                      # classes below this emit code
 DATA, STR, NONE, ERR = NCODE, NCODE + 1, NCODE + 2, NCODE + 3
 NCLS = NCODE + 4
 ND = 9                              # depth-before ranges over 0..8
@@ -24,7 +24,7 @@ for k in ['+', '-', '*', '&', '|', '^', 'min', 'max', '<<', '>>', '<', '<=', '>'
 DELTA[KW['sel']] = -2
 for k in ['dup', 'over', 'input', 'idx']:
     DELTA[KW[k]] = 1
-for c in [VEC, VECLEAD, SCAL, SCALLEAD, LEN, LENLEAD, IOTA]:
+for c in [VEC, VECLEAD, SCAL, SCALLEAD, LEN, LENLEAD, IOTA, VECL, LENL]:
     DELTA[c] = 1
 for c in [STOREV, STORES, SUM, MAX]:
     DELTA[c] = -1
@@ -33,6 +33,12 @@ for c in [COMPRESS, SCATTER, TEEC]:
 
 LEADOF = list(range(NCLS))          # class a token takes when it is first on its line
 LEADOF[VEC], LEADOF[SCAL], LEADOF[LEN] = VECLEAD, SCALLEAD, LENLEAD
+
+# Chunk-local vectors. A ':x' tee whose name never occurs after its own line does not need an array:
+# its occurrences on that line use these classes, which keep just the current 64-byte chunk in x's slot.
+LOCALOF = list(range(NCLS))
+LOCALOF[TEE], LOCALOF[VEC], LOCALOF[LEN] = TEEL, VECL, LENL
+SLOT = 64                           # bytes per slot: {ptr, len} or one zmm chunk
 
 # lexical classes of a byte
 O_OTHER, O_LOWER, O_UPPER, O_DIGIT, O_QUOTE = range(5)
@@ -60,11 +66,11 @@ _s(':', O_LOWER, TEE); _s('%', O_LOWER, TEEC)
 
 # which classes define / use their operand variable
 DEFINES = [0] * NCLS
-for c in [STOREV, STORES, SUM, MAX, COMPRESS, DATA, TEE, TEEC]: DEFINES[c] = 1
+for c in [STOREV, STORES, SUM, MAX, COMPRESS, DATA, TEE, TEEC, TEEL]: DEFINES[c] = 1
 USES = [0] * NCLS
-for c in [VEC, VECLEAD, SCAL, SCALLEAD, LEN, LENLEAD, GATHER, IOTA, SCATTER]: USES[c] = 1
+for c in [VEC, VECLEAD, SCAL, SCALLEAD, LEN, LENLEAD, GATHER, IOTA, SCATTER, VECL, LENL]: USES[c] = 1
 READSVEC = [0] * NCLS               # reads vector *contents* (conflicts with an in-place scatter)
-for c in [VEC, VECLEAD, GATHER]: READSVEC[c] = 1
+for c in [VEC, VECLEAD, GATHER, VECL]: READSVEC[c] = 1
 CARRY = [0] * NCLS                  # 1: uses sum-carry register of its depth, 2: max-carry
 CARRY[KW['scan']] = 1; CARRY[KW['prev']] = 1; CARRY[KW['scanmax']] = 2
 

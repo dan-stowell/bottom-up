@@ -21,10 +21,10 @@ input idx P + !text
 # ---------------------------------------------------------------- byte classes: comments, strings, token chars
 # cm: inside a comment = more '#' so far than at the last newline (two scans). Same trick for quote parity.
 text 35 = scan dup text 10 = * scanmax > 1 ^ :ncm text 34 = & :q dup scan dup text 10 = %qnl dup text 10 = * scanmax - 1 & :par | text 32 > | ncm & :tc end
-# token starts/ends -> compressed token arrays; per-byte token number; line number of each token
-tc dup prev over over 1 ^ & :ts idx over %start text 10 = scan over %ln0 scan 1 - :bt drop swap 1 ^ & idx over %tend end
-# E_QUOTE: opening quote not starting a token, closing quote not ending one; odd quotes on a line
-q par & ts 1 ^ & q par 1 ^ & prev tc & | $Eq2
+# token starts/ends -> compressed token arrays; per-byte token number; line number of each token.
+# E_QUOTE (opening quote not starting a token, closing quote not ending one) rides along as the sum.
+q par 1 ^ & prev tc & tc dup prev over over 1 ^ & :ts idx over %start text 10 = scan over %ln0 scan 1 - :bt drop swap 1 ^ & idx over %tend drop q par & ts 1 ^ & | $Eq2
+# ... and odd quotes on a line
 qnl dup prev - 1 & $Eq1
 Eq1 Eq2 + 0 > halt
 &qnl >NL
@@ -39,15 +39,16 @@ tend start - :len 1 > c0 @sigtab :s0 0 > & start 1 + @text 127 min @opctab :o1 d
 ns 2 * lit + >nsl
 
 # ---------------------------------------------------------------- one pass over the bytes, seen from their tokens:
-# literal digits (E_LEX), decimal weights, two name-hash sums, constant-pool units
-bt @nsl dup 1 & tc & :blit drop 1 >> :bns idx swap - :off 0 >= tc & :bop blit & :lb text 48 >= text 57 <= & 1 ^ & lb text 48 - * bt @tend :bend 1 - idx - 0 max 8 min @pow10 * scan :dp off 0 max 63 min 256 * text + :hx Ha1 * dup Hs1 >> ^ Hb1 * bop * scan :hp1 hx Ha2 * dup Hs2 >> ^ Hb2 * bop * scan :hp2 idx 1 + bend = tc & blit & :u1 par q 1 ^ & :u2 | dup scan swap - :ucx drop drop drop drop $El1
+# literal digits (E_LEX), decimal weights, two name-hash sums, constant-pool units. Running sums are
+# never stored: their values at each token's first and last byte are compressed straight out.
+bt @nsl dup 1 & tc & :blit drop 1 >> :bns idx swap - :off 0 >= tc & :bop blit & :lb text 48 >= text 57 <= & 1 ^ & off 0 = tc & :nsm drop bt @tend :bend idx 1 + = tc & :lastb blit & :u1 drop lb text 48 - * bend 1 - idx - 0 max 8 min @pow10 * dup scan dup lastb %dpe swap - nsm %dps off 0 max 63 min 256 * text + :hx Ha1 * dup Hs1 >> ^ Hb1 * bop * :hv1 scan dup lastb %h1e hv1 - nsm %h1s idx hx Ha2 * dup Hs2 >> ^ Hb2 * bop * dup scan dup lastb %h2e swap - nsm %h2s drop idx idx u1 par q 1 ^ & | dup scan swap - nsm %pidx drop drop $El1
 lit nlen Maxdig > & $El2
 El1 El2 + 0 > 2 * halt
 isname nlen Maxname > & $En
 En 0 > 3 * halt
-# a segmented sum is a difference of two scan values
-ns 0 > :nz ns 1 - 0 max :nb @dp * tend 1 - :te1 @dp swap - lit * :val te1 @hp1 nb @hp1 nz * - :h1 drop te1 @hp2 nb @hp2 nz * - :h2 drop start @ucx :pidx drop end
-bt @val u1 * text u2 * + u1 u2 | ?pool
+# a segmented sum is a difference of two scan values; the loop above compressed both ends per token
+dpe dps - lit * :val h1e h1s - :h1 drop h2e h2s - :h2 drop end
+bt @val u1 * par q 1 ^ & :u2 text * + u1 u2 | ?pool
 &pool >U
 
 # ---------------------------------------------------------------- names: the scatter race
@@ -99,7 +100,12 @@ Et 0 > 6 * halt
 cls4 last ln1 Neg sel !lsk
 ln1 @lsk Cdata = last 1 ^ & :ditem sgi 0 = lit & cls4 Cstr = | 1 ^ & cls4 Cdata = last 1 ^ & cls4 Cstr = | ditem 1 ^ & | $Ed
 Ed 0 > 7 * halt
-ditem Cnone cls4 sel >cls
+ditem Cnone cls4 sel >clso
+# chunk-local vectors: a ':x' whose last occurrence (its canonical token) is on the tee's own line never
+# needs an array. Its occurrences there switch class, and keep just the current chunk in x's slot.
+~S1 0 * >tdef
+~NT 1 + clso Ctee = clso Cteec = | slot Neg sel !tdef
+slot @tdef :td1 1 - 0 max :td @clso Ctee = td1 0 > & isname & td @rep @ln1 td @ln1 = & ln1 td @ln1 = & :loc clso @localof clso - * clso + >cls
 
 # ---------------------------------------------------------------- stack depth = register allocation, by one scan
 cls @delta 2 - :dlt scan :da dlt - :d0 0 < d0 8 > | da 0 = last != | cls Ncode < :code & $Edp
@@ -126,30 +132,28 @@ slot @def 0 = cls @uses & isname & $Eu
 Eu 0 > 12 * halt
 # tee rules: a tee-defined name has exactly one definition, and on the tee's own line it may only be
 # re-read after a ':' tee
-~S1 0 * >tdef
-~NT 1 + cls Ctee = cls Cteec = | slot Neg sel !tdef
 ~S1 0 * >ldef
 ~NT cls @defines slot Neg sel !ldef
-slot @tdef :td1 0 > cls @defines & slot @ldef idx != & $Et1
-td1 1 - 0 max :td @cls Ctee = cls Cvec = cls Clen = | & idx td > & 1 ^ td1 0 > isname & idx td != & ln1 td @ln1 = & & $Et2
+td1 0 > cls @defines & slot @ldef idx != & $Et1
+td @clso Ctee = clso Cvec = clso Clen = | & idx td > & 1 ^ td1 0 > isname & idx td != & ln1 td @ln1 = & & $Et2
 Et1 Et2 + 0 > 13 * halt
 
 # ---------------------------------------------------------------- data image: slots, then pool
-lit S1 16 * pidx 4 * + slot 16 * sel >disp
-S1 16 * U 4 * + >Ds
+lit S1 Slot * pidx 4 * + slot Slot * sel >disp
+S1 Slot * U 4 * + >Ds
 Vbase 112 + Stublen + >Vd
-S1 4 * >Si
+S1 16 * >Si
 ~Si 0 * >simg
 ~NL2 0 * >lfp
 pidx first ln1 Neg sel !lfp
-ln1 @lfp :fp 4 * Vd + S1 16 * + cls Cdata = :isd slot 4 * Neg8 sel !simg
-pidx fp - isd slot 4 * 2 + Neg8 sel !simg
+ln1 @lfp :fp 4 * Vd + S1 Slot * + cls Cdata = :isd slot 16 * Neg8 sel !simg
+pidx fp - isd slot 16 * 2 + Neg8 sel !simg
 ~1 Ds + 0 !simg
 
 # ---------------------------------------------------------------- code layout
 # Liveness without analysis: the program is a straight line, so a vector is dead after the line holding
 # its last occurrence -- and the scatter race already made that occurrence the canonical one (rep = self).
-isname opc 1 = & slot 0 > & rep idx = & idx Kn >= & >dying
+isname opc 1 = & slot 0 > & rep idx = & idx Kn >= & loc 1 ^ & >dying
 # Each token owns up to three pieces of code, and a line is laid out as
 #   [every token's prologue] [every token's body] [releases of vectors that die here]
 # so loop-invariant work is hoisted with no motion pass: three streams, three prefix sums.
@@ -186,7 +190,7 @@ pv 8 >> 255 & pp 1 + !cb
 pv 16 >> 255 & pp 2 + !cb
 pv 24 >> 255 & pp 3 + !cb
 dying offb Relp + 1 - Neg8 sel >pp
-slot 16 * >pv
+slot Slot * >pv
 pv 255 & pp !cb
 pv 8 >> 255 & pp 1 + !cb
 pv 16 >> 255 & pp 2 + !cb

@@ -22,10 +22,12 @@ vecsz = {}
 class Spy(dict):
     def __setitem__(self, k, v):
         global curline
+        if k in LOCALS: return dict.__setitem__(self, k, v)      # chunk-local: lives in its slot
         if k in self and k in owned: free[owned[k]] = free.get(owned[k], 0) + 1
         owned[k] = alloc(k, len(v), curline)
         dict.__setitem__(self, k, v)
 owned = {}; curline = 0
+LOCALS = {t.slot for t in toks if t.cls == TEEL}
 import builtins
 # minimal re-implementation of the driver loop: reuse interp by patching dict creation is fragile, so inline it
 def run():

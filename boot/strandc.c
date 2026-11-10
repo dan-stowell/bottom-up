@@ -9,7 +9,7 @@
 #include <string.h>
 #include "tables.h"
 
-typedef struct { int start, end, line, first, last, sgi, opc, lit, str, isname, pidx, name, cls, slot, d0, code, tid, disp, dying; } Tok;
+typedef struct { int start, end, line, first, last, sgi, opc, lit, str, isname, pidx, name, cls, cls0, local, slot, d0, code, tid, disp, dying; } Tok;
 typedef struct { int off, len, last, slot, kw, defined; uint32_t h1, h2; int active, clast; } Name;
 
 static unsigned char *text; static int T;
@@ -149,6 +149,14 @@ int main(void) {
     i = j + 1;
   }
   die();
+  // ---- chunk-local vectors: a ':x' whose name's last occurrence is on the tee's own line
+  int *teetok = calloc(nslots + 1, sizeof(int));
+  for (int i = 0; i < nt; i++) { tok[i].cls0 = tok[i].cls; if (tok[i].cls == C_TEE || tok[i].cls == C_TEEC) teetok[tok[i].slot] = i + 1; }
+  for (int i = 0; i < nt; i++) {
+    Tok *t = &tok[i]; int d = t->isname ? teetok[t->slot] - 1 : -1;
+    t->local = d >= 0 && tok[d].cls0 == C_TEE && tok[names[tok[d].name].last].line == tok[d].line && t->line == tok[d].line;
+    if (t->local) t->cls = T_localof[t->cls];
+  }
 
   // ---- depth, stencils
   int depth = 0;
@@ -174,39 +182,39 @@ int main(void) {
   for (int i = 0; i < nt; i++) if (T_uses[tok[i].cls] && tok[i].isname && !names[tok[i].name].defined) ERR(12);
   die();
   {                                        // tee rules
-    int *teetok = calloc(nslots + 1, sizeof(int)), *nd = calloc(nslots + 1, sizeof(int));
-    for (int i = 0; i < nt; i++) { if (tok[i].cls == C_TEE || tok[i].cls == C_TEEC) teetok[tok[i].slot] = i + 1; if (T_defines[tok[i].cls]) nd[tok[i].slot]++; }
+    int *nd = calloc(nslots + 1, sizeof(int));
+    for (int i = 0; i < nt; i++) if (T_defines[tok[i].cls]) nd[tok[i].slot]++;
     for (int s = 1; s <= nslots; s++) if (teetok[s] && nd[s] != 1) ERR(13);
     for (int i = 0; i < nt; i++) {
       Tok *t = &tok[i]; int d = t->isname ? teetok[t->slot] - 1 : -1;
-      if (d >= 0 && d != i && tok[d].line == t->line && !(tok[d].cls == C_TEE && (t->cls == C_VEC || t->cls == C_LEN) && i > d)) ERR(13);
+      if (d >= 0 && d != i && tok[d].line == t->line && !(tok[d].cls0 == C_TEE && (t->cls0 == C_VEC || t->cls0 == C_LEN) && i > d)) ERR(13);
     }
   }
   die();
 
   // ---- data image
-  int datasize = 16 * (nslots + 1) + 4 * np, stublen = sizeof T_stub;
+  int datasize = SLOT * (nslots + 1) + 4 * np, W = SLOT / 4, stublen = sizeof T_stub;
   uint32_t vdata = VBASE + 112 + stublen;
-  uint32_t *simg = calloc(4 * (nslots + 1), 4); simg[0] = datasize;
+  uint32_t *simg = calloc(W * (nslots + 1), 4); simg[0] = datasize;
   for (int i = 0; i < nt; i++) {
     Tok *t = &tok[i];
-    t->disp = t->lit ? 16 * (nslots + 1) + 4 * t->pidx : 16 * t->slot;
-    t->dying = t->isname && t->slot > 0 && t->opc == 1 && i >= K && names[t->name].last == i;
+    t->disp = t->lit ? SLOT * (nslots + 1) + 4 * t->pidx : SLOT * t->slot;
+    t->dying = t->isname && t->slot > 0 && t->opc == 1 && i >= K && names[t->name].last == i && !t->local;
   }
   // ---- code: per line, prologues, bodies, releases
   unsigned char *code = malloc((size_t)nt * 512 + 16); size_t cl = 0;
 #define EMIT(start, len, pos, val) do { memcpy(code + cl, T_sten + (start), (len)); if (pos) { uint32_t v_ = (val); memcpy(code + cl + (pos) - 1, &v_, 4); } cl += (len); } while (0)
   for (int i = 0; i < nt;) {
     int j = i; while (!tok[j].last) j++;
-    if (tok[j].cls == C_DATA) { simg[4 * tok[j].slot] = vdata + 16 * (nslots + 1) + 4 * tok[i].pidx; simg[4 * tok[j].slot + 2] = tok[j].pidx - tok[i].pidx; }
+    if (tok[j].cls == C_DATA) { simg[W * tok[j].slot] = vdata + SLOT * (nslots + 1) + 4 * tok[i].pidx; simg[W * tok[j].slot + 2] = tok[j].pidx - tok[i].pidx; }
     for (int k = i; k <= j; k++) if (tok[k].code) EMIT(T_qstart[tok[k].tid], T_qlen[tok[k].tid], T_qpos[tok[k].tid], tok[k].disp + T_qadd[tok[k].tid]);
     for (int k = i; k <= j; k++) if (tok[k].code) EMIT(T_sstart[tok[k].tid], T_slen[tok[k].tid], T_ppos[tok[k].tid], tok[k].disp + T_padd[tok[k].tid]);
-    for (int k = i; k <= j; k++) if (tok[k].dying) EMIT(RELS, RELL, RELP, 16 * tok[k].slot);
+    for (int k = i; k <= j; k++) if (tok[k].dying) EMIT(RELS, RELL, RELP, SLOT * tok[k].slot);
     i = j + 1;
   }
   memcpy(code + cl, T_tail, sizeof T_tail); cl += sizeof T_tail;
   uint64_t fsize = 112 + stublen + datasize + cl;
   fwrite(T_ehdr, 1, sizeof T_ehdr, stdout); fwrite(&fsize, 8, 1, stdout); fwrite(&fsize, 8, 1, stdout);
-  fwrite(T_stub, 1, stublen, stdout); fwrite(simg, 4, 4 * (nslots + 1), stdout); fwrite(pool, 4, np, stdout); fwrite(code, 1, cl, stdout);
+  fwrite(T_stub, 1, stublen, stdout); fwrite(simg, 4, W * (nslots + 1), stdout); fwrite(pool, 4, np, stdout); fwrite(code, 1, cl, stdout);
   return 0;
 }

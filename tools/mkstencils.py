@@ -176,6 +176,11 @@ st(KW['end'], 1, LOOPEND)
 for d in range(1, 9):
     st(TEE, d, f"  mov rsi,[rbx+{DISP}]\n  vmovdqu32 [rsi+rax*4]{{k7}},zmm{d-1}",
        pre=ALLOC('rsi') + f"\n  lea rcx,[rbx+{DISP}]\n  mov [rcx],rsi\n  mov [rcx+8],r12")
+for d in range(1, 9):       # chunk-local vectors: the slot itself holds the current chunk
+    st(TEEL, d, f"  vmovdqu32 [rbx+{DISP}],zmm{d-1}")
+    if d <= 7:
+        st(VECL, d, f"  vmovdqu32 zmm{d},[rbx+{DISP}]")
+        st(LENL, d, f"  vmovdqa32 zmm{d},zmm27")
 for d in range(3, 9):    # never at depth 2: a line must not end on a tee
     st(TEEC, d, f"""  lea rcx,[rbx+{DISP}]
   vptestmd k1{{k7}},zmm{d-1},zmm{d-1}
@@ -268,13 +273,13 @@ with open(f'{ROOT}/src/tables.strand', 'w') as f:
     for n in tabs: f.write(data(n, tabs[n]))
     f.write(data('tail', tail)); f.write(data('stub', stub)); f.write(data('ehdr', ehdr))
     f.write(data('delta', [x + 2 for x in DELTA]))      # biased by 2: literals are unsigned
-    f.write(data('leadof', LEADOF)); f.write(data('clstab', CLSTAB))
+    f.write(data('leadof', LEADOF)); f.write(data('localof', LOCALOF)); f.write(data('clstab', CLSTAB))
     f.write(data('opctab', [opclass(c) for c in range(128)])); f.write(data('sigtab', [sigil(c) for c in range(128)]))
     f.write(data('defines', DEFINES)); f.write(data('uses', USES)); f.write(data('readsvec', READSVEC)); f.write(data('carry', CARRY))
     f.write(data('pow10', [10 ** i for i in range(MAXDIGITS)]))
     f.write(f"{len(stub)} >Stublen\n")
     for nm, v in [('Rels', rels), ('Rell', rell), ('Relp', relp), ('Kn', K), ('Ncode', NCODE), ('Cdata', DATA), ('Cstr', STR), ('Cnone', NONE), ('Cerr', ERR),
-                  ('Cscatter', SCATTER), ('Ctee', TEE), ('Cteec', TEEC), ('Cvec', VEC), ('Clen', LEN), ('Nsig5', 5), ('Nd', ND), ('Vbase', VBASE), ('Maxname', MAXNAME), ('Maxdig', MAXDIGITS),
+                  ('Cscatter', SCATTER), ('Ctee', TEE), ('Cteec', TEEC), ('Cvec', VEC), ('Clen', LEN), ('Nsig5', 5), ('Slot', SLOT), ('Nd', ND), ('Vbase', VBASE), ('Maxname', MAXNAME), ('Maxdig', MAXDIGITS),
                   ('Ha1', HA1), ('Hb1', HB1), ('Hs1', HS1), ('Ha2', HA2), ('Hb2', HB2), ('Hs2', HS2)]\
                  + [('Ru%d' % r, RACE_U[r]) for r in range(ROUNDS)] + [('Rv%d' % r, RACE_V[r]) for r in range(ROUNDS)]:
         f.write(f"{v} >{nm}\n")

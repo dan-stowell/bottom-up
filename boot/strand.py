@@ -143,6 +143,19 @@ def analyze(src: bytes):
             elif t.cls == STR or (t.cls == DATA and not t.last): bad = True
     if bad: raise CompileError(E_DATA)
 
+    # chunk-local vectors: a ':x' whose name's last occurrence is on the tee's own line
+    lastname = {}
+    for t in toks:
+        if t.isname: lastname[t.name] = t
+    teedef = {}
+    for t in toks:
+        t.cls0 = t.cls
+        if t.cls in (TEE, TEEC): teedef[t.slot] = t           # the last tee of a slot, like the scatter
+    for t in toks:
+        d = teedef.get(t.slot) if t.isname else None
+        t.local = d is not None and d.cls0 == TEE and lastname[d.name].line == d.line and t.line == d.line
+        if t.local: t.cls = LOCALOF[t.cls]
+
     depth = 0
     bad = False
     for t in toks:
@@ -174,7 +187,6 @@ def analyze(src: bytes):
 
     # tee rules: a tee-defined name has exactly one definition; on the tee's own line it may only be
     # re-read (pushed, or its length taken) after a ':' tee, never around a '%' tee
-    teedef = {t.slot: t for t in toks if t.cls in (TEE, TEEC)}
     ndefs = {}
     for t in toks:
         if DEFINES[t.cls]: ndefs[t.slot] = ndefs.get(t.slot, 0) + 1
@@ -182,31 +194,33 @@ def analyze(src: bytes):
     for t in toks:
         d = teedef.get(t.slot) if t.isname else None
         if d is not None and t is not d and t.line == d.line:
-            if not (d.cls == TEE and t.cls in (VEC, LEN) and t.idx > d.idx): raise CompileError(E_TEE)
+            if not (d.cls0 == TEE and t.cls0 in (VEC, LEN) and t.idx > d.idx): raise CompileError(E_TEE)
 
     for t in toks:
-        t.disp = 16 * (nslots + 1) + 4 * t.poolidx if t.lit else 16 * t.slot
+        t.disp = SLOT * (nslots + 1) + 4 * t.poolidx if t.lit else SLOT * t.slot
     # liveness without analysis: a vector's storage is dead after the line holding its last occurrence
     lastocc_tok = {}
     for t in toks:
         if t.isname: lastocc_tok[t.name] = t.idx
     for t in toks:
-        t.dying = (t.isname and t.slot > 0 and t.opc == O_LOWER and t.idx >= K and lastocc_tok[t.name] == t.idx)
+        t.dying = (t.isname and t.slot > 0 and t.opc == O_LOWER and t.idx >= K and lastocc_tok[t.name] == t.idx
+                   and not t.local)
     return toks, lines, nslots, pool
 
 
 def compile_(src: bytes, want_map=False):
     toks, lines, nslots, pool = analyze(src)
     T = tables()
-    datasize = 16 * (nslots + 1) + 4 * len(pool)
+    datasize = SLOT * (nslots + 1) + 4 * len(pool)
+    W = SLOT // 4
     vdata = VBASE + 112 + len(T['stub'])
-    slotimg = [0] * (4 * (nslots + 1))
+    slotimg = [0] * (W * (nslots + 1))
     slotimg[0] = datasize
     for lt in lines.values():
         s = lt[-1]
         if s.cls == DATA:
-            slotimg[4 * s.slot] = vdata + 16 * (nslots + 1) + 4 * lt[0].poolidx
-            slotimg[4 * s.slot + 2] = s.poolidx - lt[0].poolidx
+            slotimg[W * s.slot] = vdata + SLOT * (nslots + 1) + 4 * lt[0].poolidx
+            slotimg[W * s.slot + 2] = s.poolidx - lt[0].poolidx
     code = bytearray()
     cmap = []
     def emit(start, n, pos, value):
@@ -222,7 +236,7 @@ def compile_(src: bytes, want_map=False):
             cmap.append((len(code), t.line, t.raw.decode('latin1')))
             code += emit(T['sstart'][t.tid], T['slen'][t.tid], T['ppos'][t.tid], t.disp + T['padd'][t.tid])
         for t in lines[ln]:
-            if t.dying: code += emit(T['rels'], T['rell'], T['relp'], 16 * t.slot)
+            if t.dying: code += emit(T['rels'], T['rell'], T['relp'], SLOT * t.slot)
     code += bytes(T['tail'])
     fsize = 112 + len(T['stub']) + datasize + len(code)
     out = bytes(T['ehdr']) + struct.pack('<QQ', fsize, fsize) + bytes(T['stub'])
@@ -281,11 +295,11 @@ def interp(src: bytes, inp: bytes):
                     if sval > MAXN: raise TooBig()
                     n = sval; st.append(list(range(n)))
                 elif c == KW['input']: n = len(inp); st.append(list(inp))
-                elif c == VEC:
+                elif c in (VEC, VECL):
                     if len(v) != n: raise Fail()
                     st.append(list(v))
                 elif c == SCAL: st.append([sval] * n)
-                elif c == LEN: st.append([len(v)] * n)
+                elif c in (LEN, LENL): st.append([len(v)] * n)
                 elif c == GATHER:
                     idx = st.pop()
                     if any(not 0 <= i < len(v) for i in idx): raise Fail()
@@ -331,7 +345,7 @@ def interp(src: bytes, inp: bytes):
                         if i < 0: continue              # masked lane
                         if i >= len(tgt): raise Fail()
                         tgt[i] = x
-                elif c == TEE: vec[t.slot] = list(st[-1])
+                elif c in (TEE, TEEL): vec[t.slot] = list(st[-1])
                 elif c == TEEC:
                     m = st.pop(); a = st.pop()
                     vec[t.slot] = [x for x, q in zip(a, m) if q]
