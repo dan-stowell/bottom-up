@@ -8,6 +8,8 @@ import os, subprocess, sys, hashlib
 H = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, os.path.join(H, '..', 'boot'))
 import strand
 comp = sys.argv[1]; T = '/tmp/strand_pool'; os.makedirs(T, exist_ok=True)
+# a non-forgetting automaton whose functions do not commute: every wrong guess of a state shows
+PERM = '0 1 2 3  1 0 2 3  1 2 3 0  0 1 3 2 =d\n'
 PROGS = {
  'persistent tee re-read': 'input :x x prev + >y\nx end\ny out4\n',
  'tee then prev, two outputs': 'input :a dup prev :b + >c\na b + c + out4\n',
@@ -39,6 +41,13 @@ PROGS = {
  'prev of a running sum': 'input 1 & scan dup prev 2 * + out4\n',
  'prev of prev of a running sum': 'input 3 & scan dup prev dup prev + + out4\n',
  'prev feeding automaton': '1 2 3 0 2 2 0 1 3 0 1 1 0 3 2 2 =d\nbytes dup prev + 3 & /d 48 + out\n',
+ 'permutation automaton': PERM + 'bytes 3 & /d 48 + out\n',
+ 'permutation automaton feeding itself': PERM + 'bytes 3 & /d dup /d 4 * + 48 + out\n',
+ 'three automata in cascade': PERM + 'bytes 3 & /d dup /d dup /d + + 48 + out\n',
+ 'automaton -> prev -> automaton': PERM + 'bytes 3 & /d 0 over prev + 3 & /d + 48 + out\n',
+ 'three nested scans': 'input 1 & scan dup 3 & scan dup 7 & scan + + out4\n',
+ 'four nested scans': 'input 1 & scan dup 3 & scan dup 7 & scan dup 15 & scan + + + out4\n',
+ 'scanmax of a scan': 'input 100 - scan dup scanmax + out4\n',
  'input4 scan': 'input4 scan out4\n',
  'input4 prev filter': 'input4 dup dup prev > outif4\n',
 }
@@ -83,5 +92,35 @@ for name, src in PROGS.items():
                         if got != want:
                             bad += 1; print('FAIL', name, 'n', n, 'cpus', cpus, mode[1:], 'pipe' if pipe else 'file', got, want)
                             break
-print('PASS' if not bad else 'FAILED', comp, len(PROGS), 'programs,', nrun, 'pool runs')
+# Which path ran? Correct output does not show whether the pool kept a block or redid it on one
+# thread (found by the second audit: a chained `prev` fell back while every test passed). A copy of
+# each binary with the fallback entry replaced by exit_group(77) answers that. DEPTH is the length
+# of the longest chain of carries feeding carries whose first guess fails on this input; the pool
+# retries while dry + real + retries stays below the thread count, so a chain of depth d must run in
+# parallel on t threads iff d - 1 <= max(0, t - 3), and must fall back otherwise.
+DEPTH = {'scan': 1, 'two independent scans': 1, 'bytes words': 1, 'automaton: strip comments': 1,
+         'permutation automaton': 1, 'prev of an automaton state': 1, 'prev of a running sum': 1,
+         'prev of prev of a running sum': 1, 'prev chain': 1, 'automaton + prev + sum': 1,
+         'prev feeding automaton': 1, 'scan feeding scanmax': 1,
+         'nested scans (must fall back)': 2, 'permutation automaton feeding itself': 2,
+         'automaton -> prev -> automaton': 2, 'scan -> prev -> scan': 2,
+         'three automata in cascade': 3, 'three nested scans': 3, 'four nested scans': 4,
+         'scanmax of a scan': 3}       # a running max that misses costs two retries, not one
+R = os.path.join(H, '..', 'build')
+nm = subprocess.run(['nm', R + '/stub.o'], capture_output=True, text=True, check=True).stdout
+fsbad = [int(l.split()[0], 16) for l in nm.splitlines() if l.split()[-1] == 'fsbad'][0]
+stub = open(R + '/stub.bin', 'rb').read(); patch = bytes.fromhex('b8e7000000bf4d0000000f05')
+npath = 0
+for name, depth in DEPTH.items():
+    elf = subprocess.run([comp], input=PROGS[name].encode(), capture_output=True).stdout
+    at = 112 + fsbad
+    assert elf[at:at + 12] == stub[fsbad:fsbad + 12], 'stub layout changed: fix the fallback detector'
+    exe = f'{T}/q'; open(exe, 'wb').write(elf[:at] + patch + elf[at + 12:]); os.chmod(exe, 0o755)
+    for cpus in cpusets:
+        t = cpus.count(',') + 1
+        st = subprocess.run(['taskset', '-c', cpus, exe], stdin=open(files[sizes[-1]], 'rb'), stdout=subprocess.DEVNULL).returncode
+        want = 0 if depth - 1 <= max(0, t - 3) else 77; npath += 1
+        if st != want:
+            bad += 1; print('FAIL path', name, 'threads', t, 'exit', st, 'expected', want)
+print('PASS' if not bad else 'FAILED', comp, len(PROGS), 'programs,', nrun, 'pool runs,', npath, 'path checks')
 sys.exit(1 if bad else 0)

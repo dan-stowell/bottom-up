@@ -362,6 +362,13 @@ dj_real1:
   .endr
 dj_real0:
   loadcar r13+1280
+  mov eax,[rbx-712]                 # an automaton starts from "state ^ e", e = the state it is
+  .irp i,16,17,18,19,20,21,22,23    # believed to enter in (stored xor identity: e in every byte).
+  bt eax,\i+8                       # Only that state reaches the output, and being a permutation
+  jnc 1f                            # it can be peeled off the range's function afterwards.
+  vpbroadcastb zmm\i,xmm\i
+1:
+  .endr
 dj_run:
   kxnorq k5,k5,k5
   lea r14,[rip+fail]
@@ -377,6 +384,18 @@ dj_run:
   setrange
   mov rbp,[r13+8]
   mov r8,[r13+16]
+  cmp dword ptr [rip+j_mode],2
+  jne 2f
+  mov ecx,[rbx-708]                 # as in the dry pass: stop one chunk early to record OUT',
+  sub rbp,rcx                       # which a retry needs to rebuild INw
+  cmp rbp,rax
+  jbe dj_ran1
+  lea r15,[rip+dj_ran1]
+  jmp r11
+dj_ran1:
+  savecar r13+3328
+  mov rbp,[r13+8]
+2:
   lea r15,[rip+dj_ran]
   jmp r11
 dj_ran:
@@ -520,6 +539,9 @@ fblock:
 fscan:                              # scan line: dry pass, derive carries, real pass, verify
   mov r10,[rip+wbase]
   savecar r10+1280                  # thread 0 starts from the caller's (true) carries
+  mov dword ptr [rip+f_retry],0
+  mov dword ptr [rip+f_maxlow],0
+  mov dword ptr [rip+f_bad],0
   vmovdqu32 [rip+f_a28],zmm28
   vmovdqu32 [rip+f_a29],zmm29
   mov dword ptr [rip+j_mode],1
@@ -581,8 +603,29 @@ fs9:
   shl rsi,6
   vmovdqu32 zmm24,[r10+rsi+8192+1280]
   vpcmpd k1,zmm24,[r10+rsi+2304],4
-  kortestw k1,k1
-  jnz fsbad
+  kmovw esi,k1
+  cmp edx,8
+  jb fs95
+  lea r9d,[rdx+8]
+  bt dword ptr [rbx-712],r9d
+  jnc fs95
+  and esi,0x8000                    # `prev` reads only the last element of its carry
+  jmp fs96
+fs95:
+  cmp edx,8
+  jb fs96
+  lea r9d,[rdx+16]
+  bt dword ptr [rbx-712],r9d
+  jnc fs96
+  mov rsi,rdx                       # an automaton: only the state (the function at 0) matters
+  shl rsi,6
+  movzx r9d,byte ptr [r10+rsi+8192+1280]
+  movzx esi,byte ptr [r10+rsi+2304]
+  xor esi,r9d
+fs96:
+  test esi,esi
+  jz fs10
+  bts dword ptr [rip+f_bad],edx
 fs10:
   inc edx
   cmp edx,16
@@ -591,8 +634,35 @@ fs10:
   inc ecx
   cmp ecx,[rip+nthreads]
   jb fs8
+  cmp dword ptr [rip+f_bad],0
+  jne fsretry
   mov dword ptr [rip+f_probe],0
   jmp fgood
+fsretry:                            # some carry was guessed wrong. The real pass ran its upstream
+  mov eax,[rip+f_retry]             # carries exactly, so its own (IN, OUT) pairs give the next
+  add eax,4                         # level's carries exactly: derive again from them and rerun,
+  cmp eax,[rip+nthreads]            # as long as the passes so far (dry + real + retries) plus one
+  ja fsbad                          # more still number fewer than the threads.
+  inc dword ptr [rip+f_retry]
+  mov eax,[rip+f_maxlow]            # A running max cannot be peeled: OUT = max(IN, M) hides M if IN
+  not eax                           # was too high. One that missed restarts from -inf everywhere
+  and eax,[rip+f_bad]               # for one pass (its values are wrong, its OUT is M), and the
+  and eax,0xff                      # pass after that derives it exactly.
+  mov [rip+f_maxlow],eax
+  mov dword ptr [rip+f_bad],0
+  vmovdqu32 zmm28,[rip+f_a28]
+  vmovdqu32 zmm29,[rip+f_a29]
+  mov r10,[rip+wbase]
+  mov edx,[rip+nthreads]
+1:
+  lea rsi,[r10+1280]                # W := the IN that pass used
+  lea rdi,[r10+256]
+  mov ecx,128
+  rep movsq
+  add r10,8192
+  dec edx
+  jnz 1b
+  jmp fs1
 derive:                             # zmm24 = carry edx after a range, from IN [rdi+1280], W [rdi+256]
   vmovdqu32 zmm24,[rdi+1280]        # and the range's dry result zmm25; eax = the line's carry kinds
   cmp edx,8
@@ -601,6 +671,9 @@ derive:                             # zmm24 = carry edx after a range, from IN [
   bt eax,r9d
   jnc 6f
   vpmaxsd zmm24,zmm24,zmm25         # running max
+  bt dword ptr [rip+f_maxlow],edx
+  jnc 6f
+  vpslld zmm24,zmm31,31
   ret
 4:
   lea r9d,[rdx-8]
@@ -613,6 +686,7 @@ derive:                             # zmm24 = carry edx after a range, from IN [
   lea r9d,[rdx+8]
   bt eax,r9d
   jnc 55f
+56:
   vmovdqa32 zmm24,zmm25             # prev
   ret
 55:
@@ -620,6 +694,11 @@ derive:                             # zmm24 = carry edx after a range, from IN [
   bt eax,r9d
   jnc 6f                            # automaton: OUT o IN (both stored xor identity)
   vpxord zmm24,zmm24,dword ptr [rbx-896]{1to16}
+  cmp dword ptr [rip+f_retry],0     # after a real pass, OUT = M o (^e): undo the ^e first
+  je 57f
+  vpbroadcastb zmm26,byte ptr [rdi+256]
+  vpxord zmm24,zmm24,zmm26
+57:
   vpxord zmm25,zmm25,dword ptr [rbx-896]{1to16}
   vpshufb zmm24,zmm25,zmm24
   vpxord zmm24,zmm24,dword ptr [rbx-896]{1to16}
@@ -791,6 +870,9 @@ done:     .long 0
 j_mode:   .long 0
 f_soft:   .long 0
 f_probe:  .long 0
+f_retry:  .long 0
+f_maxlow: .long 0
+f_bad:    .long 0
           .long 0
 frame:    .quad 0
 stksize:  .quad 0

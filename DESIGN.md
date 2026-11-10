@@ -109,8 +109,14 @@ line splittable and any token that cannot be split (compress into memory, scatte
 in its own prologue. A big splittable line calls a thread pool in the startup stub; the
 workers jump into the *same* loop body with their own index range. `prev` is made right by
 a one-chunk warm-up that stores nothing; running sums, maxima and automata by a dry pass,
-derived carries, a real pass and a verification, with a serial fallback (SWEETSPOT.md). The
-compiler's source did not change for any of this.
+derived carries, a real pass and a verification. A carry that depends on another carry (a
+sum of a sum, an automaton fed by an automaton's states) is guessed wrong by the dry pass;
+the real pass then ran the carries it depends on exactly, so its own start and end values
+give the right carries for one more pass. The pool retries like that while the number of
+passes stays below the number of threads, and otherwise finishes the block on one thread
+(SWEETSPOT.md, "Dependent carries"). Parallel execution is therefore a property of the
+line *and* the thread count, not a guarantee: `tests/pool.py` asserts which path each of
+its programs takes. The compiler's source did not change for any of this.
 
 ## What the design makes disappear
 
