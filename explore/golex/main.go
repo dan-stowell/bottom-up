@@ -1,5 +1,5 @@
 // golex: the reference. Tokenise a Go source file with go/scanner and write the token stream as
-// little-endian dword pairs (byte offset, token kind), or time the scan.
+// little-endian dwords (all byte offsets, then all token kinds), or time the scan.
 //   golex dump FILE > tokens      golex time FILE [reps]
 package main
 
@@ -62,14 +62,15 @@ func main() {
 		panic(err)
 	}
 	switch os.Args[1] {
-	case "dump":
-		w := bufio.NewWriterSize(os.Stdout, 1<<20)
-		var b [8]byte
+	case "dump": // every token's offset, then every token's kind, as little-endian dwords
+		var offs, kinds []uint32
 		_, errs := scan(src, func(off int, tok token.Token) {
-			binary.LittleEndian.PutUint32(b[0:], uint32(off))
-			binary.LittleEndian.PutUint32(b[4:], uint32(tok))
-			w.Write(b[:])
+			offs = append(offs, uint32(off))
+			kinds = append(kinds, uint32(tok))
 		})
+		w := bufio.NewWriterSize(os.Stdout, 1<<20)
+		binary.Write(w, binary.LittleEndian, offs)
+		binary.Write(w, binary.LittleEndian, kinds)
 		w.Flush()
 		fmt.Fprintln(os.Stderr, "scanner errors:", errs)
 	case "time":
