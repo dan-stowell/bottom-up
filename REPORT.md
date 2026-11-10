@@ -184,3 +184,14 @@ So the scan-shaped front end is where SIMD is ahead (4 ns/byte even with i32 lan
 join-shaped work (bytes looking up their token through gathers; many narrow passes over
 token arrays) is where it falls behind. No input shape I tried reverses the total:
 comment-heavy, data-heavy, string-heavy and dense-code inputs are all 1.7-2.7x slower.
+
+## Addendum 2: the sweet spot
+
+Asked where this model *does* win, I built a benchmark suite and fixed what it exposed
+(SWEETSPOT.md). The headline: single-pass map / filter / reduce / translate programs with
+local context run at 6-8 GB/s on one core and 12-20 GB/s on the machine — 3-15x scalar C,
+at least even with `gcc -O3 -march=native` per core, and 3-4x ahead of hand-written
+mmap + OpenMP C wherever the loop carries context or filters. Pure maps and reductions tie
+well-written parallel C at the kernel's I/O floor. The compiler itself, with eight vCPUs,
+is now 15% faster than the scalar C compiler on a 5 MB input, and still slower on one core.
+The cost is a hand-written runtime of ~790 instructions (SCALAR_LEDGER.md, items 15-20).

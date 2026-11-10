@@ -56,9 +56,31 @@ input 64 > $N        # vector line: lead `input`, ops, sink `$N` (sum into scala
 | `%abc` | tee: `vals mask %abc` compress-stores mid-line |
 | `idx` | push the lane index `0,1,2,...` |
 | `end` | sink: discard the result (the line's work was its tees) |
+| `input4` | lead only: stdin as little-endian 32-bit integers |
+| `bytes` | lead only: stdin as bytes on **64 unsigned byte lanes** — a *byte line* (below) |
+| `outif`, `outif4` | sink: `vals mask outif` appends the selected values to stdout (a streaming filter) |
 | `out`, `out4` | sink: append to stdout as bytes / as little-endian dwords |
 | `halt` | sink (scalar line): if nonzero, exit with that status and no output |
 | `1 2 "txt" =abc` | data line: `abc` is a constant vector (numbers, string bytes) |
+
+### Byte lines
+
+A line led by `bytes` runs with 64 byte lanes per chunk instead of 16 dword lanes. All
+arithmetic is mod 256, comparisons are unsigned, `@t` is a 256-entry table lookup (two
+`vpermi2b`), and the sinks are the streaming ones (`out`, `outif`, `$S`, `end`). Named
+vectors do not exist on a byte line except as chunk-local tees. In the compiler this is one
+table: a token on a byte line takes class `BYTEOF[class]`, and classes with no byte meaning
+have no stencil, so misuse is the ordinary "no stencil at this depth" error.
+
+### What runs on all cores
+
+Nothing in the language says "parallel". At run time the lead token's prologue marks its
+line splittable and any token that cannot be split (compress into memory, scatter) vetoes
+in its own prologue. A big splittable line calls a thread pool in the startup stub; the
+workers jump into the *same* loop body with their own index range. `prev` is made right by
+a one-chunk warm-up that stores nothing; running sums and maxima by a dry pass, derived
+carries, a real pass and a verification, with a serial fallback (SWEETSPOT.md). The
+compiler's source did not change for any of this.
 
 ## What the design makes disappear
 

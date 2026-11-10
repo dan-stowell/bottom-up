@@ -66,3 +66,29 @@ character loop with a hash table and `qsort`).
 | + tee fusion, spec'd 4-round race, limits (source 42.7 KB) | 2.97 ms | 1,170 | 61% |
 | + chunk-local vectors (64-byte slots) | 2.78 ms | 940 | |
 | + in-loop compression of segmented sums; quote check folded in | 2.61 ms | 816 | 61.5% |
+
+## Addendum: what the sweet-spot work added to this ledger
+
+SWEETSPOT.md made Strand fast on streaming programs largely by growing the *hand-written*
+part of the system. That belongs here.
+
+| # | island | size / cost | why |
+|---|---|---|---|
+| 15 | **The stub is now a small runtime**: startup, mmap of stdin, streamed output, and a futex thread pool with dry/real/verify passes for running sums (`stencils/stub.S`). All scalar, all branches, all written by hand in assembly. | 787 instructions, 4,480 bytes (was 82 instructions executed per run and ~500 bytes). It is copied into every binary. | Threads, futexes and file mapping are system calls and shared-memory protocol; none of it is expressible in Strand. This is the largest scalar island in the project and the least tested by construction: only differential fuzzing in "eager" mode covers it. |
+| 16 | **Per-line fork check** in every loop head: 6 scalar instructions (load vote, compare n with the threshold). | 6 instructions per line execution | The decision to split is made at run time from the tokens' votes. |
+| 17 | **Speculation overhead**: a line with running sums does its work twice per block when it runs in the pool (dry pass + real pass), and three times for the first block if verification fails. Every range also runs one extra warm-up chunk. | 2x compute for scan lines in the pool; one chunk per range otherwise | The carry into a range is not known until the ranges before it have been summarised. |
+| 18 | **Output ordering is serial**: blocks are written by one thread, region by region. | one `write` per thread per 4 MiB block | Bytes on a file descriptor are ordered. |
+| 19 | **Byte lines are a second, narrower language**: no scans, no named vectors, no gather except the 256-entry table. | n/a | Kept small on purpose; the compiler's own front end therefore still runs on dword lanes. |
+| 20 | **Generated tables doubled** (97 classes x 9 depths x 8 tables as decimal data lines). | `src/tables.strand` is 70 KB against 10 KB of compiler; self-compile time rose accordingly (below) | The class x depth table is dense and stored as text. A sparse encoding would fix this and has not been done. |
+
+The pool does not help the compiler much: its heavy lines chain scans (comment and quote
+state), compress into memory, or scatter, all of which are either serial or fail
+verification and fall back.
+
+Compile times after all of this (the generated tables grew, so absolute times are not
+comparable with the tables above; the ratio to C on the same input is):
+
+| input | scalar C | Strand, 1 core | Strand, 8 vCPUs |
+|---|---|---|---|
+| its own source, 80 KB | 2.94 ms | 4.38 ms (1.49x slower) | same (below the fork threshold) |
+| 5.2 MB (64 renamed copies) | 273 ms | 351 ms (1.29x slower) | 237 ms (**1.15x faster**) |

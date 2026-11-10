@@ -8,3 +8,4 @@ explore/bench
 explore/base[0-9]
 explore/basev[0-9]
 explore/st_*
+explore/omp_*
