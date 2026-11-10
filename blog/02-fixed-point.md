@@ -31,8 +31,9 @@ places for a self-hosting bug to hide.
 
 The fixed point has since survived three redesigns of the code layout (memory release,
 prologue hoisting, placeholder-based patching). Each changed every byte of the output and
-each re-converged on the first try, which mostly says that the reference and the Strand
-source are edited together.
+each re-converged. (*Correction: I first wrote "on the first try". The release redesign
+failed once with a runtime bounds check before converging. What is true is that no mistake
+has ever shown up as stage2 != stage3; they are caught earlier.*)
 
 ## What a fixed point does not prove
 
@@ -83,7 +84,7 @@ scalar reference" was false on inputs my fuzzers never produced: two names with 
 32-bit hash made the SIMD compiler reject a program the reference accepted, and so did
 40,000 distinct names. It also found that `build.sh` could not fail (`cmp && echo` under
 `set -e`), so the fixed-point check above was decorative. Both are fixed; the name race is
-now part of the language definition and both scalar references simulate it. The fixed
-point has moved to a new hash four more times since, each time with stage1 == stage2 ==
-stage3. A fixed point really does not prove correctness — a reviewer with a different
+now part of the language definition and both scalar references simulate it. The compiler
+has been rewritten around fused loops since, and the fixed point is now `2736fc84…`, still
+with stage1 == stage2 == stage3. A fixed point really does not prove correctness — a reviewer with a different
 imagination found in minutes what thousands of fuzz cases had not.
