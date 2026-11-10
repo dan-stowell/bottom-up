@@ -77,3 +77,12 @@ vectorises and every line can be split, with no analysis and a compiler that run
 quarter of a millisecond. The class of programs where that buys speed is byte streams with
 a little state: tokenise, strip, classify, filter, translate. It is 3-5x there, not 15x,
 and I would rather have the smaller number that someone else can reproduce.
+
+---
+
+*Added after a second audit, the same day.* Two things in this post needed qualifying. The
+grammar above knows `#`, `"` and `\` and nothing else; it is not a lexer for Python or any
+other language, and the input was Python source only as a realistic mix of bytes. And "a C
+compiler will neither vectorise it nor split it" is a statement about GCC and an ordinary
+loop: C written by hand with intrinsics, using this same technique, is somewhat faster than
+the Strand line (4.0 against 3.2 GB/s on one core). The next post has that comparison.

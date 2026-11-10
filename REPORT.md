@@ -214,7 +214,8 @@ without intrinsics (`bench/base_omp.c`), the answer is three classes: table tran
 one core, 2-5x on eight CPUs). `x /t` runs a 4-state automaton over a byte line as an
 in-register scan of transition functions (a function on four states is four bytes; composing
 two is one `vpshufb`), and composes thread ranges the same way. Stripping comments from
-source text with string awareness is one line and runs at 3.1 GB/s on one core against
+source text with string awareness (a simplified grammar: `#` comments and `"..."` strings
+only, see Addendum 4) is one line and runs at 3.1 GB/s on one core against
 0.96 for a C `switch` loop; counting identifiers outside comments and strings, 3.2 against
 0.78. As far as I know the transposed register layout for the scan (SWEETSPOT.md) is not
 from the literature; the idea of lexing by composing transition functions is Hillis and
@@ -241,3 +242,28 @@ becomes one line and the "compilation as a sweet-spot program" question can be a
 with the right primitive; (3) segmented scans and number parsing, which are scans over
 other small monoids; (4) a matched comparison against hand-vectorised C for automata and
 filters, which I expect to be a tie on speed and a large difference in source size.
+
+## Addendum 4 — after the second audit (2026-11-10)
+
+The second audit (AUDIT_FOLLOWUP.md; my reply point by point is REVIEWS.md, review 5) found a
+supporting probe I had broken, one more C baseline that was a spelling and not a limit
+(`swapcase`), a parallel path that silently fell back, and example grammars described too
+generously. What changed:
+
+- **The comparison is now a bracket.** `bench/hand.c` is hand-written AVX-512 + OpenMP C for
+  the seven programs where ordinary C loses. Strand is 1.4-7x ordinary C on table
+  translation, filters and small automata, and 0.4-1.2x the hand-written C: about 75-95% of
+  it on one core where both use the same technique, half of it where the hand version uses
+  a better algorithm (carry-less multiply for quote parity). `swapcase` is a tie.
+- **A real grammar.** `json` extracts the structural characters outside strings and is
+  checked against a skeleton rebuilt from Python's `json` parser. `strip`, `idents` and
+  `strings` are now described as what they are, a simplified `#`-comment and `"`-string
+  grammar run over Python source as a byte distribution.
+- **Dependent carries stay parallel**, up to a depth bounded by the thread count: the pool
+  re-derives carries from the real pass and retries. The tests assert which path ran.
+- **Which compiler phases fit** is answered in SWEETSPOT.md: the scanning end of a front end
+  does (for grammars of at most four states today); a whole compiler does not, and the
+  self-hosted one remains the evidence.
+
+Stub: 5,888 bytes. Tests: 110 cases and both fuzzers on three stages, 39 pool programs
+(4,836 runs, 80 path checks), all 256 four-state transition functions.

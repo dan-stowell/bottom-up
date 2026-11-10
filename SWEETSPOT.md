@@ -1,103 +1,141 @@
 # SWEETSPOT.md — where Strand wins, where it ties, and why
 
-*Rewritten after the audit (AUDIT.md, 2026-11-10). The first version of this file claimed a
-3-4x lead over parallel C wherever a loop "carried a dependency". The audit showed that for
-`words` that lead came from how my C baseline was spelled, not from anything C cannot do.
-Every number below is from the rebuilt benchmark (`python3 bench/run.py 256`), whose C side
-is now as strong as I can make it without intrinsics. Git history has the old file.*
+*Third version. The first claimed a 3-4x lead over parallel C wherever a loop "carried a
+dependency"; the first audit (AUDIT.md) showed that lead came from how my C was spelled. The
+second version called its C "the strongest without intrinsics"; the second audit
+(AUDIT_FOLLOWUP.md) found one more loop that was not, and asked the better question: how
+does this compare with what an expert writes? This version answers it with a third
+implementation of every program where ordinary C loses, hand-written with AVX-512
+intrinsics (`bench/hand.c`). Every number is from `python3 bench/run.py 256` on this
+machine. Git history has the old files.*
 
 ## The short version
 
-Against well-written C (`gcc -O3 -march=native`, mmap, OpenMP, loops shaped so that GCC
-vectorises them) on this machine:
+Strand sits between what GCC makes of ordinary C and what an expert writes with intrinsics:
 
-| class of program | Strand vs the best C | why |
-|---|---|---|
-| maps, reductions, neighbour tests (`prev`), prefix sums | **tie** (0.8-1.3x) | GCC vectorises these too, once the loop is spelled the right way; both sides then sit near the cost of getting at the file |
-| table translation (256-entry lookup) | **1.7-2.3x** | GCC does not turn `out[i] = tab[in[i]]` into byte permutes |
-| filters (output position depends on the data) | **1.6-3.9x** | GCC does not emit compress instructions for `if (keep) out[k++] = x` |
-| **small automata** (comment stripping, CSV quoting, lexing) | **3.2-4.1x on one core, 2-5x on all** | a state machine is a loop-carried dependency no C compiler vectorises or threads; Strand runs it as a scan of transition functions |
+| class of program | Strand vs ordinary C | Strand vs hand-written intrinsics | why |
+|---|---|---|---|
+| maps, reductions, neighbour tests (`prev`), prefix sums | **tie** (0.7-1.3x; `maxline` 1.9x on one core only) | not written; a tie is the expectation | GCC vectorises these once the loop is spelled the right way |
+| byte-table translation (a table that is not arithmetic) | **1.6-2.3x** | 0.8-0.9x | GCC does not turn `out[i] = tab[in[i]]` into byte permutes |
+| filters (output position depends on the data) | **1.4-3.8x** | 0.8-1.2x | GCC does not emit compress for `if (keep) out[k++] = x` |
+| small automata, same technique by hand (strip, idents, strings) | **3.0-5.6x** | 0.5-0.9x | no compiler turns a state machine into a scan of transition functions |
+| small automata where a better algorithm is known (csv, json) | **2.2-7.3x** | 0.4-0.6x (1.2x in one cell) | quote parity by carry-less multiply beats any automaton; Strand has no such primitive |
 
-So the sweet spot is narrower than first claimed and it has a name: **byte-stream
-transducers with a small amount of state** — tokenising, stripping, classifying, filtering,
-translating. That is also, not by accident, what the front end of a compiler does.
+"Ordinary C" is the faster of `bench/base.c` (one thread, `read`) and `bench/base_omp.c`
+(mmap, OpenMP, loops shaped to vectorise), on at most the same number of CPUs. These are
+the implementations I could write, not an upper bound on C; `swapcase` was in the table
+class until the second audit rewrote it as arithmetic, where it ties.
+
+So the sweet spot is this: **byte-stream programs with a little associative state, where
+the fast code exists but a compiler will not produce it from ordinary source.** There,
+one line of Strand, compiled in a quarter of a millisecond, gets 75-95% of hand-written
+intrinsics on one core when both use the same technique, and 1.4-7x what GCC gets from a
+loop. It does not beat an expert, and it loses by 2x when the expert knows a better
+algorithm.
 
 ## What the advantages actually are
 
-1. **The only loop-carried dependencies the language has are associative, by construction.**
+1. **The only loop-carried state the language has is associative, by construction.**
    `prev`, `scan`, `scanmax` and the automaton `/t` are each a scan over a small monoid
-   (shift, +, max, function composition). An associative carry can be computed inside a
-   register without a loop and can be combined across thread ranges, so *every* line
-   vectorises and *every* line can be split. A C compiler has to discover that property in
-   a loop it was handed, and for anything past a simple reduction it does not.
+   (shift, +, max, function composition). So every line vectorises without analysis, and a
+   line can be split across threads by combining per-range summaries. A C compiler has to
+   discover that property in a loop it was handed. (Splitting has a limit of its own, under
+   "Dependent carries" below: it is not true that every line runs on all cores.)
 
-2. **No cliffs from spelling.** `explore/cliff.c` counts words five obvious ways. One
-   spelling vectorises (19.7 GB/s in memory); the other four run at 1.4-1.9 GB/s. The
-   difference between the fast one and its nearest neighbour is whether `i == 0 ||` is
-   inside the loop. That 10x is invisible in the source, and it is what made my first
-   baseline slow. In Strand the slow versions cannot be written. (Strand has its own much
-   smaller cliff, listed under "What does not work" below.)
+2. **Fewer cliffs from spelling.** `explore/cliff.c` counts words five obvious ways; one
+   vectorises (19.7 GB/s in memory), four run at 1.4-1.9. `swapcase` as `tab[c]` runs at
+   2.4 GB/s and as `c ^ (((u >= 65) & (u <= 90)) * 32)` at 4.9. I wrote the slow form both
+   times, in a benchmark, while trying to write fast C; that is the evidence that the cliff
+   is real, and also why this file's claims about C kept being wrong. In Strand a table
+   lookup is a byte permute, so the two spellings of `swapcase` run at about the same speed
+   (5.5 and 5.0 GB/s).
 
-3. **Shapes compilers do not vectorise at all**: data-dependent output position (filters),
-   byte-table translation, and automata. These are where the measured gaps are.
+3. **Shapes compilers do not vectorise at all**: data-dependent output position, byte-table
+   translation, automata. These are the measured gaps.
 
-4. **Threading comes with the line.** Splitting a filter needs per-thread regions written in
-   order; splitting a prefix sum or an automaton needs two passes and a combine step. In
-   `bench/base_omp.c` those are 12-25 lines each, by hand, per program. In Strand it is the
-   same one line, and the runtime verifies the split against the serial result.
+4. **Threading comes with the line.** In `bench/base_omp.c` and `bench/hand.c`, splitting a
+   filter, a prefix sum or an automaton is 12-25 lines each, by hand, per program (and the
+   one for JSON had a bug that only the output check on four CPUs caught). In Strand it is
+   the same one line, and the runtime verifies the split against what one thread would do.
 
-5. **Compilation is a table lookup.** Compiling one of these programs takes **0.22-0.24 ms**
-   with the self-hosted compiler; `gcc -O3 -fopenmp` takes 66-90 ms on the C equivalent and
-   `gcc -O0` 31 ms. Because every decision an optimiser would make is already fixed by the
-   syntax, copy-and-patch output *is* the vectorised, threaded code. For one-off questions
-   about a file, gcc's compile time alone is what Strand needs to process 0.2-0.7 GB.
+5. **Compilation is a table lookup.** 0.21-0.24 ms per program, against 64-90 ms for
+   `gcc -O3 -fopenmp`. From source text to answer, for a question asked once
+   (`bench/oneoff.py`: compile, then run, one CPU, median of 7, ms):
 
-What is **not** an advantage: raw speed on anything GCC already vectorises, and the
-compiler itself (REPORT.md: 1.3-1.5x slower than scalar C on one core).
+   | program | input | Strand | gcc -O3 `base.c` | gcc -O3 -fopenmp `base_omp.c` |
+   |---|---|---|---|---|
+   | words | 1 MiB | 5.6 | 57.5 | 71.7 |
+   | words | 256 MiB | 36.7 | 94.3 | 108.1 |
+   | strip | 1 MiB | 5.3 | 49.7 | 95.1 |
+   | strip | 256 MiB | 87.5 | 338.8 | 350.6 |
+   | json | 1 MiB | 4.7 | 50.7 | 89.4 |
+   | json | 256 MiB | 86.9 | 542.4 | 569.5 |
+
+   Both sides include the measuring script's two process launches, which alone take 4-6 ms:
+   at 1 MiB the Strand column is almost entirely that. `words` is a tie in the main table
+   and 10x apart here at 1 MiB: for small inputs the compiler is the cost, and this is the
+   one advantage that does not depend on the program's shape.
+
+What is **not** an advantage: speed on anything GCC already vectorises; speed against
+hand-written intrinsics; and the compiler itself (REPORT.md: 1.3-1.5x slower than scalar C
+on one core).
 
 ## The map (`python3 bench/run.py 256`)
 
 Whole processes; 256 MiB from the page cache; output to /dev/null; 7 interleaved rounds;
-GB/s of input as **median (best)**. "plain C" is `bench/base.c` (one thread, `read`),
-"OpenMP C" is `bench/base_omp.c` (mmap, OpenMP). The last three columns divide Strand's
-median by the best C median at the same CPU count. Every timed configuration's output is
-hashed under its own CPU mask and must equal plain C's.
+GB/s of input as **median (best)**; CPUs 1, 4 and 8 of 8. The ratio columns divide
+Strand's median by the fastest C median on at most that many CPUs. Every timed
+configuration's output is hashed under its own CPU mask and must equal plain C's; for
+`json`, plain C's must also equal a skeleton rebuilt from Python's `json` parser.
+`build/suite/results.json` keeps every sample, the input hashes, the compiler version and
+the source revision. (`json` was timed in a second invocation right after the other 22;
+see "Mistakes".)
 
-| program | shape | plain C | OpenMP C, 1 | OpenMP C, 4 | OpenMP C, 8 | Strand, 1 | Strand, 4 | Strand, 8 | Strand / best C, 1 | 4 | 8 |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| lines | reduce | 4.92 (5.06) | 5.93 (6.68) | 8.24 (10.41) | 10.92 (13.43) | 6.36 (6.59) | 10.43 (11.13) | 10.91 (12.65) | 1.07x | 1.27x | 1.00x |
-| lines32 | reduce, dword lanes | 4.98 (5.16) | 6.15 (6.51) | 9.77 (11.79) | 9.82 (11.62) | 4.97 (5.03) | 8.39 (9.91) | 9.52 (10.75) | 0.81x | 0.86x | 0.97x |
-| words | prev+reduce | 5.26 (5.41) | 5.72 (6.29) | 8.53 (10.37) | 9.60 (10.02) | 6.50 (7.07) | 10.22 (11.20) | 10.78 (12.13) | 1.14x | 1.20x | 1.12x |
-| sum | reduce | 5.34 (5.52) | 6.69 (7.18) | 9.18 (12.75) | 10.44 (11.27) | 6.70 (7.76) | 10.43 (11.54) | 11.35 (12.95) | 1.00x | 1.14x | 1.09x |
-| pairs | prev+reduce | 5.09 (5.31) | 6.40 (6.56) | 8.33 (9.65) | 9.98 (11.16) | 6.74 (6.91) | 9.24 (10.19) | 10.46 (14.71) | 1.05x | 1.11x | 1.05x |
-| nonascii | reduce | 5.09 (5.43) | 6.47 (7.23) | 8.40 (10.23) | 9.85 (12.65) | 6.89 (7.42) | 11.05 (11.55) | 12.64 (15.02) | 1.06x | 1.31x | 1.28x |
-| upper | map | 5.81 (6.16) | 5.72 (5.86) | 10.31 (10.75) | 8.48 (10.92) | 5.28 (5.50) | 8.50 (10.50) | 8.61 (10.47) | 0.91x | 0.82x | 1.02x |
-| rot13 | map | 4.27 (4.38) | 4.90 (5.11) | 7.03 (8.53) | 7.37 (9.01) | 4.83 (4.93) | 7.89 (9.19) | 8.28 (9.16) | 0.99x | 1.12x | 1.12x |
-| swapcase | table lookup | 2.27 (2.31) | 2.36 (2.38) | 4.89 (6.39) | 5.14 (6.01) | 5.50 (6.02) | 9.89 (12.53) | 8.81 (13.57) | **2.33x** | **2.02x** | **1.72x** |
-| maxline | scan+reduce | 0.94 (0.94) | 1.41 (1.41) | 3.54 (4.68) | 4.48 (8.00) | 2.70 (2.74) | 4.23 (5.29) | 3.92 (7.71) | 1.92x | 1.20x | 0.88x |
-| letters | filter | 1.34 (1.37) | 1.48 (1.49) | 4.61 (4.93) | 3.86 (4.80) | 5.76 (5.93) | 7.92 (13.49) | 8.77 (13.70) | **3.88x** | **1.72x** | **2.27x** |
-| sum4 | reduce | 7.46 (7.73) | 9.38 (9.55) | 10.91 (17.87) | 12.33 (13.01) | 9.48 (9.62) | 12.53 (16.04) | 12.88 (15.71) | 1.01x | 1.15x | 1.04x |
-| sumpos4 | map+reduce | 7.51 (7.63) | 9.32 (9.44) | 11.42 (15.49) | 11.39 (11.61) | 8.92 (9.09) | 12.07 (14.87) | 11.70 (14.38) | 0.96x | 1.06x | 1.03x |
-| maxgap4 | prev+reduce | 3.85 (3.86) | 9.74 (9.78) | 11.02 (11.35) | 11.74 (14.04) | 9.27 (9.46) | 14.51 (15.16) | 12.77 (20.85) | 0.95x | 1.32x | 1.09x |
-| scale4 | map | 6.30 (6.41) | 7.37 (7.58) | 10.63 (11.53) | 10.49 (16.24) | 6.94 (7.15) | 10.61 (15.02) | 10.20 (12.47) | 0.94x | 1.00x | 0.97x |
-| filter4 | filter | 3.61 (3.68) | 4.46 (4.49) | 6.59 (8.58) | 7.45 (8.59) | 7.38 (7.59) | 11.93 (13.84) | 11.68 (15.70) | **1.65x** | **1.81x** | **1.57x** |
-| prefix4 | scan | 4.62 (4.76) | 5.01 (5.06) | 7.59 (11.76) | 7.89 (12.45) | 6.47 (6.68) | 8.28 (11.93) | 7.07 (10.60) | 1.29x | 1.09x | 0.90x |
-| strip | automaton+filter | 0.88 (0.90) | 0.96 (1.05) | 0.92 (1.00) | 1.47 (1.52) | 3.09 (3.15) | 4.96 (7.17) | 5.87 (7.85) | **3.22x** | **5.40x** | **3.98x** |
-| csv | automaton+reduce | 0.84 (0.84) | 0.78 (0.79) | 2.68 (2.89) | 3.20 (3.96) | 3.34 (3.39) | 5.74 (7.41) | 5.61 (10.62) | **3.98x** | **2.14x** | **1.75x** |
-| idents | automaton+prev+reduce | 0.76 (0.79) | 0.78 (0.79) | 1.09 (1.11) | 1.69 (1.90) | 3.21 (3.27) | 3.24 (3.78) | 5.08 (9.66) | **4.11x** | **2.97x** | **3.01x** |
-| strings | automaton, prev of state | 0.79 (0.90) | 0.72 (0.80) | 0.79 (0.88) | 0.91 (1.13) | 2.78 (2.91) | 3.77 (5.92) | 4.68 (6.79) | **3.53x** | **4.78x** | **5.14x** |
+| program | shape | plain C | OpenMP C, 1 | 4 | 8 | hand C, 1 | 4 | 8 | Strand, 1 | 4 | 8 | Strand / ordinary C (1, 4, 8) | Strand / hand C (1, 4, 8) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| lines | reduce | 5.43 (5.52) | 6.93 (7.21) | 8.22 (10.92) | 9.11 (10.15) | - | - | - | 6.59 (6.92) | 10.82 (12.05) | 10.88 (13.78) | 0.95x / 1.32x / 1.19x | - |
+| lines32 | reduce, dword lanes | 5.63 (5.64) | 7.03 (7.31) | 8.30 (11.95) | 9.64 (11.02) | - | - | - | 5.07 (5.23) | 7.44 (8.21) | 8.85 (8.95) | 0.72x / 0.90x / 0.92x | - |
+| words | prev+reduce | 5.40 (5.46) | 6.30 (6.72) | 8.28 (11.19) | 9.30 (10.99) | - | - | - | 6.85 (7.14) | 9.79 (12.18) | 10.11 (11.00) | 1.09x / 1.18x / 1.09x | - |
+| sum | reduce | 5.49 (5.58) | 7.01 (7.21) | 8.55 (9.23) | 9.83 (11.08) | - | - | - | 7.40 (7.87) | 10.27 (11.26) | 11.35 (12.45) | 1.06x / 1.20x / 1.16x | - |
+| pairs | prev+reduce | 5.42 (5.63) | 6.49 (6.65) | 7.63 (8.59) | 9.93 (10.18) | - | - | - | 6.64 (7.27) | 8.50 (9.89) | 10.15 (13.78) | 1.02x / 1.11x / 1.02x | - |
+| nonascii | reduce | 5.37 (5.57) | 7.10 (7.32) | 8.28 (9.47) | 9.88 (11.67) | - | - | - | 7.54 (7.73) | 8.52 (10.92) | 10.44 (12.07) | 1.06x / 1.03x / 1.06x | - |
+| upper | map | 5.78 (6.18) | 5.61 (5.75) | 8.52 (10.32) | 8.79 (10.16) | - | - | - | 5.18 (5.57) | 7.93 (8.57) | 9.18 (9.40) | 0.90x / 0.93x / 1.04x | - |
+| rot13 | map | 4.54 (4.68) | 4.95 (5.00) | 7.16 (7.82) | 8.06 (9.62) | - | - | - | 4.76 (5.13) | 7.44 (8.45) | 6.57 (8.69) | 0.96x / 1.04x / 0.81x | - |
+| swapcase | map (was a table) | 4.45 (4.51) | 4.95 (5.38) | 6.94 (9.76) | 8.10 (9.10) | - | - | - | 4.98 (5.39) | 7.73 (7.92) | 9.12 (10.40) | 1.01x / 1.11x / 1.13x | - |
+| xlat | table lookup | 1.43 (1.44) | 2.36 (2.37) | 4.31 (5.20) | 5.41 (7.73) | 5.95 (6.60) | 9.91 (11.87) | 9.07 (10.54) | 5.51 (5.89) | 7.53 (8.04) | 8.87 (9.41) | **2.33x / 1.75x / 1.64x** | 0.93x / 0.76x / 0.89x |
+| maxline | scan+reduce | 0.94 (0.95) | 1.41 (1.41) | 3.96 (4.80) | 4.47 (6.08) | - | - | - | 2.72 (2.73) | 3.42 (5.17) | 4.46 (5.45) | 1.94x / 0.86x / 1.00x | - |
+| letters | filter | 1.37 (1.40) | 1.47 (1.50) | 3.89 (4.86) | 4.12 (4.97) | 6.04 (6.67) | 12.20 (12.97) | 9.72 (14.23) | 5.58 (6.06) | 9.76 (13.01) | 10.57 (14.64) | **3.78x / 2.51x / 2.57x** | 0.92x / 0.80x / 0.87x |
+| sum4 | reduce | 7.48 (7.59) | 8.58 (8.94) | 11.25 (11.96) | 11.53 (12.86) | - | - | - | 8.45 (8.89) | 12.20 (14.43) | 13.89 (20.01) | 0.98x / 1.08x / 1.20x | - |
+| sumpos4 | map+reduce | 7.38 (7.52) | 8.70 (8.85) | 10.85 (14.51) | 11.51 (11.88) | - | - | - | 8.38 (8.65) | 11.23 (13.84) | 12.36 (13.61) | 0.96x / 1.04x / 1.07x | - |
+| maxgap4 | prev+reduce | 3.75 (3.80) | 9.04 (9.15) | 10.66 (12.10) | 11.16 (16.07) | - | - | - | 8.74 (8.92) | 13.97 (14.23) | 11.58 (14.58) | 0.97x / 1.31x / 1.04x | - |
+| scale4 | map | 6.38 (6.47) | 7.26 (7.37) | 9.16 (16.29) | 9.50 (10.72) | - | - | - | 7.04 (7.15) | 9.61 (12.01) | 10.89 (11.37) | 0.97x / 1.05x / 1.15x | - |
+| filter4 | filter | 3.56 (3.67) | 4.25 (4.40) | 7.26 (8.37) | 6.83 (8.54) | 7.57 (7.92) | 9.61 (14.32) | 10.47 (11.20) | 7.05 (7.26) | 11.22 (15.06) | 10.18 (17.65) | **1.66x / 1.54x / 1.40x** | 0.93x / 1.17x / 0.97x |
+| prefix4 | scan | 4.67 (4.79) | 4.73 (4.83) | 7.17 (8.98) | 8.16 (9.35) | - | - | - | 6.12 (6.42) | 8.02 (8.37) | 8.41 (13.99) | 1.29x / 1.12x / 1.03x | - |
+| strip | automaton+filter | 0.90 (0.90) | 1.04 (1.05) | 0.90 (0.99) | 1.44 (1.73) | 3.97 (4.01) | 5.33 (8.45) | 6.57 (9.85) | 3.16 (3.23) | 4.52 (7.38) | 6.16 (7.74) | **3.04x / 4.35x / 4.27x** | 0.80x / 0.85x / 0.94x |
+| csv | automaton+reduce | 0.85 (0.85) | 0.79 (0.80) | 2.45 (2.87) | 3.35 (3.72) | 8.23 (8.31) | 14.12 (18.27) | 10.74 (12.53) | 3.44 (3.47) | 5.43 (7.51) | 7.48 (8.44) | **4.05x / 2.22x / 2.23x** | 0.42x / 0.38x / 0.53x |
+| idents | automaton+prev+reduce | 0.77 (0.79) | 0.79 (0.80) | 1.10 (1.11) | 1.24 (1.70) | 3.87 (3.91) | 8.04 (8.57) | 7.16 (13.00) | 3.24 (3.26) | 3.94 (5.52) | 4.50 (5.11) | **4.11x / 3.58x / 3.62x** | 0.84x / 0.49x / 0.56x |
+| strings | automaton, prev of state | 0.88 (0.99) | 0.80 (0.81) | 0.93 (0.95) | 1.26 (1.46) | 3.95 (3.99) | 5.49 (8.62) | 6.77 (10.24) | 3.02 (3.04) | 5.17 (6.02) | 4.69 (9.97) | **3.44x / 5.56x / 3.72x** | 0.76x / 0.94x / 0.69x |
+| json | automaton+table+filter | 0.55 (0.55) | 0.55 (0.56) | 0.93 (1.01) | 1.44 (1.80) | 4.81 (4.89) | 5.68 (9.37) | 10.36 (12.77) | 3.08 (3.12) | 6.77 (6.95) | 4.61 (5.99) | **5.58x / 7.29x / 3.19x** | 0.64x / 1.19x / 0.44x |
 
 How to read it, and how not to:
 
 - **Medians and bests differ a lot above one CPU.** This is an 8-vCPU VM; multi-thread
-  timings vary by 20-50% between rounds. Ratios at 4 and 8 CPUs are indicative, not precise.
-  The one-CPU columns are stable to a few percent.
-- **Everything converges on 10-13 GB/s.** Mapping, faulting and unmapping 256 MiB costs
-  roughly 20 ms here however it is done (`explore/iotest.c`), so no whole-process number
-  can be much above that. A lead in compute shrinks as both sides approach it, which is why
-  the ratios at 8 CPUs are smaller than at one for the programs where C scales. This is an
-  observation about these runs on this VM, not a proved lower bound.
-- **The four automaton programs and the C beside them**:
+  timings vary by 20-50% between rounds, and a ratio of two of them more. The one-CPU
+  columns are stable to a few percent. The second audit's rerun of the previous table moved
+  individual 4- and 8-CPU ratios in both directions, by as much as 44% (`strings` on 4 CPUs:
+  4.78x in my run, 6.87x in theirs).
+- **Everything fast converges on 9-14 GB/s**, so a lead in compute shrinks as both sides
+  approach whatever the rest of the process costs. I no longer attribute that to a
+  measured I/O floor: the probe that was supposed to measure it was broken twice (a data
+  race, then my fix let the compiler delete the reads).
+- **The timing boundary** is fork to exit: process start, mapping or reading, page faults,
+  computation, writes to /dev/null, exit. It is the right boundary for "run this over a
+  cached file"; it is not compute-only throughput and not storage throughput.
+- **Hand C is not an upper bound either.** It is one afternoon of intrinsics by the author
+  of the thing it is compared with. Its `csv` and `json` use a different algorithm from
+  Strand's on purpose, because that is what an expert would do.
+
+The automaton programs and what they recognise:
 
 ```
 # strip: delete '#' comments, except inside "..." strings (with \ escapes)
@@ -105,21 +143,26 @@ How to read it, and how not to:
 0 1 2 2  1 1 2 2  2 1 0 2  0 0 2 2  0 1 3 2 =dfa             # next state, by class and state
 bytes dup @cls /dfa 1 != outif                               # keep bytes whose state is not "comment"
 
-# idents: words of [A-Za-z0-9_] that begin in code
+# idents: words of [A-Za-z0-9_] that begin outside comments and strings
 bytes :c @cls /dfa 0 = c @isw dup prev 1 ^ & & $N
 # strings: entries into the string state
 bytes @cls /dfa :s 2 = s prev 0 = & $N
 # csv: separators outside quotes
 bytes @cls :c /q 0 = c 2 = & $N
+# json: the structural characters { } [ ] : , outside strings
+~256 :i 34 = i 92 = 2 * + >cls
+0 1 1 0  1 0 1 0  0 2 1 0 =dfa
+~256 :j 123 = j 125 = | j 91 = | j 93 = | j 58 = | j 44 = | >st
+bytes :c @cls /dfa 0 = c @st & c swap outif
 ```
 
-  The C versions are a `switch` in a loop (the fastest of five formulations I tried for
-  `idents`; a transition table is slower, 0.49 against 0.95 GB/s in memory). The OpenMP
-  versions run each range from all four states to learn its transition function, then run
-  it again from the right one. That is the same idea Strand uses, written out by hand, and
-  for `strip` and `strings` it does not pay until eight threads because the first pass is
-  four times the work. A C programmer with intrinsics and the technique below would match
-  Strand; `explore/fsm.c` is that program (6.1 GB/s in memory against 1.2 for the switch).
+**`strip`, `idents` and `strings` are a simplified grammar, not a lexer for any language.**
+The input is the Python standard library, used as a realistic distribution of bytes; the
+grammar knows `#`, `"` and `\` only. On `x = '# not a comment'` it deletes from the `#`;
+it counts `123` as a word. Both sides implement the same grammar, so the timings are fair
+and the outputs say nothing about Python. `csv` (quotes toggle) and `json` (strings with
+escapes) are exact for valid input in their formats, and `json` is checked against a real
+parser.
 
 ## How the automaton runs (`x /t`)
 
@@ -144,48 +187,101 @@ two levels of the scan are a chain *across* registers cut it to 36 and doubled t
 On Zen 4 a 512-bit operation costs two 256-bit ones (HARDWARE.md), so the count is what
 matters.
 
-**Across threads** the carry is a function, so ranges compose. The pool's dry pass gives
-each range's function, `IN[t] = OUT[t-1] o IN[t-1]`, and the real pass starts each thread
-in the right state; the existing verification (every thread's starting carries equal its
-predecessor's ending carries) covers it. Two refinements, both in the stub:
-
-- **The dry pass stops early.** It only needs the carry. Each carry-using token's prologue
-  clears a word and the automaton's writes its id there, so at run time the word names the
-  automaton iff it is the last carry on the line; in a dry pass that token jumps to the
-  loop end after updating its carry. `strip` went from 3.5 to 5.1 GB/s on four CPUs.
-- **Carries that depend on other carries.** `s prev` after an automaton (where does the
-  state change?) depends on states the dry pass cannot know, and used to fall back to one
-  thread. The dry pass now also reports carries one chunk before the end of each range;
-  from those the pool derives every thread's carries one chunk *before* its range; the real
-  pass begins with a warm-up chunk from them, which makes the `prev` carries exact. The
-  same fix made `prev` of a running sum parallel (44 ms on one CPU, 19 on eight).
+**Across threads** the carry is a function, so ranges compose: the pool's dry pass gives each
+range's function, `IN[t] = OUT[t-1] o IN[t-1]`, and the real pass starts each thread in the
+right state. The dry pass stops early when the automaton is the last carry on its line (it
+only needs the function), which took `strip` from 3.5 to 5.1 GB/s on four CPUs.
 
 The compiler's own source did not change for any of this: one sigil, two classes, one
 stencil, table entries. The fixed point moved and still holds.
 
+## Dependent carries: when a line does and does not run on all cores
+
+The second audit found `input 1 & scan dup prev dup prev + + out4` running on one thread
+while every test passed. Two things were behind it.
+
+**A check that was too strict.** A `prev` carry is the previous chunk; only its last
+element is ever read. Verification compared the whole vector, and after a warm-up chunk
+the other elements of a `prev` of a `prev` legitimately differ. It now compares the element
+that is used. Chains of `prev` are exact after one warm-up chunk.
+
+**Carries that depend on carries.** The dry pass measures each range's effect on a carry
+from a guessed starting state. If a running sum's input depends on another running sum,
+or an automaton reads another automaton's states, the guess for the first poisons the
+measurement of the second. The pool used to give up on the block. Now:
+
+- The real pass still ran its *upstream* carries exactly (their guesses did not depend on
+  anything). So its own start and end values give the downstream carries exactly: a sum's
+  true delta is `OUT - IN`; an automaton is started not from the function so far but from
+  the permutation `s -> s ^ e` (e = the state it is believed to enter in), which reaches the
+  same output states and can be peeled off the result, `M = OUT o (^e)`; a running max,
+  which cannot be peeled (`max(IN, M)` hides `M`), takes one extra pass from -inf.
+- The pool derives again and reruns. Each retry settles one more level of dependence.
+- It retries only while dry + real + retries stays below the number of threads; past that,
+  one thread is as fast, and the block finishes serially as before.
+
+So, on this machine's 8 CPUs: chains up to six carries deep run in parallel (a dependent
+maximum counts as two levels), at a cost of one more pass per level. On 4 CPUs, two levels.
+On 2 or 3, only lines whose carries are independent. `tests/pool.py` asserts the path, not just the
+output, for 20 programs at 2, 3, 4 and 8 CPUs, using the audit's own detector (a copy of
+the binary whose fallback entry exits with status 77). What remains true of the old
+"cliff": the number of passes, and so the speed, depends on a property of the line that is
+not visible in its source, and the verification is still the only judge of a split. I have
+not benchmarked dependent-carry lines; the test establishes the path, not a speedup.
+
+One consequence worth having: an automaton fed by another automaton's state is a cascade,
+and a cascade of two 4-state automata has up to 16 joint states. That is a way to larger
+automata without a new primitive. I have not yet expressed a real grammar that way.
+
+## Which phases of a compiler fit
+
+The question that started the project. By phase, with what is measured and what is not:
+
+| phase | shape | in Strand today | evidence |
+|---|---|---|---|
+| comments and strings (which bytes are code?) | automaton | yes, up to 4 states | `strip`, `strings`: 3-5x ordinary C, 0.7-0.9x hand C. Real languages need more states: C with strings, character literals and both comment forms is 9; Python with triple quotes more. **Out until automata are wider** (or as a cascade, untested). |
+| token boundaries and kinds | byte table + `prev` | yes | `idents`: 3.6-4.1x ordinary C |
+| a complete scanner for a real grammar | automaton + table + filter | yes for JSON, CSV | `json`: 3-7x ordinary C, exact against Python's parser; 0.4-0.6x the simdjson-style hand C on 1 and 8 CPUs |
+| token *positions* (an index per token) | filter of indices | **no**: automata live on byte lines, `idx` and `scan` on dword lines, and there is no bridge | not measured; this is the missing piece between "classify" and "emit a token stream" |
+| identifier and keyword interning | hash of a variable-length slice, then a join | in the self-hosted compiler only, as scans plus a scatter race on dword lanes | gather and scatter cost scalar-loop prices on this CPU (HARDWARE.md); not a win |
+| number literals | scan over affine maps `x -> 10x + d`, reset per token | no segmented scan | not built |
+| nesting depth of brackets | prefix sum of +1/-1 outside strings | the sum yes, on dword lanes; the automaton is on byte lines, so not in one line | not built |
+| matching brackets, building a tree | stack, or sort by depth | **no** | outside the model. Strand's own grammar is postfix so that it has no parser. |
+| name resolution, type checking | hash join; walks over a graph | **no**, beyond the compiler's own flat symbol table | outside the model |
+| dataflow optimisation | fixpoint over a graph | **no**. (Straight-line liveness is a backward scan of gen/kill functions, which is associative; the compiler does its own that way.) | outside the model |
+| instruction selection and encoding | table lookup, variable-length emit | yes: this is copy-and-patch, the compiler's back end | whole compiler: 1.3-1.5x *slower* than scalar C on one core |
+| layout and relocation | prefix sum, scatter | yes | same |
+
+What this adds up to:
+
+- **The first stage of a front end is in the sweet spot**: bytes in, classified bytes or a
+  filtered byte stream out. That is also where simdjson-style parsers put their SIMD.
+- **A whole compiler is not**, and the self-hosted one is the measurement. Its passes are
+  expressible, but each line is a pass over arrays of dwords, symbol resolution goes through
+  gather and scatter, and a scalar compiler does the same work in one cache-hot loop.
+- **Lexing is a small part of what an optimising compiler does**, so even where Strand's 3x
+  over ordinary C applies I would not expect it to change a build (an expectation, not a
+  measurement). It matters for tools that *only* scan: dependency and include scanners,
+  code search, comment and string extraction, syntax colouring, minifiers, linters' first
+  pass, and ingest of JSON, CSV and logs.
+- The three things that would move the boundary, in order: automata of 16 states (real
+  lexers); a byte-to-dword bridge so a line can emit token positions; a segmented scan
+  (number values, per-token hashes).
+
 ## What does not work
 
-- **The compiler itself** is not in the sweet spot (REPORT.md). The earlier "15% faster than
-  scalar C on 8 vCPUs for a 5 MB source" did not reproduce in the audit's two batches
-  (Strand 257-301 ms, C 234-260 ms) and is withdrawn.
-- **Maps, reductions and neighbour tests are ties**, not wins. The old `words`, `pairs` and
-  `maxgap4` leads were baseline artefacts.
-- **Strand's own cliff.** When one scan's input depends on another scan's values (a running
-  sum of a running sum, an automaton fed by an automaton), the dry pass is a guess. If the
-  guess is wrong, verification fails and that block finishes on one thread: still correct
-  and still vectorised, but at the one-CPU rate, and nothing in the source says so. (It
-  often does pass: an automaton fed by another ran 2.5x faster on eight CPUs than on one in
-  a spot check, because automata tend to forget their starting state.)
-- **Four states, sixteen classes, byte lines only.** UTF-8 validation (9 states), C
-  comments with strings and character literals (9) and anything with a counter do not fit.
-  Eight states would need 8-byte functions in qword lanes; not built.
-- **Scaling of automaton lines is modest**: 3 GB/s on one CPU, 5-8 on eight. The dry pass
-  costs about half a real pass, and the stack-machine stencils are less tightly fused than
-  hand-written code (`explore/fsm.c` reaches 6.1 GB/s on one core in memory; the Strand
-  program's compute rate is about 4.5-5).
+- **The compiler itself** is not in the sweet spot (above, and REPORT.md).
+- **Maps, reductions, neighbour tests and prefix sums are ties.** So is `swapcase`.
+- **Strand does not beat hand-written intrinsics**, and `csv` shows the cost of having one
+  general primitive: quote parity is a 2-state problem that carry-less multiply solves at
+  8 GB/s on one core; Strand runs its 4-state automaton at 3.4.
+- **Four states, sixteen classes, byte lines only.**
+- **Automaton lines scale modestly**: 3 GB/s on one CPU, 4.5-7.5 on eight, and worst when a
+  `prev` follows the automaton (`idents`: 3.2 to 4.5), because the dry pass cannot stop
+  early and every thread runs a warm-up chunk. The hand C for `idents` reaches 7-8.
+- **Deep chains of dependent carries** still fall back, by thread count (above).
 - **Outside the model entirely**: histograms and anything else needing scatter-add;
-  data-dependent control flow (nested structure, early exit); pointer chasing; joins
-  (expressible through gather/scatter, which cost scalar-loop prices on this CPU).
+  data-dependent control flow (nested structure, early exit); pointer chasing; joins.
 - **Several reductions in one line** (a real `wc`) are still two passes.
 
 ## Mistakes along the way (kept, because they are the method)
@@ -202,6 +298,15 @@ stencil, table entries. The fixed point moved and still holds.
 - **My first `idents` baseline was 2.6x slower than it needed to be** (range comparisons
   instead of a class table). Five formulations are in the commit history; the fastest is
   the baseline.
+- **`swapcase`, the same mistake again.** After the first audit I rewrote `words` and did
+  not ask the same question of the next table row. The fix this time is structural: a hand
+  C column, so the claim is a bracket instead of an argument about how strong the C is.
+- **I broke the I/O probe while fixing its data race**: the per-thread sums were never
+  read, so the compiler deleted the loads being timed. A measurement whose result is
+  unused is not a measurement; the probe now prints a checksum.
+- **The hand C for `json` was wrong on four CPUs** (a range that ends on a pending escape
+  was counted as flipping string state). The per-configuration output check stopped the
+  run at the last program; I fixed the C and timed that row separately.
 - **Earlier ones** (git history has the detail): filters first lost by 2x until `outif`
   streamed them; the first parallel `prev` stored its warm-up chunk; the main thread's
   stack was misaligned inside the pool; a fully masked store to unmapped memory took a
@@ -209,12 +314,11 @@ stencil, table entries. The fixed point moved and still holds.
 
 ## Where this points
 
-The model's edge is carried state that is associative but that a compiler cannot see as
-such. Automata are one instance. Others with the same structure, not built:
-
-- **8- and 16-state automata** (UTF-8 validation, fuller lexers), with wider functions.
-- **Segmented scans** (a sum that resets at each newline) are a scan over "add or reset"
-  functions; per-line and per-field aggregates would follow.
-- **Number parsing** is a scan over affine maps (x -> 10x + d).
-- **An automaton on dword lanes**, so that the compiler's own lexer (comments, strings,
-  token boundaries) becomes one line instead of the prefix-count construction in DESIGN.md.
+- **Parity as a primitive.** A 2-state toggle is a prefix xor, one carry-less multiply per
+  64 bytes. `csv` and most of `json` would run near the hand C's speed.
+- **16-state automata** (real lexers, UTF-8 validation): 16-byte functions in 128-bit
+  lanes. Or cascades of the 4-state ones, which now run in parallel; try a real grammar.
+- **A byte-to-dword bridge**, so a line can turn "this byte starts a token" into a list of
+  positions.
+- **Segmented scans** (a sum that resets at each newline or token) and **number parsing**
+  (a scan over affine maps).

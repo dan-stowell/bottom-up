@@ -14,12 +14,13 @@ s islow 32 * - out                # subtract 32 where the mask is set; write std
 Every line is one fused SIMD loop over `i32` lanes (or 64 byte lanes). Lines are postfix;
 the stack depth of a value is the zmm register it lives in. The only state a line can
 carry is associative — previous element, running sum, running max, a 4-state automaton —
-so every line vectorises and every line can be split across cores:
+so every line vectorises, and a line whose carries do not feed each other more than a few
+levels deep is split across cores (deeper chains run on one; DESIGN.md says exactly when):
 
 ```
 ~256 :i 35 = i 34 = 2 * + i 10 = 3 * + i 92 = 4 * + >cls   # byte -> class: other # " newline \
 0 1 2 2  1 1 2 2  2 1 0 2  0 0 2 2  0 1 3 2 =dfa           # next state: code, comment, string, escape
-bytes dup @cls /dfa 1 != outif                             # strip comments: 3 GB/s on one core, 3-5x a C switch loop
+bytes dup @cls /dfa 1 != outif                             # drop '#' comments outside "..." strings: 3 GB/s on one core
 ```
 
 | read this | for |
@@ -27,7 +28,7 @@ bytes dup @cls /dfa 1 != outif                             # strip comments: 3 G
 | [AUDIT.md](AUDIT.md) | current audit verdict, investigation backlog, and original correctness/benchmark review |
 | [AUDIT_FOLLOWUP.md](AUDIT_FOLLOWUP.md) | detailed review of the audit response and new automata, with fresh measurements and counterexamples |
 | [REPORT.md](REPORT.md) | what is new, what was measured, what failed, what next |
-| [SWEETSPOT.md](SWEETSPOT.md) | where this beats well-written C (filters, table lookups, small automata: 1.6-5x), where it only ties, and why |
+| [SWEETSPOT.md](SWEETSPOT.md) | where this beats ordinary C (filters, table lookups, small automata), where it only ties (everything GCC vectorises, and hand-written intrinsics), which compiler phases fit, and why |
 | [DESIGN.md](DESIGN.md) | the language and why each compiler phase disappears |
 | [HARDWARE.md](HARDWARE.md) | what this machine's SIMD really executes and costs |
 | [SCALAR_LEDGER.md](SCALAR_LEDGER.md) | every place the "all SIMD" claim is not true, with numbers |
