@@ -13,35 +13,70 @@ B = os.path.join(ROOT, 'build')
 os.makedirs(B, exist_ok=True)
 DISP = '0x11223344'
 
-LOOPEND = """
-  add rax,16
-  cmp rax,r12
-  jae 1f
-  jmp r11
-1:"""
-def failif(cc_ok):   # continue if cc_ok, else call the fail handler
-    return f"""
-  j{cc_ok} 2f
-  call r14
-2:"""
-HEAD = """
-  mov rdi,r13
-  mov r8,r13
+# Allocation. Blocks are [64-byte header | data]; header[-8] = address of the free-list head the block
+# belongs to. Capacity is a power of two > 4n+127 bytes. SETUP only *peeks*: the sink commits (COMMIT),
+# so lines that store nothing allocate nothing. r10 = list head, rbp = capacity, r9 = next link.
+FLOFF = 640
+# SETUP runs once per line, after r12 = n: allocate, clear carries, zmm27 = n, zmm26 = lane indices.
+SETUP = f"""
+  lea rcx,[r12*4+127]
+  bsr rcx,rcx
+  mov ebp,2
+  shlx rbp,rbp,rcx
+  lea r10,[rbx+rcx*8-{FLOFF}]
+  mov rdi,[r10]
+  test rdi,rdi
+  jnz 5f
+  lea rdi,[r13+64]
+  jmp 6f
+5:
+  mov r9,[rdi]
+6:
+  mov r8,rdi
   xor eax,eax
 """ + ''.join(f"  vpxord zmm{r},zmm{r},zmm{r}\n" for r in range(16, 24)) + """
   vpslld zmm29,zmm31,31
 """ + ''.join(f"  vmovdqa32 zmm{r},zmm29\n" for r in range(8, 16)) + """
   vpxord zmm28,zmm28,zmm28
-  lea r11,[rip+0]
-  mov rcx,r12
-  sub rcx,rax
-  mov esi,16
-  cmp rcx,rsi
-  cmova rcx,rsi
-  mov esi,-1
-  bzhi esi,esi,ecx
-  kmovw k7,esi
+  vpbroadcastd zmm27,r12d
+  vmovdqa32 zmm26,zmm30
 """
+# LOOPHEAD opens every line's loop: the active-lane mask is one vector compare (index < n), no GPR work.
+LOOPHEAD = """
+  lea r11,[rip+0]
+  vpcmpud k7,zmm26,zmm27,1
+"""
+LOOPEND = """
+  vpaddd zmm26,zmm26,dword ptr [rbx-44]{1to16}
+  add rax,16
+  cmp rax,r12
+  jae 1f
+  jmp r11
+1:"""
+COMMIT = """
+  lea rcx,[r13+64]
+  cmp rdi,rcx
+  jne 5f
+  mov [rdi-8],r10
+  lea r13,[rdi+rbp]
+  jmp 6f
+5:
+  mov [r10],r9
+6:"""
+RELEASE = """
+  mov rsi,[rcx]
+  cmp rsi,[rbx-40]
+  jb 4f
+  mov rdx,[rsi-8]
+  mov r9,[rdx]
+  mov [rsi],r9
+  mov [rdx],rsi
+4:"""
+def failif(cc_ok):   # continue if cc_ok, else call the fail handler
+    return f"""
+  j{cc_ok} 2f
+  call r14
+2:"""
 def hred(acc, op):   # horizontal reduce zmm{acc} -> eax
     return f"""
   vextracti64x4 ymm24,zmm{acc},1
@@ -59,8 +94,13 @@ def bounds(r):       # k1 = active lanes of zmm{r} that are < len at [rcx+8]; fa
   kxorw k2,k1,k7
   kortestw k2,k2""" + failif('z')
 
-S = {}   # (cls, d0) -> asm text ; a line containing 'P:' marks "disp32 ends here"
-def st(cls, d, text): S[(cls, d)] = text
+S = {}     # (cls, d0) -> body stencil (runs every loop iteration, or after the loop for sink tails)
+PRE = {}   # (cls, d0) -> prologue stencil (runs once, before the line's loop)
+# Operand placeholders: DISP = slot/pool displacement, DISP8 = the same + 8 (a vector's length field).
+DISP8 = '0x1122334c'
+def st(cls, d, text, pre=None):
+    S[(cls, d)] = text
+    if pre is not None: PRE[(cls, d)] = pre
 
 BIN = {'+': 'vpaddd', '-': 'vpsubd', '*': 'vpmulld', '&': 'vpandd', '|': 'vpord', '^': 'vpxord',
        'min': 'vpminsd', 'max': 'vpmaxsd', '<<': 'vpsllvd', '>>': 'vpsrlvd'}
@@ -86,54 +126,47 @@ for d in range(1, 9):
     st(KW['scanmax'], d, scan('vpmaxsd', '  vpslld zmm25,zmm31,31', 8 + r))
     st(KW['prev'], d, f"  valignd zmm24,zmm{r},zmm{16+r},15\n  vmovdqa32 zmm{16+r},zmm{r}\n  vmovdqa32 zmm{r},zmm24")
     if d <= 7: st(KW['dup'], d, f"  vmovdqa32 zmm{d},zmm{r}")
-    st(GATHER, d, f"  lea rcx,[rbx+{DISP}]\nP:" + bounds(r) + f"""
+    st(GATHER, d, f"  lea rcx,[rbx+{DISP}]" + bounds(r) + f"""
   mov rsi,[rcx]
   vpxord zmm24,zmm24,zmm24
   vpgatherdd zmm24{{k1}},[rsi+zmm{r}*4]
   vmovdqa32 zmm{r},zmm24""")
     if d <= 7:
-        st(VEC, d, f"  lea rcx,[rbx+{DISP}]\nP:\n  cmp r12,[rcx+8]" + failif('e') + f"""
-  mov rsi,[rcx]
-  vmovdqu32 zmm{d}{{k7}}{{z}},[rsi+rax*4]""")
-        st(SCAL, d, f"  vpbroadcastd zmm{d},dword ptr [rbx+{DISP}]\nP:")
-        st(LEN, d, f"  lea rcx,[rbx+{DISP}]\nP:\n  vpbroadcastd zmm{d},dword ptr [rcx+8]")
+        st(VEC, d, f"  mov rsi,[rbx+{DISP}]\n  vmovdqu32 zmm{d}{{k7}}{{z}},[rsi+rax*4]",
+           pre=f"  cmp r12,[rbx+{DISP8}]" + failif('e'))       # length check hoisted out of the loop
+        st(SCAL, d, f"  vpbroadcastd zmm{d},dword ptr [rbx+{DISP}]")
+        st(LEN, d, f"  vpbroadcastd zmm{d},dword ptr [rbx+{DISP8}]")
 
-st(VECLEAD, 0, f"  lea rdx,[rbx+{DISP}]\nP:\n  mov r12,[rdx+8]\n" + HEAD + "  mov rsi,[rdx]\n  vmovdqu32 zmm0{k7}{z},[rsi+rax*4]")
-st(SCALLEAD, 0, "  mov r12d,1\n" + HEAD + f"  vpbroadcastd zmm0,dword ptr [rbx+{DISP}]\nP:")
-st(LENLEAD, 0, "  mov r12d,1\n" + HEAD + f"  lea rcx,[rbx+{DISP}]\nP:\n  vpbroadcastd zmm0,dword ptr [rcx+8]")
-st(IOTA, 0, f"  mov r12d,dword ptr [rbx+{DISP}]\nP:\n  test r12d,r12d" + failif('ns') + HEAD + "  vpbroadcastd zmm0,eax\n  vpaddd zmm0,zmm0,zmm30")
-st(KW['input'], 0, "  mov r12,[rbx-8]\n" + HEAD + "  mov rsi,[rbx-16]\n  vpmovzxbd zmm0{k7}{z},xmmword ptr [rsi+rax]")
-st(STOREV, 1, "  vmovdqu32 [rdi+rax*4]{k7},zmm0" + LOOPEND + f"""
-  lea rcx,[rbx+{DISP}]
-P:
+st(VECLEAD, 0, LOOPHEAD + f"  mov rsi,[rbx+{DISP}]\n  vmovdqu32 zmm0{{k7}}{{z}},[rsi+rax*4]", pre=f"  mov r12,[rbx+{DISP8}]\n" + SETUP)
+st(SCALLEAD, 0, LOOPHEAD + f"  vpbroadcastd zmm0,dword ptr [rbx+{DISP}]", pre="  mov r12d,1\n" + SETUP)
+st(LENLEAD, 0, LOOPHEAD + f"  vpbroadcastd zmm0,dword ptr [rbx+{DISP8}]", pre="  mov r12d,1\n" + SETUP)
+st(IOTA, 0, LOOPHEAD + "  vmovdqa32 zmm0,zmm26", pre=f"  mov r12d,dword ptr [rbx+{DISP}]\n  test r12d,r12d" + failif('ns') + SETUP)
+st(KW['input'], 0, LOOPHEAD + "  mov rsi,[rbx-16]\n  vpmovzxbd zmm0{k7}{z},xmmword ptr [rsi+rax]", pre="  mov r12,[rbx-8]\n" + SETUP)
+st(STOREV, 1, "  vmovdqu32 [rdi+rax*4]{k7},zmm0" + LOOPEND + COMMIT + f"""
+  lea rcx,[rbx+{DISP}]""" + RELEASE + """
   mov [rcx],rdi
-  mov [rcx+8],r12
-  lea r13,[rdi+r12*4+127]
-  and r13,-64""")
-st(STORES, 1, LOOPEND + "\n  cmp r12,1" + failif('e') + f"\n  vmovd dword ptr [rbx+{DISP}],xmm0\nP:")
-st(SUM, 1, "  vpaddd zmm28{k7},zmm28,zmm0" + LOOPEND + hred(28, 'vpaddd') + f"\n  mov dword ptr [rbx+{DISP}],eax\nP:")
-st(MAX, 1, "  vpmaxsd zmm29{k7},zmm29,zmm0" + LOOPEND + hred(29, 'vpmaxsd') + f"\n  mov dword ptr [rbx+{DISP}],eax\nP:")
+  mov [rcx+8],r12""")
+st(STORES, 1, LOOPEND + "\n  cmp r12,1" + failif('e') + f"\n  vmovd dword ptr [rbx+{DISP}],xmm0")
+st(SUM, 1, "  vpaddd zmm28{k7},zmm28,zmm0" + LOOPEND + hred(28, 'vpaddd') + f"\n  mov dword ptr [rbx+{DISP}],eax")
+st(MAX, 1, "  vpmaxsd zmm29{k7},zmm29,zmm0" + LOOPEND + hred(29, 'vpmaxsd') + f"\n  mov dword ptr [rbx+{DISP}],eax")
 st(COMPRESS, 2, """  vptestmd k1{k7},zmm1,zmm1
   vpcompressd zmm24{k1}{z},zmm0
   vmovdqu32 [r8],zmm24
   kmovw ecx,k1
   popcnt ecx,ecx
-  lea r8,[r8+rcx*4]""" + LOOPEND + f"""
-  lea rcx,[rbx+{DISP}]
-P:
+  lea r8,[r8+rcx*4]""" + LOOPEND + COMMIT + f"""
+  lea rcx,[rbx+{DISP}]""" + RELEASE + """
   mov [rcx],rdi
   sub r8,rdi
   shr r8,2
-  mov [rcx+8],r8
-  lea r13,[rdi+r8*4+127]
-  and r13,-64""")
-st(SCATTER, 2, f"  lea rcx,[rbx+{DISP}]\nP:" + bounds(1) + """
+  mov [rcx+8],r8""")
+st(SCATTER, 2, f"  lea rcx,[rbx+{DISP}]" + bounds(1) + """
   mov rsi,[rcx]
   vpscatterdd [rsi+zmm1*4]{k1},zmm0""" + LOOPEND)
-st(KW['out'], 1, """  mov r9,[rbx-32]
+st(KW['out'], 1, """  mov rsi,[rbx-32]
   vpmovdb xmm24,zmm0
-  vmovdqu8 [r9+rax]{k7},xmm24""" + LOOPEND + "\n  add [rbx-32],r12")
-st(KW['out4'], 1, "  mov r9,[rbx-32]\n  vmovdqu32 [r9+rax*4]{k7},zmm0" + LOOPEND + "\n  lea r9,[r9+r12*4]\n  mov [rbx-32],r9")
+  vmovdqu8 [rsi+rax]{k7},xmm24""" + LOOPEND + "\n  add [rbx-32],r12")
+st(KW['out4'], 1, "  mov rsi,[rbx-32]\n  vmovdqu32 [rsi+rax*4]{k7},zmm0" + LOOPEND + "\n  lea rsi,[rsi+r12*4]\n  mov [rbx-32],rsi")
 st(KW['halt'], 1, LOOPEND + "\n  cmp r12,1" + failif('e') + """
   vmovd edi,xmm0
   test edi,edi
@@ -143,10 +176,12 @@ st(KW['halt'], 1, LOOPEND + "\n  cmp r12,1" + failif('e') + """
 3:""")
 
 asm = ".intel_syntax noprefix\n.text\n"
-for (cls, d), text in sorted(S.items()):
-    text = text.replace('P:', f'P_{cls}_{d}:')
-    asm += f"S_{cls}_{d}:\n{text}\nE_{cls}_{d}:\n"
-asm += "S_tail:\n  jmp r15\nE_tail:\n"
+for kind, D in (('S', S), ('Q', PRE)):
+    for (cls, d), text in sorted(D.items()):
+        asm += f"{kind}_{cls}_{d}:\n{text}\nE{kind}_{cls}_{d}:\n"
+asm += "S_tail:\n  jmp r15\nES_tail:\n"
+# release stencil: emitted after the line holding a vector's last occurrence
+asm += f"S_rel:\n  lea rcx,[rbx+{DISP}]" + RELEASE + "\n  mov qword ptr [rcx],0\n  mov qword ptr [rcx+8],0\nES_rel:\n"
 open(f'{B}/stencils.S', 'w').write(asm)
 
 def assemble(name):
@@ -159,20 +194,30 @@ def assemble(name):
     return open(f'{B}/{name}.bin', 'rb').read(), syms
 
 code, syms = assemble('stencils')
-sten, sstart, slen, ppos = [], [0] * (NCLS * ND), [0] * (NCLS * ND), [0] * (NCLS * ND)
-for (cls, d) in sorted(S):
-    a, e = syms[f'S_{cls}_{d}'], syms[f'E_{cls}_{d}']
-    tid = cls * ND + d
-    sstart[tid], slen[tid] = len(sten), e - a
-    blob = bytearray(code[a:e])
-    p = syms.get(f'P_{cls}_{d}')
-    if p is not None:
-        assert blob[p - a - 4:p - a] == bytes.fromhex('44332211'), (cls, d)
-        blob[p - a - 4:p - a] = b'\0\0\0\0'
-        ppos[tid] = p - a - 4 + 1          # stored +1 so that 0 means "no patch"
-    assert bytes.fromhex('44332211') not in blob
-    sten += blob
-tail = list(code[syms['S_tail']:syms['E_tail']])
+PH = {bytes.fromhex('44332211'): 0, bytes.fromhex('4c332211'): 8}
+def extract(blob):
+    """find the (at most one) operand placeholder; return (bytes with it zeroed, pos+1 or 0, addend)"""
+    blob = bytearray(blob); pos, add = 0, 0
+    for ph, addend in PH.items():
+        k = blob.find(ph)
+        if k >= 0:
+            assert pos == 0 and blob.find(ph, k + 1) < 0, 'one operand per stencil'
+            pos, add = k + 1, addend
+            blob[k:k + 4] = bytes(4)
+    return blob, pos, add
+NT_ = NCLS * ND
+sten = []
+tabs = {n: [0] * NT_ for n in ('sstart', 'slen', 'ppos', 'padd', 'qstart', 'qlen', 'qpos', 'qadd')}
+for kind, D, names in (('S', S, ('sstart', 'slen', 'ppos', 'padd')), ('Q', PRE, ('qstart', 'qlen', 'qpos', 'qadd'))):
+    for (cls, d) in sorted(D):
+        blob, pos, add = extract(code[syms[f'{kind}_{cls}_{d}']:syms[f'E{kind}_{cls}_{d}']])
+        tid = cls * ND + d
+        for n, v in zip(names, (len(sten), len(blob), pos, add)): tabs[n][tid] = v
+        sten += blob
+tail = list(code[syms['S_tail']:syms['ES_tail']])
+rel, relp, _ = extract(code[syms['S_rel']:syms['ES_rel']])
+rels, rell = len(sten), len(rel)
+sten += rel
 
 stub, ssyms = assemble('stub')
 assert ssyms['_start'] == 8 and len(stub) % 64 == 0
@@ -182,7 +227,7 @@ import struct
 struct.pack_into('<HHIQQQIHHHHHH', ehdr, 16, 2, 62, 1, VBASE + 112 + ssyms['_start'], 64, 0, 0, 64, 56, 1, 0, 0, 0)
 struct.pack_into('<IIQQQ', ehdr, 64, 1, 7, 0, VBASE, VBASE)
 
-T = dict(sten=sten, sstart=sstart, slen=slen, ppos=ppos, tail=tail, stub=list(stub), ehdr=list(ehdr),
+T = dict(rels=rels, rell=rell, relp=relp, sten=sten, tail=tail, **tabs, stub=list(stub), ehdr=list(ehdr),
          fail=ssyms['fail'])
 json.dump(T, open(f'{B}/stencils.json', 'w'))
 
@@ -200,7 +245,8 @@ def data(name, vals, per=24):
 with open(f'{ROOT}/src/tables.strand', 'w') as f:
     f.write("# GENERATED by tools/mkstencils.py -- do not edit. Stencil bytes come from GNU as.\n")
     f.write('"' + PRELUDE + '" 10 =prelude\n')
-    f.write(data('sten', sten)); f.write(data('sstart', sstart)); f.write(data('slen', slen)); f.write(data('ppos', ppos))
+    f.write(data('sten', sten))
+    for n in tabs: f.write(data(n, tabs[n]))
     f.write(data('tail', tail)); f.write(data('stub', stub)); f.write(data('ehdr', ehdr))
     f.write(data('delta', [x + 2 for x in DELTA]))      # biased by 2: literals are unsigned
     f.write(data('leadof', LEADOF)); f.write(data('clstab', CLSTAB))
@@ -208,8 +254,8 @@ with open(f'{ROOT}/src/tables.strand', 'w') as f:
     f.write(data('defines', DEFINES)); f.write(data('uses', USES)); f.write(data('readsvec', READSVEC)); f.write(data('carry', CARRY))
     f.write(data('hashw', hashw)); f.write(data('pow10', [10 ** i for i in range(MAXDIGITS)]))
     f.write(f"{len(stub)} >Stublen\n")
-    for nm, v in [('Kn', K), ('Ncode', NCODE), ('Cdata', DATA), ('Cstr', STR), ('Cnone', NONE), ('Cerr', ERR),
+    for nm, v in [('Rels', rels), ('Rell', rell), ('Relp', relp), ('Kn', K), ('Ncode', NCODE), ('Cdata', DATA), ('Cstr', STR), ('Cnone', NONE), ('Cerr', ERR),
                   ('Cscatter', SCATTER), ('Nd', ND), ('Vbase', VBASE), ('Tabm', TABM), ('Maxname', MAXNAME),
                   ('Maxdig', MAXDIGITS), ('Mult1', RACE_MULT[1]), ('Mult2', RACE_MULT[2])]:
         f.write(f"{v} >{nm}\n")
-print(f"stencils: {len(S)} blobs, {len(sten)} bytes; stub {len(stub)} bytes; tables.strand {os.path.getsize(f'{ROOT}/src/tables.strand')} bytes")
+print(f"stencils: {len(S)} bodies + {len(PRE)} prologues, {len(sten)} bytes; stub {len(stub)} bytes; tables.strand {os.path.getsize(f'{ROOT}/src/tables.strand')} bytes")

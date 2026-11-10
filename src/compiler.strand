@@ -212,21 +212,57 @@ pidx ln1 @lfp - di2 !simg
 ~1 Ds + 0 !simg
 
 # ---------------------------------------------------------------- code: gather stencil bytes, scatter operands
-t code ?et
-et @sl >el
-el scan el - >eo
-el $C
-et @tid >etid
-etid @sstart >es
-etid @ppos >ep
-et @disp >ed
-&et >E
+# liveness without analysis: the program is a straight line, so a vector is dead after the line holding
+# its last occurrence -- and the scatter race already made that occurrence the canonical one (rep = self).
+isname opc 1 = & slot 0 > & rep t = & t Kn >= & >dying
+# Each token owns up to three pieces of code, and a line is laid out as
+#   [every token's prologue] [every token's body] [releases of vectors that die here]
+# so loop-invariant work (length checks, allocation) is hoisted without any motion pass:
+# the three streams are sized, prefix-summed and interleaved by arithmetic on the sums.
+code tid @qlen * >psz
+code sl * >asz
+dying Rell * >bsz
+psz scan >sp
+asz scan >sa
+sp psz - >spx
+sa asz - >sax
+bsz scan bsz - >sbx
+~NL2 0 * >lft
+t fidx !lft
+~NL2 0 * >llt
+t lidx !llt
+ln1 @lft >tf
+ln1 @llt >tl
+tf @sax tf @sbx + spx + >offp
+tf @sbx tl @sp + sax + >offa
+tl @sp tl @sa + sbx + >offb
+tid @qadd disp + >pdq
+tid @padd disp + >pda
+# entry x = 4*token + piece (0 prologue, 1 body, 2 release)
+NT 4 * >NT4
+~NT4 2 >> >xt
+~NT4 3 & >xk
+xk 0 = xt @psz xk 1 = xt @asz xt @bsz xk 2 = * sel sel >xsz
+xk 0 = xt @offp xk 1 = xt @offa xt @offb sel sel >xo
+xk 0 = xt @tid @qstart xk 1 = xt @tid @sstart Rels sel sel >xs
+xk 0 = xt @tid @qpos xk 1 = xt @tid @ppos Relp sel sel >xp
+xk 0 = xt @pdq xk 1 = xt @pda xt @slot 16 * sel sel >xd
+xsz $C
+~NT4 xsz 0 > ?xe
+xe @xo >eo
+xe @xs >es
+xe @xp >ep
+xe @xd >ed
+&xe >E
 ~E >ei
+# every code byte finds its entry: scatter each entry's offset at its first byte, fill forward with a
+# running max (offsets are monotone even though entry numbers are not), then gather the stencil byte
 ~C 0 * >mark
-ei eo !mark
+eo dup !mark
+~C 0 * >dmark
+es eo - eo !dmark
 ~C >j
-mark scanmax >be
-be @es j be @eo - + @sten >cb
+mark scanmax @dmark j + @sten >cb
 ei ep 0 > ?pe
 pe @eo pe @ep + 1 - >pp
 pe @ed >pv

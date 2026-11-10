@@ -154,6 +154,12 @@ def analyze(src: bytes):
 
     for t in toks:
         t.disp = 16 * (nslots + 1) + 4 * t.poolidx if t.lit else 16 * t.slot
+    # liveness without analysis: a vector's storage is dead after the line holding its last occurrence
+    lastocc_tok = {}
+    for t in toks:
+        if t.isname: lastocc_tok[t.name] = t.idx
+    for t in toks:
+        t.dying = (t.isname and t.slot > 0 and t.opc == O_LOWER and t.idx >= K and lastocc_tok[t.name] == t.idx)
     return toks, lines, nslots, pool
 
 
@@ -171,13 +177,20 @@ def compile_(src: bytes, want_map=False):
             slotimg[4 * s.slot + 2] = s.poolidx - lt[0].poolidx
     code = bytearray()
     cmap = []
-    for t in toks:
-        if not t.code: continue
-        cmap.append((len(code), t.line, t.raw.decode('latin1')))
-        a, n, p = T['sstart'][t.tid], T['slen'][t.tid], T['ppos'][t.tid]
-        blob = bytearray(T['sten'][a:a + n])
-        if p: blob[p - 1:p + 3] = struct.pack('<I', t.disp)
-        code += blob
+    def emit(start, n, pos, value):
+        blob = bytearray(T['sten'][start:start + n])
+        if pos: blob[pos - 1:pos + 3] = struct.pack('<I', value)
+        return blob
+    for ln in sorted(lines):
+        # a line is laid out as: every token's prologue, every token's body, then releases
+        for t in lines[ln]:
+            if t.code: code += emit(T['qstart'][t.tid], T['qlen'][t.tid], T['qpos'][t.tid], t.disp + T['qadd'][t.tid])
+        for t in lines[ln]:
+            if not t.code: continue
+            cmap.append((len(code), t.line, t.raw.decode('latin1')))
+            code += emit(T['sstart'][t.tid], T['slen'][t.tid], T['ppos'][t.tid], t.disp + T['padd'][t.tid])
+        for t in lines[ln]:
+            if t.dying: code += emit(T['rels'], T['rell'], T['relp'], 16 * t.slot)
     code += bytes(T['tail'])
     fsize = 112 + len(T['stub']) + datasize + len(code)
     out = bytes(T['ehdr']) + struct.pack('<QQ', fsize, fsize) + bytes(T['stub'])

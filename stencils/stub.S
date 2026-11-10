@@ -2,6 +2,9 @@
 # This is the scalar glue the language cannot express: syscalls. See SCALAR_LEDGER.md.
 # Layout contract with the stencils (rbx = address of the first byte after this blob):
 #   [rbx-128..-64)  dwords 0..15 (iota constant)
+#   [rbx-640..-128) free-list heads, one per power-of-two size class
+#   [rbx-44] the constant 16 (lane-index increment)
+#   [rbx-40] heap base (addresses below it are static data and are never released)
 #   [rbx-32] output cursor   [rbx-24] output base   [rbx-16] input ptr   [rbx-8] input length
 #   [rbx]    size in bytes of the data image that follows; generated code starts right after it
 .intel_syntax noprefix
@@ -18,6 +21,7 @@ _start:
   xor r9d,r9d
   syscall
   mov r13,rax
+  mov [rbx-40],rax
   mov eax,9                         # mmap output buffer: 4 GiB
   xor edi,edi
   movabs rsi,0x100000000
@@ -97,6 +101,9 @@ msghex:
   .ascii "0000000000000000\n"
 msgend:
   .balign 64
+  .fill 512,1,0
   .long 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-  .fill 64,1,0
+  .fill 20,1,0
+  .long 16
+  .fill 40,1,0
 dataend:
