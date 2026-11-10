@@ -1,0 +1,4 @@
+# count bytes greater than 64; print the count as a decimal-ish byte and newline
+input 64 > $N
+~1 N + 48 + out
+~1 10 + out

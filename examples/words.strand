@@ -1,0 +1,8 @@
+# emit the first letter of every word
+input >s
+s 32 > >tc
+tc tc prev 1 ^ & >ts
+s ts ?firsts
+firsts out
+"!" 10 =bang
+bang out

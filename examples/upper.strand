@@ -1,0 +1,4 @@
+# uppercase ASCII letters, with masks instead of branches
+input >s
+s 97 >= s 122 <= & >islow
+s islow 32 * - out
