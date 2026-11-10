@@ -25,7 +25,12 @@ CASES = [
  (b'input >a\na :a end\n', E_TEE), (b'input :a end\ninput >a\n', E_TEE), (b'input :a :a end\n', E_TEE),
  (b'input >b\nb a + :a end\n', E_TEE), (b'input :a @a end\n', E_TEE), (b'input dup 1 & %k 5 end\n', E_DEPTH),
  (b'input 7 over 1 & %k end\nk out\n', 0), (b'input 7 over 1 & %k k + end\n', E_TEE), (b'input dup 1 & %k\n', E_STENCIL), (b'input idx + out\n', 0), (b'idx out\n', E_STENCIL), (b'input :a dup !a\n', E_TEE),
- (b'input end\n', 0), (b'input 1 :k + end\n', 0), (b'1 :k >A\nk out\n', 0),
+ (b'input end\n', 0),
+ # release-on-overwrite, self-reassignment, replacing static data, scatter into static data
+ (b'input >x\nx 1 + >x\nx 1 + >x\nx out\n', 0), (b'1 2 3 =d\nd 1 + >d\nd out4\n', 0), (b'1 2 3 =d\nd idx !d\nd out4\n', E_ALIAS),
+ (b'1 2 3 =d\n~3 9 + idx !d\nd out4\n', 0), (b'input >a\na >b\na >c\nb >a\nc >b\na b + out\n', 0),
+ # the two programs Codex found: a 32-bit hash collision under the old hash, and many distinct names
+ (b'1 >xfntrxrmgiq\n2 >xqhhsigtfyu\n', 0), (b''.join(b'1 >X%d\n' % i for i in range(3000)), 0), (b'input 1 :k + end\n', 0), (b'1 :k >A\nk out\n', 0),
  (b"input\xff\x80 out\n", E_UNDEF), (b"\xff out\n", E_TOKEN), (b'\x01\x02input out\n', 0),
 ]
 def main():
@@ -35,6 +40,11 @@ def main():
         except strand.CompileError as e: want = (e.code, b'')
         assert want[0] == code, ('reference disagrees with spec table', src, want[0], code)
         p = subprocess.run([comp], input=src, capture_output=True, timeout=20)
-        assert (p.returncode, p.stdout) == want, ('compiler disagrees with reference', src, p.returncode, want[0], p.stderr)
+        assert (p.returncode, p.stdout) == want, ('compiler disagrees with reference', src[:200], p.returncode, want[0], p.stderr)
+        if want[0] == 0 and len(src) < 500:      # the compiled program must also behave like the interpreter
+            open('/tmp/case_bin', 'wb').write(want[1]); os.chmod('/tmp/case_bin', 0o755)
+            for inp in (b'', b'a', b'Hello, world: 0123456789 abcdef', bytes(range(256)) * 3):
+                r = subprocess.run(['/tmp/case_bin'], input=inp, capture_output=True, timeout=20)
+                assert (r.returncode, r.stdout) == strand.interp(src, inp), ('binary disagrees with interpreter', src, len(inp))
     print('PASS', comp, len(CASES), 'cases')
 main()

@@ -16,11 +16,11 @@ import strand
 from spec import *
 
 BIN = ['+', '-', '*', '&', '|', '^', 'min', 'max', '<', '<=', '>', '>=', '=', '!=']
-LENS = [0, 1, 2, 3, 15, 16, 17, 31, 32, 33, 47, 48, 49, 63, 64, 65, 79, 80, 81, 127, 128, 129, 255, 256, 257, 1000]
+LENS = [0, 1, 2, 3, 15, 16, 17, 31, 32, 33, 47, 48, 49, 63, 64, 65, 79, 80, 81, 127, 128, 129, 255, 256, 257, 1000, 4095, 4096, 4097, 20001]
 
 class Gen:
     def __init__(self, rnd):
-        self.r = rnd; self.vecs = {}; self.scal = []; self.lines = []; self.nv = 0; self.ns = 0; self.cls = 0
+        self.r = rnd; self.vecs = {}; self.scal = []; self.lines = []; self.nv = 0; self.ns = 0; self.cls = 0; self.teenames = set()
     def newcls(self): self.cls += 1; return self.cls
     def lit(self):
         r = self.r
@@ -67,7 +67,7 @@ class Gen:
     def line(self):
         self.pending = []
         self._line()
-        for v, c in self.pending: self.vecs[v] = self.newcls() if c is None or c == -1 else c
+        for v, c in self.pending: self.vecs[v] = self.newcls() if c is None or c == -1 else c; self.teenames.add(v)
     def _line(self):
         r = self.r
         ch = r.random()
@@ -92,7 +92,10 @@ class Gen:
         toks += self.expr(lcls)
         k = r.random()
         if k < .45:
-            v = 'v%d' % self.nv; self.nv += 1; toks.append('>' + v); self.vecs[v] = lcls
+            olds = [v for v in self.vecs if v[0] in 'vdc' and v not in self.teenames]
+            if olds and r.random() < .35: v = r.choice(olds)          # overwrite an existing vector (maybe one this line reads)
+            else: v = 'v%d' % self.nv; self.nv += 1
+            toks.append('>' + v); self.vecs[v] = lcls
         elif k < .60:
             toks += [self.scalar(), r.choice(BIN)] + ["dup", "1", "&"]
             v = 'c%d' % self.nv; self.nv += 1; toks.append('?' + v); self.vecs[v] = self.newcls()
@@ -106,7 +109,7 @@ class Gen:
         else: toks.append(r.choice(['out', 'out', 'out4', 'end']))
         self.lines.append(' '.join(toks))
     def program(self):
-        for _ in range(self.r.randrange(1, 25)): self.line()
+        for _ in range(self.r.choice([self.r.randrange(1, 25)] * 9 + [self.r.randrange(60, 200)])): self.line()
         # make everything observable
         for v in list(self.vecs)[-6:]: self.lines.append(v + ' out4')
         for s in self.scal[-6:]: self.lines.append('~1 ' + s + ' + out4')
