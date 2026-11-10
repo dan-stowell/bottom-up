@@ -44,7 +44,8 @@ def main():
         if want[0] == 0 and len(src) < 500:      # the compiled program must also behave like the interpreter
             open('/tmp/case_bin', 'wb').write(want[1]); os.chmod('/tmp/case_bin', 0o755)
             for inp in (b'', b'a', b'Hello, world: 0123456789 abcdef', bytes(range(256)) * 3):
-                r = subprocess.run(['/tmp/case_bin'], input=inp, capture_output=True, timeout=20)
-                assert (r.returncode, r.stdout if r.returncode == 0 else b'') == strand.interp(src, inp), ('binary disagrees with interpreter', src, len(inp))
+                for mode in (['/tmp/case_bin'], ['/tmp/case_bin', 'eager']):
+                    r = subprocess.run(mode, input=inp, capture_output=True, timeout=20)
+                    assert (r.returncode, r.stdout if r.returncode == 0 else b'') == strand.interp(src, inp), ('binary disagrees with interpreter', src, len(inp), mode)
     print('PASS', comp, len(CASES), 'cases')
 main()

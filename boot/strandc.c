@@ -195,7 +195,7 @@ int main(void) {
   // ---- data image
   int datasize = SLOT * (nslots + 1) + 4 * np, W = SLOT / 4, stublen = sizeof T_stub;
   uint32_t vdata = VBASE + 112 + stublen;
-  uint32_t *simg = calloc(W * (nslots + 1), 4); simg[0] = datasize;
+  uint32_t *simg = calloc(W * (nslots + 1), 4); simg[0] = datasize; simg[2] = SLOT * (nslots + 1);
   for (int i = 0; i < nt; i++) {
     Tok *t = &tok[i];
     t->disp = t->lit ? SLOT * (nslots + 1) + 4 * t->pidx : SLOT * t->slot;

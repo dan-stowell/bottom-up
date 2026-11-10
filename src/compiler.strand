@@ -149,6 +149,7 @@ pidx first ln1 Neg sel !lfp
 ln1 @lfp :fp 4 * Vd + S1 Slot * + cls Cdata = :isd slot 16 * Neg8 sel !simg
 pidx fp - isd slot 16 * 2 + Neg8 sel !simg
 ~1 Ds + 0 !simg
+~1 S1 Slot * + 2 !simg
 
 # ---------------------------------------------------------------- code layout
 # Liveness without analysis: the program is a straight line, so a vector is dead after the line holding

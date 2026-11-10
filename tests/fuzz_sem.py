@@ -144,12 +144,16 @@ def main():
             inp = bytes(rnd.choice([rnd.randrange(256), rnd.randrange(4), 32, 65]) for _ in range(n))
             try: want = strand.interp(src, inp)
             except strand.TooBig: stats['toobig'] = stats.get('toobig', 0) + 1; continue
-            p = subprocess.run([exe], input=inp, capture_output=True, preexec_fn=unlimit, timeout=20)
-            got = (p.returncode, p.stdout if p.returncode == 0 else b'')   # output is streamed: unspecified on failure
+            # run twice: normally, and in "eager" mode, where every splittable line of 64+ elements
+            # is forked across all cores (exercises the thread pool on chunk-boundary inputs)
+            for mode in ([exe], [exe, 'eager']):
+                p = subprocess.run(mode, input=inp, capture_output=True, preexec_fn=unlimit, timeout=20)
+                got = (p.returncode, p.stdout if p.returncode == 0 else b'')   # output is streamed: unspecified on failure
+                if got != want: break
             stats['runs'] += 1
             if got != want:
                 open('/tmp/fuzz_fail.strand', 'wb').write(src); open('/tmp/fuzz_fail.in', 'wb').write(inp)
-                print('MISMATCH iter', it, 'len', n, 'want', want[0], len(want[1]), 'got', got[0], len(got[1]), p.stderr[:200])
+                print('MISMATCH iter', it, 'mode', mode[1:], 'len', n, 'want', want[0], len(want[1]), 'got', got[0], len(got[1]), p.stderr[:200])
                 print(src.decode()); sys.exit(1)
             stats['ok' if want[0] == 0 else 'fail99' if want[0] == 99 else 'halt'] += 1
     print('PASS', stats)

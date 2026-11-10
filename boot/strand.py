@@ -216,6 +216,7 @@ def compile_(src: bytes, want_map=False):
     vdata = VBASE + 112 + len(T['stub'])
     slotimg = [0] * (W * (nslots + 1))
     slotimg[0] = datasize
+    slotimg[2] = SLOT * (nslots + 1)      # bytes of chunk-local storage each thread needs
     for lt in lines.values():
         s = lt[-1]
         if s.cls == DATA:

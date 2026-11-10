@@ -20,8 +20,8 @@ def ALLOC(R):   # R = a block for r12 elements: pop the size class's free list, 
     return f"""
   lea rcx,[r12*4+127]
   bsr rcx,rcx
-  mov ebp,2
-  shlx rbp,rbp,rcx
+  mov edx,2
+  shlx rdx,rdx,rcx
   lea r10,[rbx+rcx*8-{FLOFF}]
   mov {R},[r10]
   test {R},{R}
@@ -31,7 +31,7 @@ def ALLOC(R):   # R = a block for r12 elements: pop the size class's free list, 
   jmp 6f
 5:
   lea {R},[r13+64]
-  lea r13,[{R}+rbp]
+  lea r13,[{R}+rdx]
   cmp r13,[rbx-64]
   jbe 7f
   call r14
@@ -40,23 +40,43 @@ def ALLOC(R):   # R = a block for r12 elements: pop the size class's free list, 
 6:"""
 # SETUP runs once per line, after r12 = n: zmm27 = n, zmm26 = lane indices. Carries and accumulators
 # are initialised by the prologue of the token that uses them.
+VETO = "  mov dword ptr [rbx-672],0"      # this token cannot be split across threads
 SETUP = """
+  mov dword ptr [rbx-672],1
+  mov dword ptr [rbx-704],0
   xor eax,eax
   vpbroadcastd zmm27,r12d
   vmovdqa32 zmm26,zmm30
 """
 # LOOPHEAD opens every line's loop: the active-lane mask is one vector compare (index < n), no GPR work.
+# k7 masks the lanes that exist; k6 = k7 & k5 masks the lanes whose results are *kept*. The pool
+# clears k5 for a warm-up chunk, which recomputes `prev` carries without storing anything.
+# The line votes at run time: the lead's prologue says "splittable", any token that is not
+# (running sums, compress cursors, scatters) vetoes in its own prologue. A big splittable line calls
+# the pool, which runs most of it on all cores and returns with rax = where the serial tail starts.
 LOOPHEAD = """
-  lea r11,[rip+0]
+  mov rbp,r12
+  lea r11,[rip+7f]
+  cmp dword ptr [rbx-672],0
+  je 7f
+  cmp r12,[rbx-696]
+  jb 7f
+  call [rbx-656]
+7:
   vpcmpud k7,zmm26,zmm27,1
+  kandw k6,k7,k5
 """
 LOOPEND = """
   vpaddd zmm26,zmm26,dword ptr [rbx-44]{1to16}
   add rax,16
-  cmp rax,r12
+  cmp rax,rbp
   jae 1f
   jmp r11
-1:"""
+1:
+  test r15,r15
+  jz 8f
+  jmp r15
+8:"""
 RELEASE = """
   mov rsi,[rcx]
   cmp rsi,[rbx-40]
@@ -92,6 +112,7 @@ S = {}     # (cls, d0) -> body stencil (runs every loop iteration, or after the 
 PRE = {}   # (cls, d0) -> prologue stencil (runs once, before the line's loop)
 # Operand placeholders: DISP = slot/pool displacement, DISP8 = the same + 8 (a vector's length field).
 DISP8 = '0x1122334c'
+DISPL = '0x11223384'                # the same + 64: offset of a chunk-local vector from rsp
 def st(cls, d, text, pre=None):
     S[(cls, d)] = text
     if pre is not None: PRE[(cls, d)] = pre
@@ -116,8 +137,8 @@ for d in range(1, 9):
         for sh in (15, 14, 12, 8):
             t += f"  valignd zmm24,zmm{r},zmm25,{sh}\n  {op} zmm{r},zmm{r},zmm24\n"
         return t + f"  {op} zmm{r},zmm{r},zmm{carry}\n  valignd zmm24,zmm{r},zmm{r},15\n  vpbroadcastd zmm{carry},xmm24"
-    st(KW['scan'], d, scan('vpaddd', '  vpxord zmm25,zmm25,zmm25', 16 + r), pre=f'  vpxord zmm{16+r},zmm{16+r},zmm{16+r}')
-    st(KW['scanmax'], d, scan('vpmaxsd', '  vpslld zmm25,zmm31,31', 8 + r), pre=f'  vpslld zmm{8+r},zmm31,31')
+    st(KW['scan'], d, scan('vpaddd', '  vpxord zmm25,zmm25,zmm25', 16 + r), pre=f'  vpxord zmm{16+r},zmm{16+r},zmm{16+r}\n' + VETO)
+    st(KW['scanmax'], d, scan('vpmaxsd', '  vpslld zmm25,zmm31,31', 8 + r), pre=f'  vpslld zmm{8+r},zmm31,31\n' + VETO)
     st(KW['prev'], d, f"  valignd zmm24,zmm{r},zmm{16+r},15\n  vmovdqa32 zmm{16+r},zmm{r}\n  vmovdqa32 zmm{r},zmm24",
        pre=f'  vpxord zmm{16+r},zmm{16+r},zmm{16+r}')
     if d <= 7: st(KW['dup'], d, f"  vmovdqa32 zmm{d},zmm{r}")
@@ -138,14 +159,14 @@ st(SCALLEAD, 0, LOOPHEAD + f"  vpbroadcastd zmm0,dword ptr [rbx+{DISP}]", pre=" 
 st(LENLEAD, 0, LOOPHEAD + f"  vpbroadcastd zmm0,dword ptr [rbx+{DISP8}]", pre="  mov r12d,1\n" + SETUP)
 st(IOTA, 0, LOOPHEAD + "  vmovdqa32 zmm0,zmm26", pre=f"  mov r12d,dword ptr [rbx+{DISP}]\n  test r12d,r12d" + failif('ns') + SETUP)
 st(KW['input'], 0, LOOPHEAD + "  mov rsi,[rbx-16]\n  vpmovzxbd zmm0{k7}{z},xmmword ptr [rsi+rax]", pre="  mov r12,[rbx-8]\n" + SETUP)
-st(STOREV, 1, pre=ALLOC('rdi'), text="  vmovdqu32 [rdi+rax*4]{k7},zmm0" + LOOPEND + f"""
+st(STOREV, 1, pre=ALLOC('rdi'), text="  vmovdqu32 [rdi+rax*4]{k6},zmm0" + LOOPEND + f"""
   lea rcx,[rbx+{DISP}]""" + RELEASE + """
   mov [rcx],rdi
   mov [rcx+8],r12""")
 st(STORES, 1, LOOPEND + "\n  cmp r12,1" + failif('e') + f"\n  vmovd dword ptr [rbx+{DISP}],xmm0")
-st(SUM, 1, "  vpaddd zmm28{k7},zmm28,zmm0" + LOOPEND + hred(28, 'vpaddd') + f"\n  mov dword ptr [rbx+{DISP}],eax", pre="  vpxord zmm28,zmm28,zmm28")
-st(MAX, 1, "  vpmaxsd zmm29{k7},zmm29,zmm0" + LOOPEND + hred(29, 'vpmaxsd') + f"\n  mov dword ptr [rbx+{DISP}],eax", pre="  vpslld zmm29,zmm31,31")
-st(COMPRESS, 2, pre=ALLOC('rdi') + "\n  mov r8,rdi", text="""  vptestmd k1{k7},zmm1,zmm1
+st(SUM, 1, "  vpaddd zmm28{k6},zmm28,zmm0" + LOOPEND + hred(28, 'vpaddd') + f"\n  mov dword ptr [rbx+{DISP}],eax", pre="  vpxord zmm28,zmm28,zmm28")
+st(MAX, 1, "  vpmaxsd zmm29{k6},zmm29,zmm0" + LOOPEND + hred(29, 'vpmaxsd') + f"\n  mov dword ptr [rbx+{DISP}],eax", pre="  vpslld zmm29,zmm31,31")
+st(COMPRESS, 2, pre=ALLOC('rdi') + "\n  mov r8,rdi\n" + VETO, text="""  vptestmd k1{k7},zmm1,zmm1
   vpcompressd zmm24{k1}{z},zmm0
   vmovdqu32 [r8],zmm24
   kmovw ecx,k1
@@ -157,7 +178,7 @@ st(COMPRESS, 2, pre=ALLOC('rdi') + "\n  mov r8,rdi", text="""  vptestmd k1{k7},z
   shr r8,2
   mov [rcx+8],r8""")
 # scatter: a negative index is a masked-off lane (no write); an index >= len is a failure
-st(SCATTER, 2, f"  lea rcx,[rbx+{DISP}]" + """
+st(SCATTER, 2, pre=VETO, text=f"  lea rcx,[rbx+{DISP}]" + """
   vpcmpud k1{k7},zmm1,dword ptr [rcx+8]{1to16},1
   vpmovd2m k2,zmm1
   korw k2,k2,k1
@@ -183,17 +204,17 @@ def outsink(store, step, per):
   imul rcx,rcx,{per}
   sub r8,rcx
   mov [rbx-32],r8""")
-st(KW['out'], 1, outsink("  vpmovdb xmm24,zmm0\n  vmovdqu8 [r8]{k7},xmm24", 16, 1), pre="  mov r8,[rbx-32]")
-st(KW['out4'], 1, outsink("  vmovdqu32 [r8]{k7},zmm0", 64, 4), pre="  mov r8,[rbx-32]")
+st(KW['out'], 1, outsink("  vpmovdb xmm24,zmm0\n  vmovdqu8 [r8]{k6},xmm24", 16, 1), pre="  mov r8,[rbx-32]\n  mov dword ptr [rbx-704],1")
+st(KW['out4'], 1, outsink("  vmovdqu32 [r8]{k6},zmm0", 64, 4), pre="  mov r8,[rbx-32]\n  mov dword ptr [rbx-704],4")
 st(KW['end'], 1, LOOPEND)
 # tee stores: keep the value on the stack and keep the loop going, so one line can define many vectors
 for d in range(1, 9):
-    st(TEE, d, f"  mov rsi,[rbx+{DISP}]\n  vmovdqu32 [rsi+rax*4]{{k7}},zmm{d-1}",
+    st(TEE, d, f"  mov rsi,[rbx+{DISP}]\n  vmovdqu32 [rsi+rax*4]{{k6}},zmm{d-1}",
        pre=ALLOC('rsi') + f"\n  lea rcx,[rbx+{DISP}]\n  mov [rcx],rsi\n  mov [rcx+8],r12")
 for d in range(1, 9):       # chunk-local vectors: the slot itself holds the current chunk
-    st(TEEL, d, f"  vmovdqu32 [rbx+{DISP}],zmm{d-1}")
+    st(TEEL, d, f"  vmovdqu32 [rsp+{DISPL}],zmm{d-1}")
     if d <= 7:
-        st(VECL, d, f"  vmovdqu32 zmm{d},[rbx+{DISP}]")
+        st(VECL, d, f"  vmovdqu32 zmm{d},[rsp+{DISPL}]")
         st(LENL, d, f"  vmovdqa32 zmm{d},zmm27")
 for d in range(3, 9):    # never at depth 2: a line must not end on a tee
     st(TEEC, d, f"""  lea rcx,[rbx+{DISP}]
@@ -204,7 +225,7 @@ for d in range(3, 9):    # never at depth 2: a line must not end on a tee
   vmovdqu32 [rsi+rdx*4],zmm24
   kmovw esi,k1
   popcnt esi,esi
-  add [rcx+8],rsi""", pre=ALLOC('rsi') + f"\n  lea rcx,[rbx+{DISP}]\n  mov [rcx],rsi\n  mov qword ptr [rcx+8],0")
+  add [rcx+8],rsi""", pre=ALLOC('rsi') + f"\n  lea rcx,[rbx+{DISP}]\n  mov [rcx],rsi\n  mov qword ptr [rcx+8],0\n" + VETO)
 st(KW['halt'], 1, LOOPEND + "\n  cmp r12,1" + failif('e') + """
   vmovd edi,xmm0
   test edi,edi
@@ -217,7 +238,7 @@ asm = ".intel_syntax noprefix\n.text\n"
 for kind, D in (('S', S), ('Q', PRE)):
     for (cls, d), text in sorted(D.items()):
         asm += f"{kind}_{cls}_{d}:\n{text}\nE{kind}_{cls}_{d}:\n"
-asm += "S_tail:\n  jmp r15\nES_tail:\n"
+asm += "S_tail:\n  jmp [rbx-688]\nES_tail:\n"
 # release stencil: emitted after the line holding a vector's last occurrence
 asm += f"S_rel:\n  lea rcx,[rbx+{DISP}]" + RELEASE + "\n  mov qword ptr [rcx],0\n  mov qword ptr [rcx+8],0\nES_rel:\n"
 open(f'{B}/stencils.S', 'w').write(asm)
@@ -232,7 +253,7 @@ def assemble(name):
     return open(f'{B}/{name}.bin', 'rb').read(), syms
 
 code, syms = assemble('stencils')
-PH = {bytes.fromhex('44332211'): 0, bytes.fromhex('4c332211'): 8}
+PH = {bytes.fromhex('44332211'): 0, bytes.fromhex('4c332211'): 8, bytes.fromhex('84332211'): 64}
 def extract(blob):
     """find the (at most one) operand placeholder; return (bytes with it zeroed, pos+1 or 0, addend)"""
     blob = bytearray(blob); pos, add = 0, 0
