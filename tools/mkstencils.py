@@ -208,4 +208,8 @@ with open(f'{ROOT}/src/tables.strand', 'w') as f:
     f.write(data('defines', DEFINES)); f.write(data('uses', USES)); f.write(data('readsvec', READSVEC)); f.write(data('carry', CARRY))
     f.write(data('hashw', hashw)); f.write(data('pow10', [10 ** i for i in range(MAXDIGITS)]))
     f.write(f"{len(stub)} >Stublen\n")
+    for nm, v in [('Kn', K), ('Ncode', NCODE), ('Cdata', DATA), ('Cstr', STR), ('Cnone', NONE), ('Cerr', ERR),
+                  ('Cscatter', SCATTER), ('Nd', ND), ('Vbase', VBASE), ('Tabm', TABM), ('Maxname', MAXNAME),
+                  ('Maxdig', MAXDIGITS), ('Mult1', RACE_MULT[1]), ('Mult2', RACE_MULT[2])]:
+        f.write(f"{v} >{nm}\n")
 print(f"stencils: {len(S)} blobs, {len(sten)} bytes; stub {len(stub)} bytes; tables.strand {os.path.getsize(f'{ROOT}/src/tables.strand')} bytes")

@@ -1,0 +1,248 @@
+# The Strand compiler, in Strand.
+#
+# No loops, no branches: every line below is one fused AVX-512 loop. The phases are
+#   text -> byte classes -> tokens -> names (scatter race) -> classes -> depth (= registers)
+#        -> stencil ids -> gather stencil bytes -> scatter operands -> ELF by concatenation.
+# The generated tables (src/tables.strand) are prepended to this file.
+# Reference semantics: boot/strand.py. Error numbers: boot/spec.py.
+
+# ---------------------------------------------------------------- text = prelude ++ source ++ "\n"
+input >src
+&prelude >P
+&src >N
+P N + 1 + >T
+~T 0 * 10 + >text
+~P >ip
+prelude ip !text
+~N P + >is
+src is !text
+~T >i
+
+# ---------------------------------------------------------------- byte classes
+text 10 = >nl
+text 35 = scan >hc
+hc nl * scanmax >hb
+hc hb > >cm
+text 34 = cm 1 ^ & >q
+q scan >qc
+qc nl * scanmax >qb
+qc qb - 1 & >par
+par q | text 32 > | cm 1 ^ & >tc
+tc tc prev 1 ^ & >ts
+tc prev tc 1 ^ & >te
+# E_QUOTE: odd quotes on a line; opening quote not starting a token; closing quote not ending one
+qc qb prev - 1 & nl * $Eq1
+q par & ts 1 ^ & $Eq2
+q par 1 ^ & prev tc & $Eq3
+Eq1 Eq2 + Eq3 + 0 > halt
+
+# ---------------------------------------------------------------- tokens
+i ts ?start
+i te ?end
+&start >NT
+NT 1 - >NTm
+~NT >t
+ts scan 1 - >bt
+start @text >c0
+start 1 + @text >c1
+end start - >len
+c0 127 min @opctab >o0
+c1 127 min @opctab >o1
+c0 127 min @sigtab >s0
+s0 0 > len 1 > & o1 0 > & o1 4 < & >sig
+s0 sig * >sgi
+sig o1 o0 sel >opc
+start sig + >ns
+len sig - >nlen
+opc 3 = >lit
+opc 4 = >str
+lit str | 1 ^ >isname
+nl scan >nlc
+nl $NL
+start @nlc 1 + >ln1
+ln1 dup prev != >first
+t 1 + NTm min @first t NTm = | >last
+# token properties seen from each byte
+bt @lit tc & >blit
+bt @ns >bns
+bt @end >bend
+i bns >= tc & >bop
+# E_LEX: literal operands are 1..9 digits.  E_NAMELEN: names are at most 64 bytes
+text 48 >= text 57 <= & 1 ^ blit & bop & $El1
+lit nlen Maxdig > & $El2
+El1 El2 + 0 > 2 * halt
+isname nlen Maxname > & $En
+En 0 > 3 * halt
+
+# ---------------------------------------------------------------- literal values and the constant pool
+bend 1 - i - 0 max 8 min @pow10 >pw
+text 48 - pw * blit * bop * >dv
+dv scan >dp
+end 1 - @dp ns @dp - ns @dv + lit * >val
+i 1 + bend = tc & blit & >u1
+par q 1 ^ & >u2
+u1 u2 | >isu
+bt @val u1 * text u2 * + >uv
+uv isu ?pool
+isu scan isu - >ucx
+start @ucx >pidx
+&pool >U
+
+# ---------------------------------------------------------------- names: hash, then scatter race
+# h = sum over name bytes of byte * weight[offset]: a segmented sum is a difference of two scan values
+i bns - 0 max 63 min @hashw text * bop * >hv
+hv scan >hp
+end 1 - @hp ns @hp - ns @hv + >h
+Tabm 1 + >Tabm1
+~Tabm1 0 * >tab
+t 0 * >rep
+# round 0: every name scatters its token index; the last writer owns the slot
+isname h 16 >> Tabm sel >key
+t key !tab
+key @tab >w
+w @h h = isname & >ok
+ok w rep sel >rep
+isname ok 1 ^ & >act
+# round 1: names that lost to a different name race again under another hash
+act h Mult1 * 16 >> Tabm sel >key
+t key !tab
+key @tab >w
+w @h h = act & >ok
+ok w rep sel >rep
+act ok 1 ^ & >act
+# round 2
+act h Mult2 * 16 >> Tabm sel >key
+t key !tab
+key @tab >w
+w @h h = act & >ok
+ok w rep sel >rep
+act ok 1 ^ & >act
+act $Er
+Er 0 > 4 * halt
+# exact check: every name byte equals the corresponding byte of its canonical occurrence
+bt @rep >brep
+brep @ns i bns - + 0 max T 1 - min @text text != bop * bt @isname * $Ec1
+rep @nlen nlen != isname * $Ec2
+Ec1 Ec2 + 0 > 5 * halt
+
+# ---------------------------------------------------------------- keywords = names whose race was won inside the prelude... or not:
+# prelude token k is keyword k; mark each one's canonical occurrence
+NT 1 + >NT1
+~NT1 0 * >kwof
+t Kn < rep NT sel >kidx
+t 1 + kidx !kwof
+rep @kwof isname * >kw
+# slots: running count of canonical variable occurrences
+rep t = isname & kw 0 = & >isrep
+isrep scan >sid
+rep @sid isname * kw 0 = * >slot
+isrep $S
+
+# ---------------------------------------------------------------- token classes
+sgi 5 * opc + @clstab >cls0
+kw 0 > >iskw
+iskw sgi 0 = & kw 1 - cls0 sel >cls1
+iskw sgi 0 > & Cerr cls1 sel >cls2
+first cls2 @leadof cls2 sel >cls3
+t Kn < Cnone cls3 sel >cls4
+cls4 Cerr = $Et
+Et 0 > 6 * halt
+# data lines: the class of a line's last token decides
+NL 1 + >NL1
+NL 2 + >NL2
+~NL2 0 * >lsk
+last ln1 NL1 sel >lidx
+cls4 lidx !lsk
+ln1 @lsk Cdata = last 1 ^ & >ditem
+sgi 0 = lit & cls4 Cstr = | 1 ^ ditem & >bad1
+cls4 Cdata = last 1 ^ & cls4 Cstr = | ditem 1 ^ & >bad2
+bad1 bad2 | $Ed
+Ed 0 > 7 * halt
+ditem Cnone cls4 sel >cls
+
+# ---------------------------------------------------------------- stack depth = register allocation, by one scan
+cls @delta 2 - >dlt
+dlt scan >da
+da dlt - >d0
+cls Ncode < >code
+d0 0 < d0 8 > | da 0 = last != | code & $Edp
+Edp 0 > 8 * halt
+cls Nd * d0 + code * >tid
+tid @slen >sl
+code sl 0 = & $Es
+Es 0 > 9 * halt
+# two carry-using ops at one depth on one line would share a carry register: detect by scatter race
+cls @carry code * >cg
+NL2 32 * >Ct
+Ct 1 + >Ct1
+~Ct1 0 * >ctab
+cg 0 > ln1 32 * cg 16 * + d0 + Ct sel >ck
+t ck !ctab
+ck @ctab t != cg 0 > & $Ecy
+Ecy 0 > 10 * halt
+# a line may not read the vector it scatters into
+~NL2 0 * >lss
+last cls Cscatter = & slot * lidx !lss
+ln1 @lss dup 0 > swap slot = & cls @readsvec & $Ea
+Ea 0 > 11 * halt
+# every used variable is defined somewhere
+S 1 + >S1
+S 2 + >S2
+~S2 0 * >def
+cls @defines slot S1 sel >didx
+t 0 * 1 + didx !def
+slot @def 0 = cls @uses & isname & $Eu
+Eu 0 > 12 * halt
+
+# ---------------------------------------------------------------- data image: slots, then pool
+lit S1 16 * pidx 4 * + slot 16 * sel >disp
+S1 16 * U 4 * + >Ds
+Vbase 112 + Stublen + >Vd
+S1 4 * >Si
+Si 1 + >Si1
+~Si1 0 * >simg
+~NL2 0 * >lfp
+first ln1 NL1 sel >fidx
+pidx fidx !lfp
+cls Cdata = >isd
+isd slot 4 * Si sel >di0
+ln1 @lfp 4 * Vd + S1 16 * + di0 !simg
+isd slot 4 * 2 + Si sel >di2
+pidx ln1 @lfp - di2 !simg
+~1 Ds + 0 !simg
+
+# ---------------------------------------------------------------- code: gather stencil bytes, scatter operands
+t code ?et
+et @sl >el
+el scan el - >eo
+el $C
+et @tid >etid
+etid @sstart >es
+etid @ppos >ep
+et @disp >ed
+&et >E
+~E >ei
+~C 0 * >mark
+ei eo !mark
+~C >j
+mark scanmax >be
+be @es j be @eo - + @sten >cb
+ei ep 0 > ?pe
+pe @eo pe @ep + 1 - >pp
+pe @ed >pv
+pv 255 & pp !cb
+pv 8 >> 255 & pp 1 + !cb
+pv 16 >> 255 & pp 2 + !cb
+pv 24 >> 255 & pp 3 + !cb
+
+# ---------------------------------------------------------------- ELF, by concatenation
+112 Stublen + Ds + C + &tail + >F
+~8 8 * >sh8
+ehdr out
+sh8 0 * F + sh8 >> 255 & out
+sh8 0 * F + sh8 >> 255 & out
+stub out
+~Si @simg out4
+pool out4
+cb out
+tail out
