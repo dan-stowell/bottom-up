@@ -156,3 +156,31 @@ still open.
 6. **An interpreter that shares nothing** with the reference compiler, and error messages
    with line numbers (the compiler currently exits with a number; `tools/lint.py` and
    `tools/where.py` do the locating in Python).
+
+## Addendum: user time vs kernel time (a correction)
+
+Above I say the gap to scalar C "is page faults, not instructions". Splitting user from
+kernel time (`tools/bench.c` now reports both) shows that is only half right. On the 2.9 MB
+input:
+
+| | user | kernel | faults |
+|---|---|---|---|
+| scalar C, whole compile | 75 ms | 57 ms | 30,682 |
+| Strand, whole compile | 122 ms | 80 ms | 48,857 |
+
+Page faults are the largest single cost for *both* compilers (about 40% of each), and
+Strand takes 1.6x as many. But Strand is also 1.6x slower in pure user time, so removing
+every fault would not close the gap. By phase, stopping the Strand compiler early:
+
+| Strand, cumulative | user | kernel |
+|---|---|---|
+| byte classes + token boundaries + line numbers | 12 ms | 27 ms |
+| + per-byte token joins: digit values, two hashes, pool index | 48 ms | 52 ms |
+| + name race, keywords, slots | 66 ms | 66 ms |
+| + classes, depth, layout, code bytes, ELF | 122 ms | 80 ms |
+
+For comparison the C compiler's lexing loop (tokens, interning, numbers) is 21 ms user.
+So the scan-shaped front end is where SIMD is ahead (4 ns/byte even with i32 lanes); the
+join-shaped work (bytes looking up their token through gathers; many narrow passes over
+token arrays) is where it falls behind. No input shape I tried reverses the total:
+comment-heavy, data-heavy, string-heavy and dense-code inputs are all 1.7-2.7x slower.
