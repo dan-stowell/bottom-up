@@ -117,6 +117,34 @@ start {text out4                                 # first four bytes of every wor
 
 `%x` keeps its line on one thread, like the dword `%` tee.
 
+### Building bytes: slices and dword stores
+
+What a code generator and a linker do is concatenate pieces and patch them. Four forms:
+
+```
+sten .stenb                                  # the low byte of every lane, as a byte vector
+~C 0 * .cb                                   # C zero bytes
+tid dup @qstart psz offp (stenb )cb ... end  # one slice per token: psz bytes from stenb[qstart..] to cb[offp..]
+value position }cb                           # a dword at a byte position
+'cb out                                      # a byte line over a byte vector
+```
+
+- `v .x` (sink) stores the low byte of each lane as the byte vector `x`; `'x` (lead) starts
+  a byte line over a byte vector, as `bytes` does over stdin.
+- `s n d (src )dst` copies `n` bytes from `src[s..]` to `dst[d..]`, one slice per lane, in
+  lane order. `(src` names the source for its line; `)dst` pops the three operands and the
+  line goes on, so one pass can place several slices per element. A slice that leaves
+  either vector is a runtime failure.
+- `v p }x` (sink) stores the dword `v` at byte offset `p` of `x`. A negative `p` is a
+  masked-off lane.
+
+`}x` is one `vpscatterdd`. `)dst` is not a vector operation: the destination of each slice
+is data, so the stencil walks the 16 lanes one at a time and moves each slice with masked
+64-byte loads and stores (SCALAR_LEDGER.md, item 26). The compiler's own code emission is
+now these two: one line copies every token's three stencil slices, three lines store the
+operands. Before, every code byte was a dword that gathered its stencil byte, and every
+operand was four byte scatters.
+
 ### Failure and output
 
 A runtime check that fails exits with status 99, `halt` with its own status. Output is

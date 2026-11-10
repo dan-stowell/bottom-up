@@ -42,6 +42,8 @@ def ALLOC(R):   # R = a block for r12 elements: pop the size class's free list, 
 # are initialised by the prologue of the token that uses them.
 VETO = "  mov dword ptr [rbx-672],0"      # this token cannot be split across threads
 SETUP = """
+  mov qword ptr [rbx-728],0
+  mov qword ptr [rbx-736],0
   mov dword ptr [rbx-672],1
   mov dword ptr [rbx-680],0
   mov dword ptr [rbx-704],0
@@ -153,6 +155,9 @@ for d in range(1, 9):
   vpxord zmm24,zmm24,zmm24
   vpgatherdd zmm24{{k1}},[rsi+zmm{r}*4]
   vmovdqa32 zmm{r},zmm24""")
+    # `(src`: the source of this line's slices. All of it happens in the prologue; SETUP clears the
+    # length at the start of every line, so a slice sink without a source can only copy nothing.
+    st(SLSRC, d, "  nop", pre=f"  lea rcx,[rbx+{DISP}]\n  mov rsi,[rcx]\n  mov [rbx-736],rsi\n  mov rsi,[rcx+8]\n  mov [rbx-728],rsi")
     # reading a byte vector from a dword line: `i [x` one byte, `i {x` four (bytes past the end are 0).
     # Blocks have at least 127 bytes of slack, so the gather itself never leaves the block.
     st(GATHERB, d, f"  lea rcx,[rbx+{DISP}]" + bounds(r) + f"""
@@ -251,6 +256,82 @@ def outifsink(narrow, store, adv):
 st(KW['outif'], 2, outifsink("  vpmovdb xmm24,zmm24\n", "vmovdqu8 [r8],xmm24", "add r8,rcx"), pre="  mov r8,[rbx-32]\n  mov dword ptr [rbx-704],1")
 st(KW['outif4'], 2, outifsink("", "vmovdqu32 [r8],zmm24", "lea r8,[r8+rcx*4]"), pre="  mov r8,[rbx-32]\n  mov dword ptr [rbx-704],4")
 st(KW['end'], 1, LOOPEND)
+# `v .x`: the low bytes of a dword line, as a byte vector
+st(STOREVN, 1, pre=ALLOC('rdi'), text="  vpmovdb xmm24,zmm0\n  vmovdqu8 [rdi+rax]{k6},xmm24" + LOOPEND + f"""
+  lea rcx,[rbx+{DISP}]""" + RELEASE + """
+  mov [rcx],rdi
+  mov [rcx+8],r12""")
+# `v p }x`: a dword at a byte offset. One vpscatterdd with scale 1; lanes are written in order.
+st(SCATTER4, 2, pre=VETO, text=f"  lea rcx,[rbx+{DISP}]" + """
+  mov edx,[rcx+8]
+  sub edx,3
+  mov esi,0
+  cmovs edx,esi
+  vpbroadcastd zmm24,edx
+  vpcmpud k1{k7},zmm1,zmm24,1
+  vpmovd2m k2,zmm1
+  korw k2,k2,k1
+  kandnw k2,k2,k7
+  kortestw k2,k2""" + failif('z') + """
+  mov rsi,[rcx]
+  vpscatterdd [rsi+zmm1*1]{k1},zmm0""" + LOOPEND)
+# `s n d )dst`: one slice per lane from the line's source to dst. The lanes are walked one at a time
+# (the output position of a slice is data), each as masked 64-byte moves: this is a loop over elements
+# with vector copies in it, not a vector operation, and SCALAR_LEDGER.md counts it as such.
+for d in range(4, 9):
+    a, b, c = d - 3, d - 2, d - 1
+    st(SLICES, d, f"""  push rax
+  push rbp
+  push r11
+  push r12
+  vmovdqu32 [rsp-192],zmm{a}
+  vmovdqu32 [rsp-128],zmm{b}
+  vmovdqu32 [rsp-64],zmm{c}
+  kmovw r10d,k7
+  lea rcx,[rbx+{DISP}]
+  mov rbp,[rcx]
+  cmp rbp,[rbx-736]""" + failif('ne') + """
+  xor edx,edx
+3:
+  bt r10d,edx
+  jnc 5f
+  mov esi,[rsp-192+rdx*4]
+  mov r9d,[rsp-128+rdx*4]
+  mov eax,[rsp-64+rdx*4]
+  lea rbp,[rsi+r9]
+  cmp rbp,[rbx-728]
+  ja 6f
+  lea rbp,[rax+r9]
+  cmp rbp,[rcx+8]
+  jbe 7f
+6:
+  call r14
+7:
+  test r9,r9
+  jz 5f
+  add rsi,[rbx-736]
+  add rax,[rcx]
+4:
+  mov r11d,64
+  cmp r9,r11
+  cmovb r11,r9
+  mov r12,-1
+  bzhi r12,r12,r11
+  kmovq k1,r12
+  vmovdqu8 zmm24{k1}{z},[rsi]
+  vmovdqu8 [rax]{k1},zmm24
+  add rsi,r11
+  add rax,r11
+  sub r9,r11
+  jnz 4b
+5:
+  inc edx
+  cmp edx,16
+  jb 3b
+  pop r12
+  pop r11
+  pop rbp
+  pop rax""", pre=VETO)
 # tee stores: keep the value on the stack and keep the loop going, so one line can define many vectors
 for d in range(1, 9):
     st(TEE, d, f"  mov rsi,[rbx+{DISP}]\n  vmovdqu32 [rsi+rax*4]{{k6}},zmm{d-1}",
@@ -287,6 +368,8 @@ st(KW['halt'], 1, LOOPEND + "\n  cmp r12,1" + failif('e') + """
 # zmm26 (lane indices, unused here) serves as a third temporary.
 BKW = lambda k: BK + KW[k]
 SETUPB = """
+  mov qword ptr [rbx-728],0
+  mov qword ptr [rbx-736],0
   mov dword ptr [rbx-672],1
   mov dword ptr [rbx-680],0
   mov dword ptr [rbx-704],0
@@ -502,6 +585,8 @@ st(BKW('outif'), 2, FLUSHCHK + """  vptestmb k1{k6},zmm1,zmm1
   popcnt rcx,rcx
   add r8,rcx""" + LOOPENDB + "\n  mov [rbx-32],r8", pre="  mov r8,[rbx-32]\n  mov dword ptr [rbx-704],1")
 st(BKW('end'), 1, LOOPENDB)
+# a byte line over a byte vector
+st(BYTESV, 0, LOOPHEADB + f"  mov rsi,[rbx+{DISP}]\n  vmovdqu8 zmm0{{k7}}{{z}},[rsi+rax]", pre=f"  mov r12,[rbx+{DISP8}]\n" + SETUPB)
 # ---- the bridge to dword lines (spec.py). `>x` on a byte line keeps the bytes as a vector.
 st(STOREVB, 1, pre=ALLOC('rdi'), text="  vmovdqu8 [rdi+rax]{k6},zmm0" + LOOPENDB + f"""
   lea rcx,[rbx+{DISP}]""" + RELEASE + """
@@ -623,10 +708,10 @@ with open(f'{ROOT}/src/tables.strand', 'w') as f:
     f.write(data('sten', sten))
     for n in tabs: f.write(data(n, tabs[n]))
     f.write(data('tail', tail)); f.write(data('stub', stub)); f.write(data('ehdr', ehdr))
-    f.write(data('delta', [x + 2 for x in DELTA]))      # biased by 2: literals are unsigned
+    f.write(data('delta', [x + 4 for x in DELTA]))      # biased by 4: literals are unsigned
     f.write(data('leadof', LEADOF)); f.write(data('localof', LOCALOF)); f.write(data('byteof', BYTEOF)); f.write(data('istee', ISTEE)); f.write(data('reread', REREAD)); f.write(data('clstab', CLSTAB))
     f.write(data('opctab', [opclass(c) for c in range(128)])); f.write(data('sigtab', [sigil(c) for c in range(128)]))
-    f.write(data('isteec', ISTEEC)); f.write(data('vtype', VTYPE)); f.write(data('defines', DEFINES)); f.write(data('uses', USES)); f.write(data('readsvec', READSVEC)); f.write(data('carry', CARRY))
+    f.write(data('isteec', ISTEEC)); f.write(data('vtype', VTYPE)); f.write(data('isblead', ISBLEAD)); f.write(data('isscat', ISSCAT)); f.write(data('defines', DEFINES)); f.write(data('uses', USES)); f.write(data('readsvec', READSVEC)); f.write(data('carry', CARRY))
     f.write(data('pow10', [10 ** i for i in range(MAXDIGITS)]))
     f.write(f"{len(stub)} >Stublen\n")
     for nm, v in [('Rels', rels), ('Rell', rell), ('Relp', relp), ('Kn', K), ('Ncode', NCODE), ('Cdata', DATA), ('Cstr', STR), ('Cnone', NONE), ('Cerr', ERR),

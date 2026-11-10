@@ -151,7 +151,7 @@ int main(void) {
   die();
   for (int i = 0; i < nt;) {               // byte lines: a `bytes` lead switches its whole line to byte-lane classes
     int j = i; while (!tok[j].last) j++;
-    if (tok[i].cls == C_BYTES) for (int k = i; k <= j; k++) tok[k].cls = T_byteof[tok[k].cls];
+    if (T_isblead[tok[i].cls]) for (int k = i; k <= j; k++) tok[k].cls = T_byteof[tok[k].cls];
     i = j + 1;
   }
   // ---- chunk-local vectors: a ':x' whose name's last occurrence is on the tee's own line
@@ -180,7 +180,7 @@ int main(void) {
       long bit = 1L << ((T_carry[tok[k].cls] - 1) * 9 + tok[k].d0);
       if (seen & bit) ERR(10); seen |= bit;
     }
-    if (tok[j].cls == C_SCATTER) for (int k = i; k <= j; k++) if (T_readsvec[tok[k].cls] && tok[k].slot == tok[j].slot) ERR(11);
+    if (T_isscat[tok[j].cls]) for (int k = i; k <= j; k++) if (T_readsvec[tok[k].cls] && tok[k].slot == tok[j].slot) ERR(11);
     i = j + 1;
   }
   die();

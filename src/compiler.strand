@@ -3,7 +3,7 @@
 # No loops, no branches: every line below is one fused AVX-512 loop. A line may define several
 # vectors (':x' stores and keeps going, '%x' compress-stores), so a phase is a handful of loops:
 #   bytes -> automaton -> token positions -> four dwords per token -> names (scatter race) -> classes -> depth (= registers)
-#        -> three code streams laid out by prefix sums -> gather stencil bytes, scatter operands -> ELF
+#        -> three code streams laid out by prefix sums -> copy stencil slices, store operands -> ELF
 # The generated tables (src/tables.strand) are prepended to this file.
 # Specification: boot/spec.py and boot/strand.py. Error numbers: boot/spec.py.
 # ---------------------------------------------------------------- lexing, on byte lanes
@@ -116,7 +116,7 @@ Ed 0 > 7 * halt
 ditem Cnone cls4 sel >clsd
 # byte lines: a `bytes` lead switches every token of its line to the byte-lane class
 ~NL2 0 * >lbt
-clsd Cbytes = first ln1 Neg sel !lbt
+clsd @isblead first ln1 Neg sel !lbt
 ln1 @lbt clsd @byteof clsd - * clsd + >clso
 # chunk-local vectors: a ':x' whose last occurrence (its canonical token) is on the tee's own line never
 # needs an array. Its occurrences there switch class, and keep just the current chunk in x's slot.
@@ -128,7 +128,7 @@ slot @tdef :td1 1 - 0 max :td @clso @istee td1 0 > & isname & td @rep @ln1 td @l
 td1 0 > isname & idx td != & ln1 td @ln1 = & loc 1 ^ & clsl Cvec = & Cvect Cvec - * clsl + >cls
 
 # ---------------------------------------------------------------- stack depth = register allocation, by one scan
-cls @delta 2 - :dlt scan :da dlt - :d0 0 < d0 8 > | da 0 = last != | cls Ncode < :code & $Edp
+cls @delta 4 - :dlt scan :da dlt - :d0 0 < d0 8 > | da 0 = last != | cls Ncode < :code & $Edp
 Edp 0 > 8 * halt
 cls Nd * d0 + code * :tid @slen :sl 0 = code & $Es
 Es 0 > 9 * halt
@@ -142,7 +142,7 @@ ck 0 max @ctab idx != cg 0 > & $Ecy
 Ecy 0 > 10 * halt
 # a line may not read the vector it scatters into
 ~NL2 0 * >lss
-last cls Cscatter = & slot * last ln1 Neg sel !lss
+last cls @isscat & slot * last ln1 Neg sel !lss
 ln1 @lss dup 0 > swap slot = & cls @readsvec & $Ea
 Ea 0 > 11 * halt
 # every used variable is defined somewhere
@@ -191,36 +191,15 @@ code tid @qlen * :psz scan :sp psz - :spx code sl * :asz scan :sa asz - :sax dyi
 ln1 @lft :tf @sbx :fb tf @sax + spx + :offp ln1 @llt :tl @sp :lp fb + sax + :offa lp tl @sa + sbx + :offb drop drop end
 code tid @qlen * code sl * + dying Rell * + $C
 
-# ---------------------------------------------------------------- code bytes: gather stencils, scatter operands
-# every piece scatters its offset to its first byte; a running max fills forward (offsets are monotone),
-# so each code byte finds its piece and gathers its stencil byte
-~C 0 * :mark :dmark end
-offp psz 0 > offp Neg sel !mark
-tid @qstart offp - psz 0 > offp Neg sel !dmark
-offa code offa Neg sel !mark
-tid @sstart offa - code offa Neg sel !dmark
-offb dying offb Neg sel !mark
-offb Rels swap - dying offb Neg sel !dmark
-mark scanmax @dmark idx + @sten >cb
-# operands: four byte scatters per stream (a negative index is a masked-off lane)
-tid @qpos dup 0 > psz 0 > & swap offp + 1 - Neg8 sel >pp
-tid @qadd disp + >pv
-pv 255 & pp !cb
-pv 8 >> 255 & pp 1 + !cb
-pv 16 >> 255 & pp 2 + !cb
-pv 24 >> 255 & pp 3 + !cb
-tid @ppos dup 0 > code & swap offa + 1 - Neg8 sel >pp
-tid @padd disp + >pv
-pv 255 & pp !cb
-pv 8 >> 255 & pp 1 + !cb
-pv 16 >> 255 & pp 2 + !cb
-pv 24 >> 255 & pp 3 + !cb
-dying offb Relp + 1 - Neg8 sel >pp
-slot Slot * >pv
-pv 255 & pp !cb
-pv 8 >> 255 & pp 1 + !cb
-pv 16 >> 255 & pp 2 + !cb
-pv 24 >> 255 & pp 3 + !cb
+# ---------------------------------------------------------------- code bytes: copy stencils, patch operands
+# Every token owns up to three slices of the stencil blob (prologue, body, release). One pass over the
+# tokens copies each to its offset; then every operand is one dword stored at a byte position.
+sten .stenb
+~C 0 * .cb
+tid dup @qstart psz offp (stenb )cb dup @sstart code sl * offa )cb dup 0 * Rels + dying Rell * offb )cb end
+tid @qadd disp + tid @qpos dup 0 > psz 0 > & swap offp + 1 - Neg sel }cb
+tid @padd disp + tid @ppos dup 0 > code & swap offa + 1 - Neg sel }cb
+slot Slot * dying offb Relp + 1 - Neg sel }cb
 
 # ---------------------------------------------------------------- ELF, by concatenation
 112 Stublen + Ds + C + &tail + >F
@@ -231,5 +210,5 @@ f8 out
 stub out
 simg out4
 pool out4
-cb out
+'cb out
 tail out

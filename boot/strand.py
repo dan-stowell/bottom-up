@@ -145,7 +145,7 @@ def analyze(src: bytes):
 
     # byte lines: a `bytes` lead switches every token of its line to the byte-lane class
     for lt in lines.values():
-        if lt[0].cls == KW['bytes']:
+        if ISBLEAD[lt[0].cls]:
             for t in lt: t.cls = BYTEOF[t.cls]
 
     # chunk-local vectors: a ':x' whose name's last occurrence is on the tee's own line
@@ -184,7 +184,7 @@ def analyze(src: bytes):
                 if key in seen: raise CompileError(E_CARRY)
                 seen.add(key)
     for lt in lines.values():
-        if lt[-1].cls == SCATTER:
+        if ISSCAT[lt[-1].cls]:
             for t in lt:
                 if READSVEC[t.cls] and t.slot == lt[-1].slot: raise CompileError(E_ALIAS)
     defined = {t.slot for t in toks if DEFINES[t.cls]}
@@ -296,7 +296,8 @@ def interp(src: bytes, inp: bytes):
             if not lt[0].code: continue
             st = []
             n = None
-            byteline = lt[0].cls == BK + KW['bytes']
+            byteline = lt[0].cls in (BK + KW['bytes'], BYTESV)
+            slsrc = ([t.slot for t in lt if t.cls == SLSRC] or [None])[-1]     # prologues run first: the line's last `(x`
             for t in lt:
                 c = t.cls
                 if byteline and c not in (TEEL, VECL):
@@ -305,6 +306,7 @@ def interp(src: bytes, inp: bytes):
                     sval = (pool[t.poolidx] if t.lit else sca.get(t.slot, 0)) & 255
                     v = vec.get(t.slot, [])
                     if k == 'bytes': n = len(inp); st.append(list(inp))
+                    elif c == BYTESV: n = len(v); st.append([x & 255 for x in v])
                     elif c == SCALB: st.append([sval] * n)
                     elif c == TABLEB:
                         idx = st.pop()
@@ -401,6 +403,23 @@ def interp(src: bytes, inp: bytes):
                 elif c == COMPRESS:
                     m = st.pop(); a = st.pop()
                     vec[t.slot] = [x for x, q in zip(a, m) if q]
+                elif c == STOREVN: vec[t.slot] = [x & 255 for x in st.pop()]
+                elif c == SLSRC: pass
+                elif c == SLICES:
+                    d = st.pop(); ln_ = st.pop(); s = st.pop()
+                    src = vec.get(slsrc, []) if slsrc is not None else []
+                    dst = vec.setdefault(t.slot, [])
+                    if slsrc == t.slot: raise Fail()
+                    for so, l, do in zip(s, ln_, d):
+                        if so < 0 or l < 0 or do < 0 or so + l > len(src) or do + l > len(dst): raise Fail()
+                        dst[do:do + l] = [x & 255 for x in src[so:so + l]]
+                elif c == SCATTER4:
+                    idx = st.pop(); a = st.pop()
+                    tgt = vec.setdefault(t.slot, [])
+                    for x, i in zip(a, idx):
+                        if i < 0: continue
+                        if i + 4 > len(tgt): raise Fail()
+                        tgt[i:i + 4] = list((x & 0xffffffff).to_bytes(4, 'little'))
                 elif c == SCATTER:
                     idx = st.pop(); a = st.pop()
                     tgt = vec.setdefault(t.slot, [])

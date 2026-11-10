@@ -72,6 +72,7 @@ class Gen:
         """a streaming byte line: 64 lanes, byte arithmetic, table lookups, local tees, streaming sinks"""
         r = self.r; toks = ['bytes']; d = 1; used = set(); teed = []; newvecs = []
         if not hasattr(self, 'bvecs'): self.bvecs = []
+        if self.bvecs and r.random() < .35: toks = ["'" + r.choice(self.bvecs)]
         BOPS = ['+', '-', '*', '&', '|', '^', 'min', 'max', '<', '<=', '>', '>=', '=', '!=']
         for _ in range(r.randrange(0, 14)):
             ch = r.random()
@@ -161,15 +162,28 @@ class Gen:
             idx = ['~1', 'drop'] 
             toks += ['dup', '7', '*', r.choice(['0', '0', '3']), r.choice(['max', 'max', '-']), '&' + v, '1', '-', 'min'] if r.random() < .985 else ["dup"]
             toks.append('!' + v)
-        elif k < .80:
+        elif k < .78:
             s = 'S%d' % self.ns; self.ns += 1; toks.append(r.choice('$^') + s); self.scal.append(s)
-        elif k < .90: toks.append(r.choice(['out', 'out', 'out4', 'end']))
+        elif k < .82:                               # the low bytes, as a byte vector
+            if not hasattr(self, 'bvecs'): self.bvecs = []
+            v = 'b%d' % self.nv; self.nv += 1; toks.append('.' + v); self.bvecs.append(v)
+        elif k < .85 and len(getattr(self, 'bvecs', [])) >= 2:     # slices from one byte vector into another
+            src, dst = r.sample(self.bvecs, 2)
+            sl = lambda v, ln: ['dup', r.choice(['3', '5', '64', '129']), '*', '0', 'max', '&' + v, ln, '-', '0', 'max', 'min']
+            ln = r.choice(['0', '1', '3', '17', '64', '65', '200']) if r.random() < .9 else '100000'
+            toks += sl(src, ln) + [ln] + ['over'] + sl(dst, ln)[1:] + ['(' + src, ')' + dst, 'end']
+        elif k < .88 and getattr(self, 'bvecs', None):              # a dword at a byte offset
+            v = r.choice(self.bvecs)
+            toks += ['dup', '7', '*', r.choice(['0', '0', '3']), r.choice(['max', 'max', '-']), '&' + v, '4', '-', 'min'] if r.random() < .97 else ['dup']
+            toks.append('}' + v)
+        elif k < .92: toks.append(r.choice(['out', 'out', 'out4', 'end']))
         else: toks += [self.scalar(), r.choice(BIN), 'dup', '1', '&', r.choice(['outif', 'outif4'])]
         self.lines.append(' '.join(toks))
     def program(self):
         for _ in range(self.r.choice([self.r.randrange(1, 25)] * 9 + [self.r.randrange(60, 200)])): self.line()
         # make everything observable
         for v in list(self.vecs)[-6:]: self.lines.append(v + ' out4')
+        for v in getattr(self, 'bvecs', [])[-4:]: self.lines.append("'" + v + ' out')
         for s in self.scal[-6:]: self.lines.append('~1 ' + s + ' + out4')
         return ('\n'.join(self.lines) + '\n').encode()
 
