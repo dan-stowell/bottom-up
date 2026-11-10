@@ -24,6 +24,10 @@ static void put(const void *p, size_t n) { const char *c = p; while (n) { ssize_
 #define P_prefix4 15
 #define P_swapcase 16
 #define P_lines32 17
+#define P_strip 18
+#define P_csv 19
+#define P_idents 20
+#define P_strings 21
 int main(void) {
   uint32_t acc = 0; int32_t mx = INT32_MIN; int prev = 0; int32_t prev4 = 0; uint32_t run = 0; ssize_t n; size_t have = 0;
 #if K == P_words
@@ -34,11 +38,15 @@ int main(void) {
 #if K == P_lines || K == P_lines32
     for (ssize_t i = 0; i < n; i++) acc += in[i] == 10;
 #elif K == P_words
-    for (ssize_t i = 0; i < n; i++) { int nb = in[i] > 32; acc += nb & !prev; prev = nb; }
+    acc += (in[0] > 32) & !prev;                        // adjacent loads, not a carried flag: GCC vectorises this
+    for (ssize_t i = 1; i < n; i++) acc += (in[i] > 32) & (in[i - 1] <= 32);
+    prev = in[n - 1] > 32;
 #elif K == P_sum
     for (ssize_t i = 0; i < n; i++) acc += in[i];
 #elif K == P_pairs
-    for (ssize_t i = 0; i < n; i++) { acc += (in[i] == 104) & (prev == 116); prev = in[i]; }
+    acc += (in[0] == 104) & (prev == 116);
+    for (ssize_t i = 1; i < n; i++) acc += (in[i] == 104) & (in[i - 1] == 116);
+    prev = in[n - 1];
 #elif K == P_nonascii
     for (ssize_t i = 0; i < n; i++) acc += in[i] > 127;
 #elif K == P_upper
@@ -70,15 +78,33 @@ int main(void) {
 #elif K == P_prefix4
     for (size_t i = 0; i < n4; i++) { acc += w[i]; o4[i] = acc; }
     no = n4 * 4;
+#elif K == P_strip
+    for (ssize_t i = 0; i < n; i++) { uint8_t c = in[i];
+      switch (prev) { case 0: if (c == '#') prev = 1; else if (c == '"') prev = 2; break; case 1: if (c == '\n') prev = 0; break;
+                      case 2: if (c == '"') prev = 0; else if (c == '\\') prev = 3; break; default: prev = 2; }
+      out[no] = c; no += prev != 1; }
+#elif K == P_idents       // words of [A-Za-z0-9_] that begin in code (not in a comment or a string)
+    for (ssize_t i = 0; i < n; i++) { uint8_t c = in[i];
+      switch (prev) { case 0: if (c == '#') prev = 1; else if (c == '"') prev = 2; break; case 1: if (c == '\n') prev = 0; break;
+                      case 2: if (c == '"') prev = 0; else if (c == '\\') prev = 3; break; default: prev = 2; }
+      int wc = (c >= '0' && c <= '9') || ((c | 32) >= 'a' && (c | 32) <= 'z') || c == '_';
+      acc += wc & !prev4 & (prev == 0); prev4 = wc; }
+#elif K == P_strings      // string literals: entries into the string state from code
+    for (ssize_t i = 0; i < n; i++) { uint8_t c = in[i]; int was = prev;
+      switch (prev) { case 0: if (c == '#') prev = 1; else if (c == '"') prev = 2; break; case 1: if (c == '\n') prev = 0; break;
+                      case 2: if (c == '"') prev = 0; else if (c == '\\') prev = 3; break; default: prev = 2; }
+      acc += (prev == 2) & (was == 0); }
+#elif K == P_csv
+    for (ssize_t i = 0; i < n; i++) { uint8_t c = in[i]; prev ^= c == '"'; acc += ((c == ',') | (c == '\n')) & !prev; }
 #endif
     if (no) put(out, no);
-#if K >= P_sum4
+#if K >= P_sum4 && K <= P_prefix4      // dword kernels only keep a partial trailing dword (AUDIT.md, defect 2)
     have = n - n4 * 4; memmove(in, in + n4 * 4, have);
 #endif
   }
 #if K == P_maxline || K == P_maxgap4
   put(&mx, 4);
-#elif K != P_swapcase && K != P_upper && K != P_rot13 && K != P_letters && K != P_scale4 && K != P_filter4 && K != P_prefix4
+#elif K != P_swapcase && K != P_upper && K != P_rot13 && K != P_letters && K != P_scale4 && K != P_filter4 && K != P_prefix4 && K != P_strip
   put(&acc, 4);
 #endif
   return 0;

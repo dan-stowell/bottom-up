@@ -43,6 +43,7 @@ def ALLOC(R):   # R = a block for r12 elements: pop the size class's free list, 
 VETO = "  mov dword ptr [rbx-672],0"      # this token cannot be split across threads
 SETUP = """
   mov dword ptr [rbx-672],1
+  mov dword ptr [rbx-680],0
   mov dword ptr [rbx-704],0
   mov dword ptr [rbx-708],16
   mov dword ptr [rbx-712],0
@@ -141,10 +142,10 @@ for d in range(1, 9):
         for sh in (15, 14, 12, 8):
             t += f"  valignd zmm24,zmm{r},zmm25,{sh}\n  {op} zmm{r},zmm{r},zmm24\n"
         return t + f"  {op} zmm{r},zmm{r},zmm{carry}\n  valignd zmm24,zmm{r},zmm{r},15\n  vpbroadcastd zmm{carry},xmm24"
-    st(KW['scan'], d, scan('vpaddd', '  vpxord zmm25,zmm25,zmm25', 16 + r), pre=f'  vpxord zmm{16+r},zmm{16+r},zmm{16+r}\n  or dword ptr [rbx-712],{1 << r}')
-    st(KW['scanmax'], d, scan('vpmaxsd', '  vpslld zmm25,zmm31,31', 8 + r), pre=f'  vpslld zmm{8+r},zmm31,31\n  or dword ptr [rbx-712],{1 << (8 + r)}')
+    st(KW['scan'], d, scan('vpaddd', '  vpxord zmm25,zmm25,zmm25', 16 + r), pre=f'  vpxord zmm{16+r},zmm{16+r},zmm{16+r}\n  or dword ptr [rbx-712],{1 << r}\n  mov dword ptr [rbx-680],0')
+    st(KW['scanmax'], d, scan('vpmaxsd', '  vpslld zmm25,zmm31,31', 8 + r), pre=f'  vpslld zmm{8+r},zmm31,31\n  or dword ptr [rbx-712],{1 << (8 + r)}\n  mov dword ptr [rbx-680],0')
     st(KW['prev'], d, f"  valignd zmm24,zmm{r},zmm{16+r},15\n  vmovdqa32 zmm{16+r},zmm{r}\n  vmovdqa32 zmm{r},zmm24",
-       pre=f'  vpxord zmm{16+r},zmm{16+r},zmm{16+r}\n  or dword ptr [rbx-712],{1 << (16 + r)}')
+       pre=f'  vpxord zmm{16+r},zmm{16+r},zmm{16+r}\n  or dword ptr [rbx-712],{1 << (16 + r)}\n  mov dword ptr [rbx-680],0')
     if d <= 7: st(KW['dup'], d, f"  vmovdqa32 zmm{d},zmm{r}")
     if d <= 7: st(KW['idx'], d, f"  vmovdqa32 zmm{d},zmm26")       # lane indices i..i+15
     st(GATHER, d, f"  lea rcx,[rbx+{DISP}]" + bounds(r) + f"""
@@ -266,6 +267,7 @@ st(KW['halt'], 1, LOOPEND + "\n  cmp r12,1" + failif('e') + """
 BKW = lambda k: BK + KW[k]
 SETUPB = """
   mov dword ptr [rbx-672],1
+  mov dword ptr [rbx-680],0
   mov dword ptr [rbx-704],0
   mov dword ptr [rbx-708],64
   mov dword ptr [rbx-712],0
@@ -327,7 +329,7 @@ for d in range(1, 9):
   vpsllq zmm25,zmm{r},8
   vpsrlq zmm24,zmm24,56
   vmovdqa64 zmm{16+r},zmm{r}
-  vporq zmm{r},zmm25,zmm24""", pre=f'  vpxord zmm{16+r},zmm{16+r},zmm{16+r}\n  or dword ptr [rbx-712],{1 << (16 + r)}')
+  vporq zmm{r},zmm25,zmm24""", pre=f'  vpxord zmm{16+r},zmm{16+r},zmm{16+r}\n  or dword ptr [rbx-712],{1 << (16 + r)}\n  mov dword ptr [rbx-680],0')
     # 256-entry table lookup: the prologue narrows the i32 table to bytes once; the body is two vpermi2b
     st(TABLEB, d, f"""  lea rcx,[rbx+{DISP}]
   mov rsi,[rcx+16]
@@ -367,17 +369,21 @@ for d in range(1, 9):
 # identity so that zero means "nothing read yet") is composed in last. vpshufb indexes within
 # 128-bit lanes, so indices carry their dword's offset 4j ("pre-offset"); a function shifted by one
 # or two dwords is fixed up by adding 4 or 8, a shift by 4 or 8 dwords needs nothing.
+# In the pool's dry pass only the carry matters. If no later token on the line has a carry of its own
+# (each carry user's prologue clears [rbx-680]; this one then writes its id there), the pool copies
+# that id to [rbx-676] for the duration of the dry pass and the body leaves the loop right here.
 # Constants live in the stub: [rbx-960] offsets, [rbx-896] identity|offsets, [rbx-832..] dwords and masks.
 for d in range(1, 9):
     r = d - 1; C = 16 + r
     st(FSMB, d, f"""  mov rsi,[rbx+{DISP24}]
-  vpermd zmm8,zmm{r},[rsi]
+  vmovdqu64 zmm13,[rsi]
+  vpermd zmm8,zmm{r},zmm13
   vpsrld zmm24,zmm{r},8
-  vpermd zmm9,zmm24,[rsi]
+  vpermd zmm9,zmm24,zmm13
   vpsrld zmm24,zmm{r},16
-  vpermd zmm10,zmm24,[rsi]
+  vpermd zmm10,zmm24,zmm13
   vpsrld zmm24,zmm{r},24
-  vpermd zmm11,zmm24,[rsi]
+  vpermd zmm11,zmm24,zmm13
   vmovdqu64 zmm26,[rbx-960]
   vmovdqu64 zmm12,[rbx-896]
   vpord zmm8,zmm8,zmm26
@@ -404,11 +410,20 @@ for d in range(1, 9):
   valignd zmm25,zmm25,zmm25,15
   vpbroadcastd zmm{C},xmm25
   vpxord zmm{C},zmm{C},dword ptr [rbx-820]{{1to16}}
+  cmp dword ptr [rbx-676],{r + 1}
+  jne 9f
+  add rax,64
+  cmp rax,rbp
+  jae 1f
+  jmp r11
+1:
+  jmp r15
+9:
   vpshufb zmm24,zmm24,zmm26
   kmovq k1,[rbx-816]
-  kmovq k2,[rbx-808]
-  kmovq k3,[rbx-800]
-  kmovq k4,[rbx-792]
+  kshiftlq k2,k1,1
+  kshiftlq k3,k1,2
+  kshiftlq k4,k1,3
   vpshufb zmm{r}{{k1}}{{z}},zmm8,zmm24
   vpshufb zmm{r}{{k2}},zmm9,zmm24
   vpshufb zmm{r}{{k3}},zmm10,zmm24
@@ -444,7 +459,8 @@ for d in range(1, 9):
   vpandd zmm24,zmm24,dword ptr [rbx-824]{{1to16}}
   vmovdqu8 [rdx],zmm24
   vpxord zmm{C},zmm{C},zmm{C}
-  or dword ptr [rbx-712],{1 << (24 + r)}""")
+  or dword ptr [rbx-712],{1 << (24 + r)}
+  mov dword ptr [rbx-680],{r + 1}""")
 st(SUMB, 1, """  vmovdqu8 zmm24{k6}{z},zmm0
   vpxord zmm25,zmm25,zmm25
   vpsadbw zmm24,zmm24,zmm25

@@ -16,3 +16,7 @@ maxgap4  | ints | prev+reduce   | input4 dup prev - ^M ; ~1 M + out4
 scale4   | ints | map           | input4 3 * 7 + out4
 filter4  | ints | filter        | input4 dup 0 > outif4
 prefix4  | ints | scan          | input4 scan out4
+strip    | code | automaton+filter | ~256 :i 35 = i 34 = 2 * + i 10 = 3 * + i 92 = 4 * + >cls ; 0 1 2 2  1 1 2 2  2 1 0 2  0 0 2 2  0 1 3 2 =dfa ; bytes dup @cls /dfa 1 != outif
+csv      | csv  | automaton+reduce | ~256 :i 34 = i 44 = i 10 = | 2 * + >cls ; 0 1 0 0  1 0 0 0  0 1 0 0 =q ; bytes @cls :c /q 0 = c 2 = & $N ; ~1 N + out4
+idents   | code | automaton+prev+reduce | ~256 :i 35 = i 34 = 2 * + i 10 = 3 * + i 92 = 4 * + >cls ; 0 1 2 2  1 1 2 2  2 1 0 2  0 0 2 2  0 1 3 2 =dfa ; ~256 :i 223 & :u 65 >= u 90 <= & i 48 >= i 57 <= & | i 95 = | >isw ; bytes :c @cls /dfa 0 = c @isw dup prev 1 ^ & & $N ; ~1 N + out4
+strings  | code | automaton, prev of state | ~256 :i 35 = i 34 = 2 * + i 10 = 3 * + i 92 = 4 * + >cls ; 0 1 2 2  1 1 2 2  2 1 0 2  0 0 2 2  0 1 3 2 =dfa ; bytes @cls /dfa :s 2 = s prev 0 = & $N ; ~1 N + out4

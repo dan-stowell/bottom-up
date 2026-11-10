@@ -10,6 +10,8 @@
 #   [rbx-704] out stride of the current line: 0 = no out sink, 1 = out, 4 = out4
 #   [rbx-696] fork threshold: lines with at least this many elements may run on all cores
 #   [rbx-688] address of the exit routine
+#   [rbx-680] id of the automaton token that is the last carry user of the current line, else 0
+#   [rbx-676] the same id while the pool runs a dry pass, else 0: that token ends the loop body early
 #   [rbx-672] the current line's vote: 1 = may be split across threads, 0 = some token vetoed
 #   [rbx-656] address of the fork routine      [rbx-648] address of the output flush routine
 #   [rbx-640..-128) free-list heads, one per power-of-two size class
@@ -252,9 +254,16 @@ exit:
 # what a serial run produces. If not (scans feeding scans, or a deferred bounds-check failure),
 # the caller's registers are restored and the rest of the line runs serially.
 #
-# Per-thread block (4096 bytes, allocated when the pool starts): +0 lo, +8 hi, +16 output start,
+# A carry that depends on another carry's *value* (a `prev` of an automaton's state, or of a running
+# sum) is wrong in the dry pass. So the dry pass also reports its carries one chunk before the end of
+# the range (OUT'), the pool derives every thread's carries one chunk before its range (INw) the same
+# way it derives IN, and the real pass starts with a warm-up chunk from INw: after it the `prev`
+# carries are exact, they are recorded as that thread's IN, and the verification covers them.
+#
+# Per-thread block (8192 bytes, allocated when the pool starts): +0 lo, +8 hi, +16 output start,
 # +24 last seq, +32 output end, +40 continuation, +48 reset-accumulators flag, +64 scratch,
-# +128 sum acc, +192 max acc, +256 W, +1280 IN, +2304 OUT (16 zmm each: zmm8..zmm23).
+# +128 sum acc, +192 max acc, +256 W, +1280 IN, +2304 OUT, +3328 OUT', +4352 INw
+# (16 zmm each: zmm8..zmm23).
 .macro savecar base
   .irp i,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23
   vmovdqu32 [\base+(\i-8)*64],zmm\i
@@ -312,15 +321,46 @@ dj_warm:
   lea r14,[rip+justret]
   mov rax,[r13]
   setrange
-  mov rbp,[r13+8]
   mov r8,[r13+16]                   # a fully masked store must still point at mapped memory,
                                     # or every one of them takes a microcode assist
-  lea r15,[rip+dj_dry]
+  mov rbp,[r13+8]
+  mov ecx,[rbx-708]
+  sub rbp,rcx                       # first everything but the last chunk ...
+  cmp rbp,rax
+  jbe dj_dry1                       # (the range is a single chunk)
+  lea r15,[rip+dj_dry1]
   jmp r11
+dj_dry1:
+  savecar r13+3328                  # ... OUT' ...
+  mov rbp,[r13+8]
+  lea r15,[rip+dj_dry]
+  jmp r11                           # ... then the last chunk
 dj_dry:
   savecar r13+2304
   jmp dj_end
 dj_real:
+  cmp r13,[rip+wbase]
+  je dj_real0                       # the first range starts from the caller's true carries
+  loadcar r13+4352                  # the others: one warm-up chunk from INw
+  kxorq k5,k5,k5
+  lea r14,[rip+justret]
+  mov rax,[r13]
+  mov rbp,rax
+  mov ecx,[rbx-708]
+  sub rax,rcx
+  setrange
+  lea r8,[r13+64]
+  lea r15,[rip+dj_real1]
+  jmp r11
+dj_real1:
+  mov eax,[rbx-712]                 # the `prev` carries it produced are this thread's IN
+  .irp i,16,17,18,19,20,21,22,23
+  bt eax,\i
+  jnc 1f
+  vmovdqu32 [r13+1280+(\i-8)*64],zmm\i
+1:
+  .endr
+dj_real0:
   loadcar r13+1280
 dj_run:
   kxnorq k5,k5,k5
@@ -400,7 +440,7 @@ fork:
 1:
   mov eax,[rip+nthreads]            # the caller is the last thread
   dec eax
-  shl rax,12
+  shl rax,13
   add rax,[rip+wbase]
   mov r13,rax
   mov dword ptr [r13+48],0
@@ -466,7 +506,7 @@ fblock:
   add rdi,[rbx-24]
   mov [r10+16],rdi                  # where this range's output goes
   add rdx,rax
-  add r10,4096
+  add r10,8192
   dec ecx
   jnz 5b
   mov eax,[rbx-712]
@@ -483,10 +523,13 @@ fscan:                              # scan line: dry pass, derive carries, real 
   vmovdqu32 [rip+f_a28],zmm28
   vmovdqu32 [rip+f_a29],zmm29
   mov dword ptr [rip+j_mode],1
+  mov eax,[rbx-680]
+  mov [rbx-676],eax
   lea rax,[rip+fs1]
   mov [rip+f_cont],rax
   jmp runall
 fs1:
+  mov dword ptr [rbx-676],0
   mov r10,[rip+wbase]               # IN[t] from IN[t-1], W[t-1], OUT[t-1], by kind of carry
   mov ecx,1
   mov eax,[rbx-712]
@@ -495,42 +538,17 @@ fs2:
 fs3:
   mov rsi,rdx
   shl rsi,6
-  vmovdqu32 zmm24,[r10+rsi+1280]
-  vmovdqu32 zmm25,[r10+rsi+2304]
-  cmp edx,8
-  jae fs4
-  lea r9d,[rdx+8]
-  bt eax,r9d
-  jnc fs6
-  vpmaxsd zmm24,zmm24,zmm25
-  jmp fs6
-fs4:
-  lea r9d,[rdx-8]
-  bt eax,r9d
-  jnc fs5
-  vpaddd zmm24,zmm24,zmm25
-  vpsubd zmm24,zmm24,[r10+rsi+256]
-  jmp fs6
-fs5:
-  lea r9d,[rdx+8]
-  bt eax,r9d
-  jnc fs55
-  vmovdqa32 zmm24,zmm25
-  jmp fs6
-fs55:
-  lea r9d,[rdx+16]
-  bt eax,r9d
-  jnc fs6                           # automaton: IN[t] = OUT[t-1] o IN[t-1] (both stored xor identity)
-  vpxord zmm24,zmm24,dword ptr [rbx-896]{1to16}
-  vpxord zmm25,zmm25,dword ptr [rbx-896]{1to16}
-  vpshufb zmm24,zmm25,zmm24
-  vpxord zmm24,zmm24,dword ptr [rbx-896]{1to16}
-fs6:
-  vmovdqu32 [r10+rsi+4096+1280],zmm24
+  lea rdi,[r10+rsi]
+  vmovdqu32 zmm25,[rdi+2304]        # from OUT: the carries at the start of the next range
+  call derive
+  vmovdqu32 [rdi+8192+1280],zmm24
+  vmovdqu32 zmm25,[rdi+3328]        # from OUT': the carries one chunk before it
+  call derive
+  vmovdqu32 [rdi+8192+4352],zmm24
   inc edx
   cmp edx,16
   jb fs3
-  add r10,4096
+  add r10,8192
   inc ecx
   cmp ecx,[rip+nthreads]
   jb fs2
@@ -561,7 +579,7 @@ fs9:
   jnc fs10
   mov rsi,rdx
   shl rsi,6
-  vmovdqu32 zmm24,[r10+rsi+4096+1280]
+  vmovdqu32 zmm24,[r10+rsi+8192+1280]
   vpcmpd k1,zmm24,[r10+rsi+2304],4
   kortestw k1,k1
   jnz fsbad
@@ -569,12 +587,44 @@ fs10:
   inc edx
   cmp edx,16
   jb fs9
-  add r10,4096
+  add r10,8192
   inc ecx
   cmp ecx,[rip+nthreads]
   jb fs8
   mov dword ptr [rip+f_probe],0
   jmp fgood
+derive:                             # zmm24 = carry edx after a range, from IN [rdi+1280], W [rdi+256]
+  vmovdqu32 zmm24,[rdi+1280]        # and the range's dry result zmm25; eax = the line's carry kinds
+  cmp edx,8
+  jae 4f
+  lea r9d,[rdx+8]
+  bt eax,r9d
+  jnc 6f
+  vpmaxsd zmm24,zmm24,zmm25         # running max
+  ret
+4:
+  lea r9d,[rdx-8]
+  bt eax,r9d
+  jnc 5f
+  vpaddd zmm24,zmm24,zmm25          # running sum: add what the range added
+  vpsubd zmm24,zmm24,[rdi+256]
+  ret
+5:
+  lea r9d,[rdx+8]
+  bt eax,r9d
+  jnc 55f
+  vmovdqa32 zmm24,zmm25             # prev
+  ret
+55:
+  lea r9d,[rdx+16]
+  bt eax,r9d
+  jnc 6f                            # automaton: OUT o IN (both stored xor identity)
+  vpxord zmm24,zmm24,dword ptr [rbx-896]{1to16}
+  vpxord zmm25,zmm25,dword ptr [rbx-896]{1to16}
+  vpshufb zmm24,zmm25,zmm24
+  vpxord zmm24,zmm24,dword ptr [rbx-896]{1to16}
+6:
+  ret
 fsbad:                              # not what a serial run would do: undo and finish serially
   mov r10,[rip+wbase]
   loadcar r10+1280
@@ -589,7 +639,7 @@ fgood:                              # the block stands: fold in the workers' acc
 1:
   vpaddd zmm28,zmm28,[r10+128]
   vpmaxsd zmm29,zmm29,[r10+192]
-  add r10,4096
+  add r10,8192
   dec ecx
   jnz 1b
   mov r9d,[rip+nthreads]
@@ -604,7 +654,7 @@ fgood:                              # the block stands: fold in the workers' acc
   mov rsi,[r10+16]
   mov r8,[r10+32]
   call wrange
-  add r10,4096
+  add r10,8192
   dec ecx
   jnz 2b
   jmp fblock
@@ -631,9 +681,9 @@ startthreads:
   push r13
   push r8
   mov dword ptr [rip+started],1
-  mov eax,9                         # per-thread blocks: 17 x 4096
+  mov eax,9                         # per-thread blocks: 17 x 8192
   xor edi,edi
-  mov esi,0x11000
+  mov esi,0x22000
   mov edx,3
   mov r10d,0x22
   mov r8,-1
@@ -662,7 +712,7 @@ startthreads:
   test rax,rax
   jz worker
   js nomem
-  add r13,4096
+  add r13,8192
   dec r15d
   jnz 1b
   pop r8

@@ -31,6 +31,12 @@ CASES = [
  (b'bytes dup 64 > outif\n', 0), (b'bytes scan out\n', E_STENCIL), (b'bytes >x\n', E_DEPTH), (b'input >x\nbytes x + out\n', E_STENCIL),
  (b'bytes :c end\nc out\n', E_STENCIL), (b'bytes idx + out\n', E_STENCIL), (b'input bytes + out\n', E_STENCIL), (b'bytes 3 * 300 + out\n', 0),
  (b'~256 255 swap - >t\nbytes @t out\n', 0), (b'~255 >t\nbytes @t out\n', 0),
+ # automata
+ (b'0 1 2 2 1 1 2 2 2 1 0 2 0 0 2 2 0 1 3 2 =d\nbytes 7 & /d 48 + out\n', 0), (b'=d\nbytes /d 65 + out\n', 0), (b'3 =d\nbytes 0 & /d out\n', 0),
+ (b'1 2 3 0 =d\nbytes 0 & /d 48 + out\n', 0), (b'1 2 3 0 =d\nbytes 0 & /d dup prev + $S\n~1 S + out4\n', 0),
+ (b'1 2 3 0 =d\ninput /d out\n', E_STENCIL), (b'1 2 3 0 =d\nbytes /d /d out\n', E_CARRY), (b'1 2 3 0 =d\nbytes prev /d out\n', E_CARRY),
+ (b'1 2 3 0 =d\nbytes /d dup /d + out\n', 0), (b'bytes /x out\n', E_UNDEF), (b'bytes /D out\n', E_TOKEN), (b'1 2 =d\n/d out\n', E_DEPTH),
+ (b'1 2 3 0 0 0 0 0 0 1 2 3 =d\nbytes 64 > /d :s 1 = s prev 2 = & $C\n~1 C + out4\n', 0),
  # release-on-overwrite, self-reassignment, replacing static data, scatter into static data
  (b'input >x\nx 1 + >x\nx 1 + >x\nx out\n', 0), (b'1 2 3 =d\nd 1 + >d\nd out4\n', 0), (b'1 2 3 =d\nd idx !d\nd out4\n', E_ALIAS),
  (b'1 2 3 =d\n~3 9 + idx !d\nd out4\n', 0), (b'input >a\na >b\na >c\nb >a\nc >b\na b + out\n', 0),
