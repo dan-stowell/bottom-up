@@ -3,6 +3,7 @@
 # Layout contract with the stencils (rbx = address of the first byte after this blob):
 #   [rbx-128..-64)  dwords 0..15 (iota constant)
 #   [rbx-640..-128) free-list heads, one per power-of-two size class
+#   [rbx-64] heap limit   [rbx-56] output limit (exceeding either is a runtime failure)
 #   [rbx-44] the constant 16 (lane-index increment)
 #   [rbx-40] heap base (addresses below it are static data and are never released)
 #   [rbx-32] output cursor   [rbx-24] output base   [rbx-16] input ptr   [rbx-8] input length
@@ -20,8 +21,13 @@ _start:
   mov r8,-1
   xor r9d,r9d
   syscall
+  cmp rax,-4096
+  ja nomem
   mov r13,rax
   mov [rbx-40],rax
+  movabs rcx,0xffffff000
+  add rcx,rax
+  mov [rbx-64],rcx
   mov eax,9                         # mmap output buffer: 4 GiB
   xor edi,edi
   movabs rsi,0x100000000
@@ -30,8 +36,13 @@ _start:
   mov r8,-1
   xor r9d,r9d
   syscall
+  cmp rax,-4096
+  ja nomem
   mov [rbx-24],rax
   mov [rbx-32],rax
+  movabs rcx,0xfffff000
+  add rcx,rax
+  mov [rbx-56],rcx
   xor r12d,r12d
 rd:
   xor eax,eax                       # read(0, heap+total, 1 MiB)
@@ -42,7 +53,12 @@ rd:
   test rax,rax
   jle rddone
   add r12,rax
-  jmp rd
+  cmp r12,0x7fe00000                # vectors are limited to 2^31-1 elements
+  jb rd
+nomem:
+  mov edi,98
+  mov eax,231
+  syscall
 rddone:
   mov [rbx-16],r13
   mov [rbx-8],r12

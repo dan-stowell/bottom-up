@@ -12,6 +12,8 @@ chmod +x build/stage1
 chmod +x build/stage2
 ./build/stage2 < build/strandc.strand > build/stage3
 chmod +x build/stage3
-cmp build/stage1 build/stage2 && echo "stage1 == stage2 (SIMD compiler reproduces the scalar reference)"
-cmp build/stage2 build/stage3 && echo "stage2 == stage3 (fixed point)"
+cmp build/stage1 build/stage2 || { echo "FAIL: stage1 != stage2"; exit 1; }
+echo "stage1 == stage2 (SIMD compiler reproduces the scalar reference)"
+cmp build/stage2 build/stage3 || { echo "FAIL: stage2 != stage3"; exit 1; }
+echo "stage2 == stage3 (fixed point)"
 sha256sum build/stage1 build/stage2 build/stage3

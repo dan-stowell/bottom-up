@@ -1,211 +1,137 @@
 # The Strand compiler, in Strand.
 #
-# No loops, no branches: every line below is one fused AVX-512 loop. The phases are
+# No loops, no branches: every line below is one fused AVX-512 loop. A line may define several
+# vectors (':x' stores and keeps going, '%x' compress-stores), so a phase is a handful of loops:
 #   text -> byte classes -> tokens -> names (scatter race) -> classes -> depth (= registers)
-#        -> stencil ids -> gather stencil bytes -> scatter operands -> ELF by concatenation.
+#        -> three code streams laid out by prefix sums -> gather stencil bytes, scatter operands -> ELF
 # The generated tables (src/tables.strand) are prepended to this file.
-# Reference semantics: boot/strand.py. Error numbers: boot/spec.py.
+# Specification: boot/spec.py and boot/strand.py. Error numbers: boot/spec.py.
 
 # ---------------------------------------------------------------- text = prelude ++ source ++ "\n"
-input >src
 &prelude >P
-&src >N
+input 0 * 1 + $N
 P N + 1 + >T
+T 1 - >Tm
+0 1 - >Neg
+0 8 - >Neg8
 ~T 0 * 10 + >text
-~P >ip
-prelude ip !text
-~N P + >is
-src is !text
-~T >i
+prelude idx !text
+input idx P + !text
 
-# ---------------------------------------------------------------- byte classes
-text 10 = >nl
-text 35 = scan >hc
-hc nl * scanmax >hb
-hc hb > >cm
-text 34 = cm 1 ^ & >q
-q scan >qc
-qc nl * scanmax >qb
-qc qb - 1 & >par
-par q | text 32 > | cm 1 ^ & >tc
-tc tc prev 1 ^ & >ts
-tc prev tc 1 ^ & >te
-# E_QUOTE: odd quotes on a line; opening quote not starting a token; closing quote not ending one
-qc qb prev - 1 & nl * $Eq1
-q par & ts 1 ^ & $Eq2
-q par 1 ^ & prev tc & $Eq3
-Eq1 Eq2 + Eq3 + 0 > halt
+# ---------------------------------------------------------------- byte classes: comments, strings, token chars
+# cm: inside a comment = more '#' so far than at the last newline (two scans). Same trick for quote parity.
+text 35 = scan dup text 10 = * scanmax > 1 ^ :ncm text 34 = & :q dup scan dup text 10 = %qnl dup text 10 = * scanmax - 1 & :par | text 32 > | ncm & :tc end
+# token starts/ends -> compressed token arrays; per-byte token number; line number of each token
+tc dup prev over over 1 ^ & :ts idx over %start text 10 = scan over %ln0 scan 1 - :bt drop swap 1 ^ & idx over %tend end
+# E_QUOTE: opening quote not starting a token, closing quote not ending one; odd quotes on a line
+q par & ts 1 ^ & q par 1 ^ & prev tc & | $Eq2
+qnl dup prev - 1 & $Eq1
+Eq1 Eq2 + 0 > halt
+&qnl >NL
+NL 2 + >NL2
 
-# ---------------------------------------------------------------- tokens
-i ts ?start
-i te ?tend
+# ---------------------------------------------------------------- tokens: sigil, operand class, name span
 &start >NT
 NT 1 - >NTm
-~NT >t
-ts scan 1 - >bt
-start @text >c0
-start 1 + @text >c1
-tend start - >len
-c0 127 min @opctab >o0
-c1 127 min @opctab >o1
-c0 127 min @sigtab >s0
-s0 0 > len 1 > & o1 0 > & o1 4 < & >sig
-s0 sig * >sgi
-sig o1 o0 sel >opc
-start sig + >ns
-len sig - >nlen
-opc 3 = >lit
-opc 4 = >str
-lit str | 1 ^ >isname
-nl scan >nlc
-nl $NL
-start @nlc 1 + >ln1
-ln1 dup prev != >first
-t 1 + NTm min @first t NTm = | >last
-# token properties seen from each byte
-bt @lit tc & >blit
-bt @ns >bns
-bt @tend >bend
-i bns >= tc & >bop
-# E_LEX: literal operands are 1..9 digits.  E_NAMELEN: names are at most 64 bytes
-text 48 >= text 57 <= & 1 ^ blit & bop & $El1
+start @text 127 min :c0 @opctab :o0 end
+tend start - :len 1 > c0 @sigtab :s0 0 > & start 1 + @text 127 min @opctab :o1 dup 0 > swap 4 < & & :sig s0 * :sgi sig o1 o0 sel :opc dup 3 = :lit swap 4 = :str | 1 ^ :isname drop start sig + :ns drop len sig - :nlen drop ln0 1 + :ln1 dup prev != :first drop end
+~NT 1 + NTm min @first idx NTm = | >last
+ns 2 * lit + >nsl
+
+# ---------------------------------------------------------------- one pass over the bytes, seen from their tokens:
+# literal digits (E_LEX), decimal weights, two name-hash sums, constant-pool units
+bt @nsl dup 1 & tc & :blit drop 1 >> :bns idx swap - :off 0 >= tc & :bop blit & :lb text 48 >= text 57 <= & 1 ^ & lb text 48 - * bt @tend :bend 1 - idx - 0 max 8 min @pow10 * scan :dp off 0 max 63 min 256 * text + :hx Ha1 * dup Hs1 >> ^ Hb1 * bop * scan :hp1 hx Ha2 * dup Hs2 >> ^ Hb2 * bop * scan :hp2 idx 1 + bend = tc & blit & :u1 par q 1 ^ & :u2 | dup scan swap - :ucx drop drop drop drop $El1
 lit nlen Maxdig > & $El2
 El1 El2 + 0 > 2 * halt
 isname nlen Maxname > & $En
 En 0 > 3 * halt
-
-# ---------------------------------------------------------------- literal values and the constant pool
-bend 1 - i - 0 max 8 min @pow10 >pw
-text 48 - pw * blit * bop * >dv
-dv scan >dp
-tend 1 - @dp ns @dp - ns @dv + lit * >val
-i 1 + bend = tc & blit & >u1
-par q 1 ^ & >u2
-u1 u2 | >isu
-bt @val u1 * text u2 * + >uv
-uv isu ?pool
-isu scan isu - >ucx
-start @ucx >pidx
+# a segmented sum is a difference of two scan values
+ns 0 > :nz ns 1 - 0 max :nb @dp * tend 1 - :te1 @dp swap - lit * :val te1 @hp1 nb @hp1 nz * - :h1 drop te1 @hp2 nb @hp2 nz * - :h2 drop start @ucx :pidx drop end
+bt @val u1 * text u2 * + u1 u2 | ?pool
 &pool >U
 
-# ---------------------------------------------------------------- names: hash, then scatter race
-# h = sum over name bytes of byte * weight[offset]: a segmented sum is a difference of two scan values
-i bns - 0 max 63 min @hashw text * bop * >hv
-hv scan >hp
-tend 1 - @hp ns @hp - ns @hv + >h
-Tabm 1 + >Tabm1
-~Tabm1 0 * >tab
-t 0 * >rep
-# round 0: every name scatters its token index; the last writer owns the slot
-isname h 16 >> Tabm sel >key
-t key !tab
-key @tab >w
-w @h h = isname & >ok
-ok w rep sel >rep
-isname ok 1 ^ & >act
-# round 1: names that lost to a different name race again under another hash
-act h Mult1 * 16 >> Tabm sel >key
-t key !tab
-key @tab >w
-w @h h = act & >ok
-ok w rep sel >rep
-act ok 1 ^ & >act
-# round 2
-act h Mult2 * 16 >> Tabm sel >key
-t key !tab
-key @tab >w
-w @h h = act & >ok
-ok w rep sel >rep
-act ok 1 ^ & >act
-act $Er
+# ---------------------------------------------------------------- names: the scatter race
+# Every unresolved name token scatters its index into table[key]; the last writer owns the slot.
+# A token whose slot owner has its fingerprint is resolved to that owner (its canonical occurrence,
+# which is therefore the name's LAST occurrence). Losers race again under the next key.
+NT dup 1 >> | dup 2 >> | dup 4 >> | dup 8 >> | dup 16 >> | 2 * 1 + >Mask
+Mask 1 + >Tabm
+~Tabm 0 * >tab
+isname >act
+~NT 0 * >rep
+act h1 Ru0 * h2 Rv0 * + 8 >> Mask & Neg sel >key
+~NT key !tab
+key 0 max @tab dup @h1 h1 = over @h2 h2 = & act & :ok0 swap rep sel >rep
+act ok0 1 ^ & >act
+act h1 Ru1 * h2 Rv1 * + 8 >> Mask & Neg sel >key
+~NT key !tab
+key 0 max @tab dup @h1 h1 = over @h2 h2 = & act & :ok1 swap rep sel >rep
+act ok1 1 ^ & >act
+act h1 Ru2 * h2 Rv2 * + 8 >> Mask & Neg sel >key
+~NT key !tab
+key 0 max @tab dup @h1 h1 = over @h2 h2 = & act & :ok2 swap rep sel >rep
+act ok2 1 ^ & >act
+act h1 Ru3 * h2 Rv3 * + 8 >> Mask & Neg sel >key
+~NT key !tab
+key 0 max @tab dup @h1 h1 = over @h2 h2 = & act & :ok3 swap rep sel >rep
+act ok3 1 ^ & $Er
 Er 0 > 4 * halt
 # exact check: every name byte equals the corresponding byte of its canonical occurrence
-bt @rep >brep
-brep @ns i bns - + 0 max T 1 - min @text text != bop * bt @isname * $Ec1
+rep @ns ns - isname * >vd
+bt @vd idx + 0 max Tm min @text text != bop * $Ec1
 rep @nlen nlen != isname * $Ec2
 Ec1 Ec2 + 0 > 5 * halt
 
-# ---------------------------------------------------------------- keywords = names whose race was won inside the prelude... or not:
-# prelude token k is keyword k; mark each one's canonical occurrence
-NT 1 + >NT1
-~NT1 0 * >kwof
-t Kn < rep NT sel >kidx
-t 1 + kidx !kwof
-rep @kwof isname * >kw
-# slots: running count of canonical variable occurrences
-rep t = isname & kw 0 = & >isrep
-isrep scan >sid
+# ---------------------------------------------------------------- keywords by self-join; slots by one scan
+# prelude token k is keyword k: mark each one's canonical occurrence
+~NT 0 * >kwof
+~NT 1 + idx Kn < rep Neg sel !kwof
+rep @kwof isname * :kw 0 = isname & rep idx = & :isrep scan >sid
 rep @sid isname * kw 0 = * >slot
 isrep $S
+S 1 + >S1
 
 # ---------------------------------------------------------------- token classes
-sgi 5 * opc + @clstab >cls0
-kw 0 > >iskw
-iskw sgi 0 = & kw 1 - cls0 sel >cls1
-iskw sgi 0 > & Cerr cls1 sel >cls2
-first cls2 @leadof cls2 sel >cls3
-t Kn < Cnone cls3 sel >cls4
-cls4 Cerr = $Et
+kw 0 > sgi 0 > & Cerr kw 0 > sgi 0 = & kw 1 - sgi 5 * opc + @clstab sel sel dup @leadof over - first * + dup Cnone swap - idx Kn < * + :cls4 Cerr = $Et
 Et 0 > 6 * halt
 # data lines: the class of a line's last token decides
-NL 1 + >NL1
-NL 2 + >NL2
 ~NL2 0 * >lsk
-last ln1 NL1 sel >lidx
-cls4 lidx !lsk
-ln1 @lsk Cdata = last 1 ^ & >ditem
-sgi 0 = lit & cls4 Cstr = | 1 ^ ditem & >bad1
-cls4 Cdata = last 1 ^ & cls4 Cstr = | ditem 1 ^ & >bad2
-bad1 bad2 | $Ed
+cls4 last ln1 Neg sel !lsk
+ln1 @lsk Cdata = last 1 ^ & :ditem sgi 0 = lit & cls4 Cstr = | 1 ^ & cls4 Cdata = last 1 ^ & cls4 Cstr = | ditem 1 ^ & | $Ed
 Ed 0 > 7 * halt
 ditem Cnone cls4 sel >cls
 
 # ---------------------------------------------------------------- stack depth = register allocation, by one scan
-cls @delta 2 - >dlt
-dlt scan >da
-da dlt - >d0
-cls Ncode < >code
-d0 0 < d0 8 > | da 0 = last != | code & $Edp
+cls @delta 2 - :dlt scan :da dlt - :d0 0 < d0 8 > | da 0 = last != | cls Ncode < :code & $Edp
 Edp 0 > 8 * halt
-cls Nd * d0 + code * >tid
-tid @slen >sl
-code sl 0 = & $Es
+cls Nd * d0 + code * :tid @slen :sl 0 = code & $Es
 Es 0 > 9 * halt
 # two carry-using ops at one depth on one line would share a carry register: detect by scatter race
 cls @carry code * >cg
 NL2 32 * >Ct
-Ct 1 + >Ct1
-~Ct1 0 * >ctab
-cg 0 > ln1 32 * cg 16 * + d0 + Ct sel >ck
-t ck !ctab
-ck @ctab t != cg 0 > & $Ecy
+~Ct 0 * >ctab
+cg 0 > ln1 32 * cg 16 * + d0 + Neg sel >ck
+~NT ck !ctab
+ck 0 max @ctab idx != cg 0 > & $Ecy
 Ecy 0 > 10 * halt
 # a line may not read the vector it scatters into
 ~NL2 0 * >lss
-last cls Cscatter = & slot * lidx !lss
+last cls Cscatter = & slot * last ln1 Neg sel !lss
 ln1 @lss dup 0 > swap slot = & cls @readsvec & $Ea
 Ea 0 > 11 * halt
 # every used variable is defined somewhere
-S 1 + >S1
-S 2 + >S2
-~S2 0 * >def
-cls @defines slot S1 sel >didx
-t 0 * 1 + didx !def
+~S1 0 * >def
+cls @defines dup slot Neg sel !def
 slot @def 0 = cls @uses & isname & $Eu
 Eu 0 > 12 * halt
 # tee rules: a tee-defined name has exactly one definition, and on the tee's own line it may only be
 # re-read after a ':' tee
-cls Ctee = cls Cteec = | >ist
-~S2 0 * >tdef
-ist slot S1 sel >tix
-t 1 + tix !tdef
-~S2 0 * >ldef
-t didx !ldef
-slot @tdef >td1
-td1 0 > cls @defines & slot @ldef t != & $Et1
-td1 1 - 0 max >td
-td1 0 > isname & t td != & ln1 td @ln1 = & >same
-td @cls Ctee = cls Cvec = cls Clen = | & t td > & 1 ^ same & $Et2
+~S1 0 * >tdef
+~NT 1 + cls Ctee = cls Cteec = | slot Neg sel !tdef
+~S1 0 * >ldef
+~NT cls @defines slot Neg sel !ldef
+slot @tdef :td1 0 > cls @defines & slot @ldef idx != & $Et1
+td1 1 - 0 max :td @cls Ctee = cls Cvec = cls Clen = | & idx td > & 1 ^ td1 0 > isname & idx td != & ln1 td @ln1 = & & $Et2
 Et1 Et2 + 0 > 13 * halt
 
 # ---------------------------------------------------------------- data image: slots, then pool
@@ -213,73 +139,54 @@ lit S1 16 * pidx 4 * + slot 16 * sel >disp
 S1 16 * U 4 * + >Ds
 Vbase 112 + Stublen + >Vd
 S1 4 * >Si
-Si 1 + >Si1
-~Si1 0 * >simg
+~Si 0 * >simg
 ~NL2 0 * >lfp
-first ln1 NL1 sel >fidx
-pidx fidx !lfp
-cls Cdata = >isd
-isd slot 4 * Si sel >di0
-ln1 @lfp 4 * Vd + S1 16 * + di0 !simg
-isd slot 4 * 2 + Si sel >di2
-pidx ln1 @lfp - di2 !simg
+pidx first ln1 Neg sel !lfp
+ln1 @lfp :fp 4 * Vd + S1 16 * + cls Cdata = :isd slot 4 * Neg8 sel !simg
+pidx fp - isd slot 4 * 2 + Neg8 sel !simg
 ~1 Ds + 0 !simg
 
-# ---------------------------------------------------------------- code: gather stencil bytes, scatter operands
-# liveness without analysis: the program is a straight line, so a vector is dead after the line holding
+# ---------------------------------------------------------------- code layout
+# Liveness without analysis: the program is a straight line, so a vector is dead after the line holding
 # its last occurrence -- and the scatter race already made that occurrence the canonical one (rep = self).
-isname opc 1 = & slot 0 > & rep t = & t Kn >= & >dying
+isname opc 1 = & slot 0 > & rep idx = & idx Kn >= & >dying
 # Each token owns up to three pieces of code, and a line is laid out as
 #   [every token's prologue] [every token's body] [releases of vectors that die here]
-# so loop-invariant work (length checks, allocation) is hoisted without any motion pass:
-# the three streams are sized, prefix-summed and interleaved by arithmetic on the sums.
-code tid @qlen * >psz
-code sl * >asz
-dying Rell * >bsz
-psz scan >sp
-asz scan >sa
-sp psz - >spx
-sa asz - >sax
-bsz scan bsz - >sbx
+# so loop-invariant work is hoisted with no motion pass: three streams, three prefix sums.
+code tid @qlen * :psz scan :sp psz - :spx code sl * :asz scan :sa asz - :sax dying Rell * :bsz scan bsz - :sbx drop drop end
 ~NL2 0 * >lft
-t fidx !lft
+~NT first ln1 Neg sel !lft
 ~NL2 0 * >llt
-t lidx !llt
-ln1 @lft >tf
-ln1 @llt >tl
-tf @sax tf @sbx + spx + >offp
-tf @sbx tl @sp + sax + >offa
-tl @sp tl @sa + sbx + >offb
-tid @qadd disp + >pdq
-tid @padd disp + >pda
-# entry x = 4*token + piece (0 prologue, 1 body, 2 release)
-NT 4 * >NT4
-~NT4 2 >> >xt
-~NT4 3 & >xk
-xk 0 = xt @psz xk 1 = xt @asz xt @bsz xk 2 = * sel sel >xsz
-xk 0 = xt @offp xk 1 = xt @offa xt @offb sel sel >xo
-xk 0 = xt @tid @qstart xk 1 = xt @tid @sstart Rels sel sel >xs
-xk 0 = xt @tid @qpos xk 1 = xt @tid @ppos Relp sel sel >xp
-xk 0 = xt @pdq xk 1 = xt @pda xt @slot 16 * sel sel >xd
-xsz $C
-~NT4 xsz 0 > ?xe
-xe @xo >eo
-xe @xs >es
-xe @xp >ep
-xe @xd >ed
-&xe >E
-~E >ei
-# every code byte finds its entry: scatter each entry's offset at its first byte, fill forward with a
-# running max (offsets are monotone even though entry numbers are not), then gather the stencil byte
-~C 0 * >mark
-eo dup !mark
-~C 0 * >dmark
-es eo - eo !dmark
-~C >j
-mark scanmax @dmark j + @sten >cb
-ei ep 0 > ?pe
-pe @eo pe @ep + 1 - >pp
-pe @ed >pv
+~NT last ln1 Neg sel !llt
+ln1 @lft :tf @sbx :fb tf @sax + spx + :offp ln1 @llt :tl @sp :lp fb + sax + :offa lp tl @sa + sbx + :offb drop drop end
+NTm @sp NTm @sa + NTm @sbx + NTm @bsz + >C
+
+# ---------------------------------------------------------------- code bytes: gather stencils, scatter operands
+# every piece scatters its offset to its first byte; a running max fills forward (offsets are monotone),
+# so each code byte finds its piece and gathers its stencil byte
+~C 0 * :mark :dmark end
+offp psz 0 > offp Neg sel !mark
+tid @qstart offp - psz 0 > offp Neg sel !dmark
+offa code offa Neg sel !mark
+tid @sstart offa - code offa Neg sel !dmark
+offb dying offb Neg sel !mark
+offb Rels swap - dying offb Neg sel !dmark
+mark scanmax @dmark idx + @sten >cb
+# operands: four byte scatters per stream (a negative index is a masked-off lane)
+tid @qpos dup 0 > psz 0 > & swap offp + 1 - Neg8 sel >pp
+tid @qadd disp + >pv
+pv 255 & pp !cb
+pv 8 >> 255 & pp 1 + !cb
+pv 16 >> 255 & pp 2 + !cb
+pv 24 >> 255 & pp 3 + !cb
+tid @ppos dup 0 > code & swap offa + 1 - Neg8 sel >pp
+tid @padd disp + >pv
+pv 255 & pp !cb
+pv 8 >> 255 & pp 1 + !cb
+pv 16 >> 255 & pp 2 + !cb
+pv 24 >> 255 & pp 3 + !cb
+dying offb Relp + 1 - Neg8 sel >pp
+slot 16 * >pv
 pv 255 & pp !cb
 pv 8 >> 255 & pp 1 + !cb
 pv 16 >> 255 & pp 2 + !cb
@@ -287,12 +194,12 @@ pv 24 >> 255 & pp 3 + !cb
 
 # ---------------------------------------------------------------- ELF, by concatenation
 112 Stublen + Ds + C + &tail + >F
-~8 8 * >sh8
+~8 8 * dup 0 * F + swap >> 255 & >f8
 ehdr out
-sh8 0 * F + sh8 >> 255 & out
-sh8 0 * F + sh8 >> 255 & out
+f8 out
+f8 out
 stub out
-~Si @simg out4
+simg out4
 pool out4
 cb out
 tail out

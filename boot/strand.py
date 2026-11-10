@@ -90,6 +90,26 @@ def analyze(src: bytes):
         if t.isname and len(t.name) > MAXNAME: errs.add(E_NAMELEN)
     if errs: raise CompileError(min(errs))
 
+    # The scatter race, simulated the slow way. Names with equal fingerprints act as one class;
+    # in each round every unresolved class claims table[key]; the class whose last token comes
+    # latest wins the slot and is resolved; the others try the next round's key.
+    fp = {}
+    for t in toks:
+        if t.isname: fp.setdefault(t.name, name_hash(t.name))
+    classes = {}
+    for t in toks:
+        if t.isname: classes[fp[t.name]] = t.idx
+    mask = race_mask(len(toks))
+    active = dict(classes)
+    for r in range(ROUNDS):
+        owner = {}
+        for h, last in active.items():
+            k = race_key(r, h, mask)
+            if k not in owner or owner[k][1] < last: owner[k] = (h, last)
+        active = {h: last for h, last in active.items() if owner[race_key(r, h, mask)][0] != h}
+    if active: raise CompileError(E_RACE)
+    if len(classes) != len(fp): raise CompileError(E_COLLISION)
+
     # names -> slots, numbered in order of each name's last occurrence
     lastocc = {}
     for t in toks:

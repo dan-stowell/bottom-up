@@ -10,7 +10,7 @@
 #include "tables.h"
 
 typedef struct { int start, end, line, first, last, sgi, opc, lit, str, isname, pidx, name, cls, slot, d0, code, tid, disp, dying; } Tok;
-typedef struct { int off, len, last, slot, kw, defined; } Name;
+typedef struct { int off, len, last, slot, kw, defined; uint32_t h1, h2; int active, clast; } Name;
 
 static unsigned char *text; static int T;
 static Tok *tok; static int nt;
@@ -25,7 +25,7 @@ static int intern(const unsigned char *s, int len) {
   uint32_t h = 2166136261u; for (int i = 0; i < len; i++) h = (h ^ s[i]) * 16777619u;
   for (uint32_t k = h & hmask;; k = (k + 1) & hmask) {
     int n = htab[k];
-    if (n < 0) { htab[k] = nn; names[nn] = (Name){(int)(s - text), len, 0, 0, 0, 0}; return nn++; }
+    if (n < 0) { htab[k] = nn; names[nn] = (Name){(int)(s - text), len, 0, 0, 0, 0, 0, 0, 0, 0}; return nn++; }
     if (names[n].len == len && !memcmp(text + names[n].off, s, len)) return n;
   }
 }
@@ -78,6 +78,46 @@ int main(void) {
     }
     if (nt && tok[nt - 1].line == line) tok[nt - 1].last = 1;
     p = e + 1;
+  }
+  die();
+
+  // ---- the scatter race of the language definition (boot/spec.py), simulated with plain loops.
+  // Names with equal fingerprints form one class (found by sorting); classes race for table slots.
+  {
+    for (int i = 0; i < nn; i++) {
+      uint32_t h1 = 0, h2 = 0;
+      for (int k = 0; k < names[i].len; k++) {
+        uint32_t x = text[names[i].off + k] + 256u * k, a;
+        a = x * HA1; h1 += (a ^ (a >> HS1)) * HB1;
+        a = x * HA2; h2 += (a ^ (a >> HS2)) * HB2;
+      }
+      names[i].h1 = h1; names[i].h2 = h2; names[i].active = 1; names[i].clast = names[i].last;
+    }
+    int collision = 0;                     // equal fingerprint, different name: O(n) via a second hash table
+    int *ft = malloc(sizeof(int) * (hmask + 1)); memset(ft, -1, sizeof(int) * (hmask + 1));
+    for (int i = 0; i < nn; i++) {
+      uint32_t k = (names[i].h1 * 2654435761u ^ names[i].h2) & hmask;
+      for (;; k = (k + 1) & hmask) {
+        int j = ft[k];
+        if (j < 0) { ft[k] = i; break; }
+        if (names[j].h1 == names[i].h1 && names[j].h2 == names[i].h2) {   // merge i into class j
+          collision = 1; names[i].active = 0; if (names[i].last > names[j].clast) names[j].clast = names[i].last; break;
+        }
+      }
+    }
+    uint32_t mask = nt; for (int sh = 1; sh <= 16; sh *= 2) mask |= mask >> sh; mask = 2 * mask + 1;
+    int *owner = malloc(sizeof(int) * ((size_t)mask + 1)), left = 0;
+    for (int r = 0; r < ROUNDS; r++) {
+      memset(owner, -1, sizeof(int) * ((size_t)mask + 1));
+#define KEY(i) (((names[i].h1 * RACE_U[r] + names[i].h2 * RACE_V[r]) >> 8) & mask)
+      for (int i = 0; i < nn; i++) if (names[i].active) { uint32_t k = KEY(i); if (owner[k] < 0 || names[owner[k]].clast < names[i].clast) owner[k] = i; }
+      left = 0;
+      for (int i = 0; i < nn; i++) if (names[i].active) { if (owner[KEY(i)] == i) names[i].active = -1; else left++; }
+      for (int i = 0; i < nn; i++) if (names[i].active < 0) names[i].active = 0;
+    }
+    if (left) ERR(4);
+    if (collision) ERR(5);
+    free(owner); free(ft);
   }
   die();
 

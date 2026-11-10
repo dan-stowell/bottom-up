@@ -70,8 +70,32 @@ CARRY[KW['scan']] = 1; CARRY[KW['prev']] = 1; CARRY[KW['scanmax']] = 2
 
 MAXNAME = 64                        # longest name (hash weight table size)
 MAXDIGITS = 9
-TABM = 65536                        # scatter-race table size
-RACE_MULT = [1, 40503, 48271]       # round r uses ((h * mult) >> 16) & (TABM-1); round 0 is h's own top bits
+
+# ---- name resolution is part of the language definition -------------------------------------------
+# Names are told apart by a 64-bit fingerprint and resolved by a 4-round "scatter race".
+# A program whose names cannot be resolved this way is rejected (E_RACE / E_COLLISION), by *every*
+# implementation, so acceptance never depends on which compiler you run.
+M32 = 0xffffffff
+HA1, HB1, HS1 = 668265263, 374761393, 15
+HA2, HB2, HS2 = 951274213, 246822519, 13
+RACE_U = [1, 40503, 48271, 69621]
+RACE_V = [961748927, 314159265, 271828183, 141421357]
+ROUNDS = 4
+def name_hash(name: bytes):
+    """fingerprint = two sums over the name's bytes of a mixed (byte, offset) value"""
+    h1 = h2 = 0
+    for k, c in enumerate(name):
+        x = c + 256 * k
+        a = (x * HA1) & M32; h1 = (h1 + (a ^ (a >> HS1)) * HB1) & M32
+        a = (x * HA2) & M32; h2 = (h2 + (a ^ (a >> HS2)) * HB2) & M32
+    return h1, h2
+def race_mask(ntokens):
+    """table size - 1: twice the smallest power of two above the token count"""
+    m = ntokens
+    for sh in (1, 2, 4, 8, 16): m |= m >> sh
+    return 2 * m + 1
+def race_key(r, h, mask):
+    return (((h[0] * RACE_U[r] + h[1] * RACE_V[r]) & M32) >> 8) & mask
 VBASE = 0x400000
 
 # compile errors, in priority order: exit status = lowest failing check

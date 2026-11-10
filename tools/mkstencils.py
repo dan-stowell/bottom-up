@@ -31,16 +31,17 @@ def ALLOC(R):   # R = a block for r12 elements: pop the size class's free list, 
   jmp 6f
 5:
   lea {R},[r13+64]
-  mov [{R}-8],r10
   lea r13,[{R}+rbp]
+  cmp r13,[rbx-64]
+  jbe 7f
+  call r14
+7:
+  mov [{R}-8],r10
 6:"""
-# SETUP runs once per line, after r12 = n: clear carries, zmm27 = n, zmm26 = lane indices.
+# SETUP runs once per line, after r12 = n: zmm27 = n, zmm26 = lane indices. Carries and accumulators
+# are initialised by the prologue of the token that uses them.
 SETUP = """
   xor eax,eax
-""" + ''.join(f"  vpxord zmm{r},zmm{r},zmm{r}\n" for r in range(16, 24)) + """
-  vpslld zmm29,zmm31,31
-""" + ''.join(f"  vmovdqa32 zmm{r},zmm29\n" for r in range(8, 16)) + """
-  vpxord zmm28,zmm28,zmm28
   vpbroadcastd zmm27,r12d
   vmovdqa32 zmm26,zmm30
 """
@@ -115,9 +116,10 @@ for d in range(1, 9):
         for sh in (15, 14, 12, 8):
             t += f"  valignd zmm24,zmm{r},zmm25,{sh}\n  {op} zmm{r},zmm{r},zmm24\n"
         return t + f"  {op} zmm{r},zmm{r},zmm{carry}\n  valignd zmm24,zmm{r},zmm{r},15\n  vpbroadcastd zmm{carry},xmm24"
-    st(KW['scan'], d, scan('vpaddd', '  vpxord zmm25,zmm25,zmm25', 16 + r))
-    st(KW['scanmax'], d, scan('vpmaxsd', '  vpslld zmm25,zmm31,31', 8 + r))
-    st(KW['prev'], d, f"  valignd zmm24,zmm{r},zmm{16+r},15\n  vmovdqa32 zmm{16+r},zmm{r}\n  vmovdqa32 zmm{r},zmm24")
+    st(KW['scan'], d, scan('vpaddd', '  vpxord zmm25,zmm25,zmm25', 16 + r), pre=f'  vpxord zmm{16+r},zmm{16+r},zmm{16+r}')
+    st(KW['scanmax'], d, scan('vpmaxsd', '  vpslld zmm25,zmm31,31', 8 + r), pre=f'  vpslld zmm{8+r},zmm31,31')
+    st(KW['prev'], d, f"  valignd zmm24,zmm{r},zmm{16+r},15\n  vmovdqa32 zmm{16+r},zmm{r}\n  vmovdqa32 zmm{r},zmm24",
+       pre=f'  vpxord zmm{16+r},zmm{16+r},zmm{16+r}')
     if d <= 7: st(KW['dup'], d, f"  vmovdqa32 zmm{d},zmm{r}")
     if d <= 7: st(KW['idx'], d, f"  vmovdqa32 zmm{d},zmm26")       # lane indices i..i+15
     st(GATHER, d, f"  lea rcx,[rbx+{DISP}]" + bounds(r) + f"""
@@ -141,8 +143,8 @@ st(STOREV, 1, pre=ALLOC('rdi'), text="  vmovdqu32 [rdi+rax*4]{k7},zmm0" + LOOPEN
   mov [rcx],rdi
   mov [rcx+8],r12""")
 st(STORES, 1, LOOPEND + "\n  cmp r12,1" + failif('e') + f"\n  vmovd dword ptr [rbx+{DISP}],xmm0")
-st(SUM, 1, "  vpaddd zmm28{k7},zmm28,zmm0" + LOOPEND + hred(28, 'vpaddd') + f"\n  mov dword ptr [rbx+{DISP}],eax")
-st(MAX, 1, "  vpmaxsd zmm29{k7},zmm29,zmm0" + LOOPEND + hred(29, 'vpmaxsd') + f"\n  mov dword ptr [rbx+{DISP}],eax")
+st(SUM, 1, "  vpaddd zmm28{k7},zmm28,zmm0" + LOOPEND + hred(28, 'vpaddd') + f"\n  mov dword ptr [rbx+{DISP}],eax", pre="  vpxord zmm28,zmm28,zmm28")
+st(MAX, 1, "  vpmaxsd zmm29{k7},zmm29,zmm0" + LOOPEND + hred(29, 'vpmaxsd') + f"\n  mov dword ptr [rbx+{DISP}],eax", pre="  vpslld zmm29,zmm31,31")
 st(COMPRESS, 2, pre=ALLOC('rdi') + "\n  mov r8,rdi", text="""  vptestmd k1{k7},zmm1,zmm1
   vpcompressd zmm24{k1}{z},zmm0
   vmovdqu32 [r8],zmm24
@@ -165,8 +167,10 @@ st(SCATTER, 2, f"  lea rcx,[rbx+{DISP}]" + """
   vpscatterdd [rsi+zmm1*4]{k1},zmm0""" + LOOPEND)
 st(KW['out'], 1, """  mov rsi,[rbx-32]
   vpmovdb xmm24,zmm0
-  vmovdqu8 [rsi+rax]{k7},xmm24""" + LOOPEND + "\n  add [rbx-32],r12")
-st(KW['out4'], 1, "  mov rsi,[rbx-32]\n  vmovdqu32 [rsi+rax*4]{k7},zmm0" + LOOPEND + "\n  lea rsi,[rsi+r12*4]\n  mov [rbx-32],rsi")
+  vmovdqu8 [rsi+rax]{k7},xmm24""" + LOOPEND + "\n  add [rbx-32],r12",
+   pre="  mov rsi,[rbx-32]\n  add rsi,r12\n  cmp rsi,[rbx-56]" + failif('be'))
+st(KW['out4'], 1, "  mov rsi,[rbx-32]\n  vmovdqu32 [rsi+rax*4]{k7},zmm0" + LOOPEND + "\n  lea rsi,[rsi+r12*4]\n  mov [rbx-32],rsi",
+   pre="  mov rsi,[rbx-32]\n  lea rsi,[rsi+r12*4]\n  cmp rsi,[rbx-56]" + failif('be'))
 st(KW['end'], 1, LOOPEND)
 # tee stores: keep the value on the stack and keep the loop going, so one line can define many vectors
 for d in range(1, 9):
@@ -267,10 +271,11 @@ with open(f'{ROOT}/src/tables.strand', 'w') as f:
     f.write(data('leadof', LEADOF)); f.write(data('clstab', CLSTAB))
     f.write(data('opctab', [opclass(c) for c in range(128)])); f.write(data('sigtab', [sigil(c) for c in range(128)]))
     f.write(data('defines', DEFINES)); f.write(data('uses', USES)); f.write(data('readsvec', READSVEC)); f.write(data('carry', CARRY))
-    f.write(data('hashw', hashw)); f.write(data('pow10', [10 ** i for i in range(MAXDIGITS)]))
+    f.write(data('pow10', [10 ** i for i in range(MAXDIGITS)]))
     f.write(f"{len(stub)} >Stublen\n")
     for nm, v in [('Rels', rels), ('Rell', rell), ('Relp', relp), ('Kn', K), ('Ncode', NCODE), ('Cdata', DATA), ('Cstr', STR), ('Cnone', NONE), ('Cerr', ERR),
-                  ('Cscatter', SCATTER), ('Ctee', TEE), ('Cteec', TEEC), ('Cvec', VEC), ('Clen', LEN), ('Nsig5', 5), ('Nd', ND), ('Vbase', VBASE), ('Tabm', TABM), ('Maxname', MAXNAME),
-                  ('Maxdig', MAXDIGITS), ('Mult1', RACE_MULT[1]), ('Mult2', RACE_MULT[2])]:
+                  ('Cscatter', SCATTER), ('Ctee', TEE), ('Cteec', TEEC), ('Cvec', VEC), ('Clen', LEN), ('Nsig5', 5), ('Nd', ND), ('Vbase', VBASE), ('Maxname', MAXNAME), ('Maxdig', MAXDIGITS),
+                  ('Ha1', HA1), ('Hb1', HB1), ('Hs1', HS1), ('Ha2', HA2), ('Hb2', HB2), ('Hs2', HS2)]\
+                 + [('Ru%d' % r, RACE_U[r]) for r in range(ROUNDS)] + [('Rv%d' % r, RACE_V[r]) for r in range(ROUNDS)]:
         f.write(f"{v} >{nm}\n")
 print(f"stencils: {len(S)} bodies + {len(PRE)} prologues, {len(sten)} bytes; stub {len(stub)} bytes; tables.strand {os.path.getsize(f'{ROOT}/src/tables.strand')} bytes")
