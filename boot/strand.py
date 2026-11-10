@@ -304,6 +304,13 @@ def interp(src: bytes, inp: bytes):
                         idx = st.pop()
                         if len(v) < 256: raise Fail()
                         st.append([v[i] & 255 for i in idx])
+                    elif c == FSMB:
+                        q = 0; r = []
+                        for x in st.pop():
+                            i = (x & 15) * 4 + q
+                            q = v[i] & 3 if i < len(v) else 0
+                            r.append(q)
+                        st.append(r)
                     elif k in BINOPS:
                         b = st.pop(); a = st.pop(); f = BINOPS[k]
                         st.append([f(x, y) & 255 for x, y in zip(a, b)])

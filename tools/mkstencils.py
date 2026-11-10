@@ -116,6 +116,7 @@ PRE = {}   # (cls, d0) -> prologue stencil (runs once, before the line's loop)
 DISP8 = '0x1122334c'
 DISPL = '0x11223384'                # the same + 64: offset of a chunk-local vector from rsp
 DISP16 = '0x11223354'               # the same + 16: a vector's byte-table pointer
+DISP24 = '0x1122335c'               # the same + 24: a vector's packed automaton table pointer
 def st(cls, d, text, pre=None):
     S[(cls, d)] = text
     if pre is not None: PRE[(cls, d)] = pre
@@ -357,6 +358,93 @@ for d in range(1, 9):
     if d <= 7:
         st(BKW('dup'), d, f"  vmovdqa32 zmm{d},zmm{r}")
         st(SCALB, d, f"  vpbroadcastb zmm{d},byte ptr [rbx+{DISP}]")
+# ---- automata: `x /t` -- the state of a 4-state automaton after each byte, as a scan of functions.
+# A transition function is 4 bytes (next state from states 0..3), so one fits in a dword and composing
+# two is one vpshufb. The 64 bytes of a chunk are taken as 16 groups of 4. Register t (zmm8+t) gets the
+# functions of bytes 4g+t, one dword per group g: `vpermd` looks them up by class. Level 1 composes
+# across the four registers (3 vpshufb for all 16 groups); level 2 is a Kogge-Stone scan over the 16
+# group functions in one register; the carry (the function from the start of the line, kept xor
+# identity so that zero means "nothing read yet") is composed in last. vpshufb indexes within
+# 128-bit lanes, so indices carry their dword's offset 4j ("pre-offset"); a function shifted by one
+# or two dwords is fixed up by adding 4 or 8, a shift by 4 or 8 dwords needs nothing.
+# Constants live in the stub: [rbx-960] offsets, [rbx-896] identity|offsets, [rbx-832..] dwords and masks.
+for d in range(1, 9):
+    r = d - 1; C = 16 + r
+    st(FSMB, d, f"""  mov rsi,[rbx+{DISP24}]
+  vpermd zmm8,zmm{r},[rsi]
+  vpsrld zmm24,zmm{r},8
+  vpermd zmm9,zmm24,[rsi]
+  vpsrld zmm24,zmm{r},16
+  vpermd zmm10,zmm24,[rsi]
+  vpsrld zmm24,zmm{r},24
+  vpermd zmm11,zmm24,[rsi]
+  vmovdqu64 zmm26,[rbx-960]
+  vmovdqu64 zmm12,[rbx-896]
+  vpord zmm8,zmm8,zmm26
+  vpshufb zmm9,zmm9,zmm8
+  vpord zmm9,zmm9,zmm26
+  vpshufb zmm10,zmm10,zmm9
+  vpord zmm10,zmm10,zmm26
+  vpshufb zmm11,zmm11,zmm10
+  vpord zmm11,zmm11,zmm26
+  valignd zmm24,zmm11,zmm12,15
+  vpaddd zmm24,zmm24,dword ptr [rbx-832]{{1to16}}
+  vpshufb zmm25,zmm11,zmm24
+  valignd zmm24,zmm25,zmm12,14
+  vpaddd zmm24,zmm24,dword ptr [rbx-828]{{1to16}}
+  vpshufb zmm25,zmm25,zmm24
+  valignd zmm24,zmm25,zmm12,12
+  vpshufb zmm25,zmm25,zmm24
+  valignd zmm24,zmm25,zmm12,8
+  vpshufb zmm25,zmm25,zmm24
+  vpxord zmm24,zmm{C},zmm12
+  vpshufb zmm25,zmm25,zmm24
+  valignd zmm24,zmm25,zmm24,15
+  vpaddd zmm24,zmm24,dword ptr [rbx-832]{{1to16}}
+  valignd zmm25,zmm25,zmm25,15
+  vpbroadcastd zmm{C},xmm25
+  vpxord zmm{C},zmm{C},dword ptr [rbx-820]{{1to16}}
+  vpshufb zmm24,zmm24,zmm26
+  kmovq k1,[rbx-816]
+  kmovq k2,[rbx-808]
+  kmovq k3,[rbx-800]
+  kmovq k4,[rbx-792]
+  vpshufb zmm{r}{{k1}}{{z}},zmm8,zmm24
+  vpshufb zmm{r}{{k2}},zmm9,zmm24
+  vpshufb zmm{r}{{k3}},zmm10,zmm24
+  vpshufb zmm{r}{{k4}},zmm11,zmm24
+  vpandd zmm{r},zmm{r},dword ptr [rbx-824]{{1to16}}""", pre=f"""  lea rcx,[rbx+{DISP}]
+  mov rsi,[rcx]
+  mov rdx,[rcx+8]
+  mov r10d,64
+  cmp rdx,r10
+  cmova rdx,r10
+  mov r10,-1
+  bzhi r10,r10,rdx
+  kmovq k1,r10
+  mov rdx,r13
+  add r13,64
+  cmp r13,[rbx-64]
+  jbe 7f
+  call r14
+7:
+  mov [rcx+24],rdx
+  vmovdqu32 zmm24{{k1}}{{z}},[rsi]
+  vpmovdb [rdx],zmm24
+  kshiftrq k1,k1,16
+  vmovdqu32 zmm24{{k1}}{{z}},[rsi+64]
+  vpmovdb [rdx+16],zmm24
+  kshiftrq k1,k1,16
+  vmovdqu32 zmm24{{k1}}{{z}},[rsi+128]
+  vpmovdb [rdx+32],zmm24
+  kshiftrq k1,k1,16
+  vmovdqu32 zmm24{{k1}}{{z}},[rsi+192]
+  vpmovdb [rdx+48],zmm24
+  vmovdqu8 zmm24,[rdx]
+  vpandd zmm24,zmm24,dword ptr [rbx-824]{{1to16}}
+  vmovdqu8 [rdx],zmm24
+  vpxord zmm{C},zmm{C},zmm{C}
+  or dword ptr [rbx-712],{1 << (24 + r)}""")
 st(SUMB, 1, """  vmovdqu8 zmm24{k6}{z},zmm0
   vpxord zmm25,zmm25,zmm25
   vpsadbw zmm24,zmm24,zmm25
@@ -397,7 +485,7 @@ def assemble(name):
     return open(f'{B}/{name}.bin', 'rb').read(), syms
 
 code, syms = assemble('stencils')
-PH = {bytes.fromhex('44332211'): 0, bytes.fromhex('4c332211'): 8, bytes.fromhex('84332211'): 64, bytes.fromhex('54332211'): 16}
+PH = {bytes.fromhex('44332211'): 0, bytes.fromhex('4c332211'): 8, bytes.fromhex('84332211'): 64, bytes.fromhex('54332211'): 16, bytes.fromhex('5c332211'): 24}
 def extract(blob):
     """find the (at most one) operand placeholder; return (bytes with it zeroed, pos+1 or 0, addend)"""
     blob = bytearray(blob); pos, add = 0, 0

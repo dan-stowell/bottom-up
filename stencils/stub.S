@@ -3,8 +3,9 @@
 # See SCALAR_LEDGER.md.
 #
 # Layout contract with the stencils (rbx = address of the first byte after this blob):
+#   [rbx-960..-768) constants of the automaton stencils (see the end of this file)
 #   [rbx-712] carries the current line uses: bit r = running sum in zmm16+r, bit 8+r = running max
-#             in zmm8+r, bit 16+r = prev in zmm16+r
+#             in zmm8+r, bit 16+r = prev in zmm16+r, bit 24+r = automaton function in zmm16+r
 #   [rbx-708] chunk size of the current line: 16 (dword lanes) or 64 (byte lanes)
 #   [rbx-704] out stride of the current line: 0 = no out sink, 1 = out, 4 = out4
 #   [rbx-696] fork threshold: lines with at least this many elements may run on all cores
@@ -299,6 +300,13 @@ dojob:                              # r13 = this thread's block; continues at [r
 dj_warm:
   cmp dword ptr [rip+j_mode],1
   jne dj_run
+  mov eax,[rbx-712]                 # an automaton's dry pass must report the function of its range
+  .irp i,16,17,18,19,20,21,22,23    # alone, so forget what the warm-up chunk did to it
+  bt eax,\i+8
+  jnc 1f
+  vpxord zmm\i,zmm\i,zmm\i
+1:
+  .endr
   savecar r13+256
   kxorq k5,k5,k5
   lea r14,[rip+justret]
@@ -408,7 +416,7 @@ fblock:
   mov rcx,r12                       # rcx = end of this block
   mov rdx,[rip+f_blk]               # block length: everything, unless ...
   mov eax,[rbx-712]
-  test eax,0xffff
+  test eax,0xff00ffff
   jz 2f
   mov rdx,[rip+f_blkscan]           # ... the line has scans (first a small probe block) ...
   cmp dword ptr [rip+f_probe],0
@@ -462,7 +470,7 @@ fblock:
   dec ecx
   jnz 5b
   mov eax,[rbx-712]
-  test eax,0xffff
+  test eax,0xff00ffff
   jnz fscan
   mov dword ptr [rip+j_mode],0      # plain line: one pass
   lea rax,[rip+fgood]
@@ -506,8 +514,17 @@ fs4:
 fs5:
   lea r9d,[rdx+8]
   bt eax,r9d
-  jnc fs6
+  jnc fs55
   vmovdqa32 zmm24,zmm25
+  jmp fs6
+fs55:
+  lea r9d,[rdx+16]
+  bt eax,r9d
+  jnc fs6                           # automaton: IN[t] = OUT[t-1] o IN[t-1] (both stored xor identity)
+  vpxord zmm24,zmm24,dword ptr [rbx-896]{1to16}
+  vpxord zmm25,zmm25,dword ptr [rbx-896]{1to16}
+  vpshufb zmm24,zmm25,zmm24
+  vpxord zmm24,zmm24,dword ptr [rbx-896]{1to16}
 fs6:
   vmovdqu32 [r10+rsi+4096+1280],zmm24
   inc edx
@@ -530,7 +547,11 @@ fs7:
   mov eax,[rbx-712]
   mov r9d,eax
   shr r9d,16
+  and r9d,0xff
   or eax,r9d                        # bits 0..7: zmm16+r in use; bits 8..15: zmm8+r in use
+  mov r9d,eax
+  shr r9d,24
+  or eax,r9d
 fs8:
   xor edx,edx
 fs9:
@@ -742,6 +763,13 @@ f_blkout:   .quad 0x400000             #   bytes of output per block
 f_a28:    .fill 64,1,0
 f_a29:    .fill 64,1,0
   .balign 64
+  .long 0,0x04040404,0x08080808,0x0c0c0c0c, 0,0x04040404,0x08080808,0x0c0c0c0c   # [rbx-960] dword offsets
+  .long 0,0x04040404,0x08080808,0x0c0c0c0c, 0,0x04040404,0x08080808,0x0c0c0c0c   #   within a 128-bit lane
+  .long 0x03020100,0x07060504,0x0b0a0908,0x0f0e0d0c, 0x03020100,0x07060504,0x0b0a0908,0x0f0e0d0c   # [rbx-896]
+  .long 0x03020100,0x07060504,0x0b0a0908,0x0f0e0d0c, 0x03020100,0x07060504,0x0b0a0908,0x0f0e0d0c   #   identity | offsets
+  .long 0x04040404,0x08080808,0x03030303,0x0f0e0d0c                             # [rbx-832] -828 -824 -820
+  .quad 0x1111111111111111,0x2222222222222222,0x4444444444444444,0x8888888888888888   # [rbx-816..-784)
+  .fill 16,1,0
   .fill 128,1,0                     # runtime variables [rbx-768 .. rbx-640)
   .fill 512,1,0
   .long 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15

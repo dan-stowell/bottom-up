@@ -11,8 +11,8 @@ PRELUDE = ' '.join(KEYWORDS)
 
 (VEC, VECLEAD, SCAL, SCALLEAD, LEN, LENLEAD, GATHER, IOTA,
  STOREV, STORES, SUM, MAX, COMPRESS, SCATTER, TEE, TEEC, TEEL, VECL, LENL,
- SCALB, TABLEB, SUMB, TEEBX, VECBX, BAD, VECT) = range(K, K + 26)
-BK = K + 26                         # byte-line variant of keyword k is class BK + k
+ SCALB, TABLEB, SUMB, TEEBX, VECBX, BAD, VECT, FSM, FSMB) = range(K, K + 28)
+BK = K + 28                         # byte-line variant of keyword k is class BK + k
 NCODE = BK + K                      # classes below this emit code
 DATA, STR, NONE, ERR = NCODE, NCODE + 1, NCODE + 2, NCODE + 3
 NCLS = NCODE + 4
@@ -53,6 +53,10 @@ BYTEOF = list(range(NCLS))
 for _c in range(NCODE): BYTEOF[_c] = BAD
 for _k in range(K): BYTEOF[_k] = BK + _k
 BYTEOF[SCAL], BYTEOF[GATHER], BYTEOF[SUM], BYTEOF[TEE], BYTEOF[VEC] = SCALB, TABLEB, SUMB, TEEBX, VECBX
+# Automata. `x /t` on a byte line replaces each element by the state of a 4-state automaton after
+# reading it: state' = t[(x & 15) * 4 + state] & 3 (entries past the end of t, or past 64, are 0);
+# the state before the first element is 0. It exists on byte lines only (FSM itself has no stencil).
+BYTEOF[FSM] = FSMB
 LOCALOF[TEEBX], LOCALOF[VECBX] = TEEL, VECL
 ISTEE = [0] * NCLS                  # ':' tees, before chunk-local classification
 ISTEE[TEE] = ISTEE[TEEBX] = 1
@@ -70,7 +74,7 @@ def opclass(c):
     if 48 <= c <= 57: return O_DIGIT
     if c == 34: return O_QUOTE
     return O_OTHER
-SIGILS = '>@~?!$^&=:%'                # sigil index = position + 1
+SIGILS = '>@~?!$^&=:%/'                # sigil index = position + 1
 def sigil(c):
     return SIGILS.index(chr(c)) + 1 if c < 128 and chr(c) in SIGILS else 0
 
@@ -84,18 +88,19 @@ _s('~', O_UPPER, IOTA); _s('~', O_DIGIT, IOTA)
 _s('?', O_LOWER, COMPRESS); _s('!', O_LOWER, SCATTER)
 _s('$', O_UPPER, SUM); _s('^', O_UPPER, MAX)
 _s('&', O_LOWER, LEN); _s('=', O_LOWER, DATA)
-_s(':', O_LOWER, TEE); _s('%', O_LOWER, TEEC)
+_s(':', O_LOWER, TEE); _s('%', O_LOWER, TEEC); _s('/', O_LOWER, FSM)
 
 # which classes define / use their operand variable
 DEFINES = [0] * NCLS
 for c in [STOREV, STORES, SUM, MAX, COMPRESS, DATA, TEE, TEEC, TEEL, SUMB, TEEBX]: DEFINES[c] = 1
 USES = [0] * NCLS
-for c in [VEC, VECLEAD, SCAL, SCALLEAD, LEN, LENLEAD, GATHER, IOTA, SCATTER, VECL, LENL, SCALB, TABLEB, VECBX]: USES[c] = 1
+for c in [VEC, VECLEAD, SCAL, SCALLEAD, LEN, LENLEAD, GATHER, IOTA, SCATTER, VECL, LENL, SCALB, TABLEB, VECBX, FSM, FSMB]: USES[c] = 1
 READSVEC = [0] * NCLS               # reads vector *contents* (conflicts with an in-place scatter)
-for c in [VEC, VECLEAD, GATHER, VECL, TABLEB, VECBX]: READSVEC[c] = 1
+for c in [VEC, VECLEAD, GATHER, VECL, TABLEB, VECBX, FSM, FSMB]: READSVEC[c] = 1
 CARRY = [0] * NCLS                  # 1: uses sum-carry register of its depth, 2: max-carry
 CARRY[KW['scan']] = 1; CARRY[KW['prev']] = 1; CARRY[KW['scanmax']] = 2
 CARRY[BK + KW['prev']] = 1
+CARRY[FSMB] = 1                    # the automaton's carry (a transition function) lives in zmm16+r too
 USES[VECT] = 1; READSVEC[VECT] = 1
 
 MAXNAME = 64                        # longest name (hash weight table size)
