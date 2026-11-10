@@ -37,6 +37,10 @@ CASES = [
  # the two programs Codex found: a 32-bit hash collision under the old hash, and many distinct names
  (b'1 >xfntrxrmgiq\n2 >xqhhsigtfyu\n', 0), (b''.join(b'1 >X%d\n' % i for i in range(3000)), 0), (b'input 1 :k + end\n', 0), (b'1 :k >A\nk out\n', 0),
  (b"input\xff\x80 out\n", E_UNDEF), (b"\xff out\n", E_TOKEN), (b'\x01\x02input out\n', 0),
+ # Four-round race loss: a 16-name collision-witness tree (not a fingerprint collision).
+ # Each unresolved name has a later blocker in each round. See reviews/audit_checks.py.
+ (b''.join(b'0 >X%d\n' % n for n in
+           (1, 419, 444, 813, 892, 1337, 1388, 1827, 1846, 1858, 2124, 2129, 2563, 2713, 2816, 2835)), E_RACE),
 ]
 def main():
     comp = sys.argv[1]

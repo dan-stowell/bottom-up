@@ -14,6 +14,7 @@ a value is the zmm register it lives in. There is nothing else in the language.
 
 | read this | for |
 |---|---|
+| [AUDIT.md](AUDIT.md) | correctness and benchmark reproduction audit (2026-11-10), including counterexamples |
 | [REPORT.md](REPORT.md) | what is new, what was measured, what failed, what next |
 | [SWEETSPOT.md](SWEETSPOT.md) | where this model beats C by 5-12x, where it does not, and the I/O floor |
 | [DESIGN.md](DESIGN.md) | the language and why each compiler phase disappears |
