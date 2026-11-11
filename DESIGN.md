@@ -148,6 +148,27 @@ now these two: one line copies every token's three stencil slices, three lines s
 operands. Before, every code byte was a dword that gathered its stencil byte, and every
 operand was four byte scatters.
 
+### What a byte line can say (added for lexing)
+
+| form | meaning |
+|---|---|
+| `x /t`, `x \t` | a 4-state or 8-state automaton over the line: the state after each byte |
+| `peek`, `back`, `back2` | the line's own input one byte ahead, one behind, two behind (0 where there is none). Loads, not carries. |
+| `x` (a stored byte vector) | that vector, element for element |
+| `m %x` | the positions of the nonzero lanes, as a dword vector |
+| `v m ^x` | the bytes of `v` where `m` is nonzero, packed into a byte vector |
+| `>x`, `:x` | the bytes, stored |
+
+and what a dword line can do with the results: `i [x` and `i {x` (a byte or a dword of a
+byte vector by index), `'x` (a byte vector lane for lane), `v .x` (store low bytes),
+`s n d (src )dst` (slices), `v p }x` (a dword at a byte position). GOLEX.md is a worked
+example that uses all of them.
+
+A line has **eight carry registers** shared by `prev`, the automata and the two sinks `%`
+and `^` (each keeps its count in one). Two carry users may not sit at the same stack depth
+(`E_CARRY`); a line that needs more than the stack gives it pads with zeros to reach a free
+depth, which is ugly and is on the list.
+
 ### Failure and output
 
 A runtime check that fails exits with status 99, `halt` with its own status. Output is
