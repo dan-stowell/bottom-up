@@ -460,7 +460,7 @@ BBIN = {'+': 'vpaddb', '-': 'vpsubb', '&': 'vpandd', '|': 'vpord', '^': 'vpxord'
 for d in range(2, 9):
     a, b = d - 2, d - 1
     for k, ins in BBIN.items(): st(BKW(k), d, f"  {ins} zmm{a},zmm{a},zmm{b}")
-    for k, imm in CMP.items(): st(BKW(k), d, f"  vpcmpub k1,zmm{a},zmm{b},{imm}\n  vpmovm2b zmm{a},k1\n  vpabsb zmm{a},zmm{a}")
+    for k, imm in CMP.items(): st(BKW(k), d, f"  vpcmpub k1,zmm{a},zmm{b},{imm}\n  vmovdqu8 zmm{a}{{k1}}{{z}},[rbx-1024]")     # 64 bytes of 1
     st(BKW('*'), d, f"""  vpmullw zmm24,zmm{a},zmm{b}
   vpsrlw zmm25,zmm{a},8
   vpsrlw zmm26,zmm{b},8

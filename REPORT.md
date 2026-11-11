@@ -267,3 +267,29 @@ generously. What changed:
 
 Stub: 5,888 bytes. Tests: 110 cases and both fuzzers on three stages, 39 pool programs
 (4,836 runs, 80 path checks), all 256 four-state transition functions.
+
+## Addendum 5 — from benchmarks to a compiler phase of a real language (2026-11-10/11)
+
+The direction changed: make the language carry real compilation work, and measure in
+absolute time. In order:
+
+- **A bridge from byte lines to dword lines** (positions out of a byte line, byte vectors
+  read by index) and the compiler's own lexer moved onto it; names became four dwords;
+  code emission became slice copies and dword stores. The self-hosted compiler went from
+  52 ms to 45 ms for 1 MB of source (the scalar C one: 41 ms) and from 2.5x the C
+  compiler's memory to a little under it. On one core it is still about 10% slower than
+  scalar C (fourth audit: 395 ms against 360 at 8.3 MB); on eight cores, 312 against 369.
+- **What it executes** is now measured, not estimated (`tools/simdratio.c`): compiling its
+  own source, 10.2M instructions, 57% vector, 3% gather/scatter, 9% mask, 31% scalar. The
+  3% is where about half the time goes.
+- **Linking** was taken apart (LINKING.md): the name join is mostly string handling and can
+  leave the link; what remains is prefix sums, a gather and a streaming copy. A 30-line
+  linker in Strand produces the C reference's 262 MB image byte for byte, in 303 ms
+  against 238.
+- **A Go lexer** (GOLEX.md): byte-identical to `go/scanner` on 92.5 MB of the standard
+  library, 630 ms on one core and 215 on eight, against 601 ms for `go/scanner`'s scan.
+
+Language additions this round: byte vectors and positions from byte lines, `[x` `{x` `}x`,
+`.x` `'x` `<x` `,x`, slice copies `(src )dst`, 8-state automata `\t`, `peek` `back`
+`back2`, ten-digit literals, a static type rule and a wider alias rule. Thread pool:
+position sinks as sum carries, a warmed-up dry pass, retries.
