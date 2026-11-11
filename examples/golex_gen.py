@@ -59,7 +59,6 @@ def mstep(cl, s):
     if s == R: return C if cl == 4 else R
     return C if cl in (1, 3) else Q
 mdfa = [mstep(cl, s) for cl in range(10) for s in range(8)]
-esc = [0, 0, 0, 0, 1, 0, 0, 0]              # class 1 = backslash: toggles; anything else: clears
 
 # ---- 2. words. classes: 0 not a word byte, 1 letter, 2 digit, 3 e, 4 p, 5 x, 6 '.', 7 '.' before a digit, 8 sign
 def wclass(c):
@@ -122,10 +121,8 @@ def h(p, w): return (((w[0] * p[0] + w[1] * p[1] + w[2] * p[2]) & M32) >> p[3]) 
 import random
 _r = random.Random(7)
 kwp = find([tuple(words(k)) for k in KW], 256, ((_r.randrange(1, 999999999, 2), _r.randrange(1, 999999999, 2), _r.randrange(1, 999999999, 2), _r.randrange(8, 25)) for _ in range(200000)))
-kwk = [0] * 256; kwa = [[0] * 256 for _ in range(5)]
-for k, kind in KW.items():
-    w = words(k); i = h(kwp, w); kwk[i] = kind
-    kwa[0][i], kwa[1][i], kwa[2][i], kwa[3][i], kwa[4][i] = w[0] & 65535, w[0] >> 16, w[1] & 65535, w[1] >> 16, w[2]
+kwk = [0] * 256
+for k, kind in KW.items(): kwk[h(kwp, words(k))] = kind
 def oh(p, k): return ((k[0] * p[0] + k[1] * p[1] + k[2] * p[2]) >> p[3]) & 255
 h_save = h; h = oh
 okeys = [(ord(o[0]), ord(o[1]) if len(o) > 1 else 0, len(o)) for o in OPS]
@@ -134,46 +131,54 @@ opk = [0] * 256
 for o, kind in OPS.items(): opk[oh(opp, (ord(o[0]), ord(o[1]) if len(o) > 1 else 0, len(o)))] = kind
 semitab = [1 if k in SEMI_AFTER else 0 for k in range(128)]
 
-for n, v in (('gk', gk), ('mcls', mcls), ('mdfa', mdfa), ('esc', esc), ('gw', gw), ('wdfa', wdfa), ('gfc', gfc), ('gsc', gsc), ('gop', gop), ('e2t', e2t), ('odfa', odfa),
-             ('kwk', kwk), ('kwal', kwa[0]), ('kwah', kwa[1]), ('kwbl', kwa[2]), ('kwbh', kwa[3]), ('kwc', kwa[4]), ('opk', opk), ('semitab', semitab)):
+# escape automaton: 0 plain, 1 a backslash that escapes the next byte, 2 an escaped byte
+esc = [0, 2, 0, 0,  1, 2, 1, 0]
+# from (kind, context after the byte): 0 nothing; 1 a byte of a string, raw string or rune (closing quote included);
+# 3 the same and the token starts here unless the byte is escaped; 5 the same and the token starts here
+def strv(k, m):
+    if m == R and k == 4: return 5
+    if m == S and k == 2 or m == Q and k == 3: return 3
+    if m >= S: return 1
+    return 1 if m == C and k in (2, 3, 4) else 0
+strt = [strv(i & 7, i >> 3) if i < 64 else 0 for i in range(256)]
+# what a token is, from its first byte: 0 operator, 1 identifier, 2 number, 3 string, 4 rune, 5 newline, 6 '.' (a number if a digit follows)
+fam = tab256(lambda c: 5 if c == 10 else 3 if c in (34, 96) else 4 if c == 39 else 6 if c == 46 else 2 if 48 <= c <= 57 else 1 if gw[c] in (1, 3, 4, 5) else 0)
+kww = [[0] * 256 for _ in range(3)]
+for k, kind in KW.items():
+    w = words(k); i = h_save(kwp, w)
+    for j in range(3): kww[j][i] = w[j]
+
+for n, v in (('gk', gk), ('mcls', mcls), ('mdfa', mdfa), ('esc', esc), ('strt', strt), ('gw', gw), ('wdfa', wdfa), ('gfc', gfc), ('gsc', gsc), ('gop', gop), ('e2t', e2t), ('odfa', odfa),
+             ('fam', fam), ('kwk', kwk), ('kwa', kww[0]), ('kwb', kww[1]), ('kwc', kww[2]), ('opk', opk), ('semitab', semitab)):
     L.append(data(n, v))
 L += f'''0 1 - >Neg
 <text
 &text >N
 N 1 - >Tm
-# 1. context of every byte: 0 code, 1 code (just after */), 2 // comment, 3 /* (just opened), 4 /* comment, 5 string, 6 raw string, 7 rune
-bytes @gk :k dup prev :pk 5 = pk 6 = 2 * + 8 * + 0 k 7 = /esc dup prev swap drop + 32 * + @mcls \\mdfa >m
-# 2-4. words, operators, and where tokens start and end
-#   code  this byte is program text: in code before and after it, and not the '/' that opens a comment
+# One line over the bytes. Left behind: the positions where tokens start (ev) and end (te), and the word
+# state of every byte (ws). A newline outside strings counts as a token here; most are dropped later.
+#   k     kind of byte;  es  escape state (2: this byte is escaped)
+#   m     context after the byte: 0 code, 1 code (just after */), 2 // comment, 3 /* (just opened), 4 /* comment,
+#         5 string, 6 raw string, 7 rune
+#   sv    string value of (k, m): see strt
+#   code  the byte is program text: in code, not a closing quote, not the '/' that opens a comment
 #   ws    word state after the byte: 0 none, 1 identifier, 2 decimal, 3 fraction, 4 after e/p, 5 exponent, 6 hex
-#   t     what (previous byte, this byte) is as an operator: 0 nothing, 1 an operator, 2 "..", 3 one that '=' extends
+#   t,pt  what (previous byte, this byte) and (the two before) are as operators: 0 nothing, 1 an operator,
+#         2 "..", 3 an operator that '=' extends
 #   os    operator state: how many bytes of the current operator have been read
-#   tc    token byte;  ts  first byte of a token;  ev  token starts and newlines outside strings;  te  just past a token
-bytes :c prev :p 0 m prev :pm drop drop pm 1 <= m 1 <= & c 47 = peek 47 = peek 42 = | & 1 ^ & :code c @gw c 46 = peek @gw 2 = & + * \\wdfa :ws 0 over prev :pws drop drop 0 != pws 0 = & :wst drop @gfc c @gsc 24 * + @e2t :t 0 0 0 t prev :pt drop drop drop drop dup 1 = swap 3 = | t 2 = peek 46 = & | pt 3 = c 61 = & pt 2 = c 46 = & | 2 * + 1 + c @gop code * ws 0 = * * :oc 0 0 0 0 oc /odfa :os drop drop drop drop drop ws 0 != os 0 != | m 5 >= | pm 5 >= | :tc wst os 1 = | m 5 >= pm 1 <= & | :ts c 10 = pm 5 < & | %ev 0 0 0 0 tc prev :ptc drop drop drop drop drop 1 ^ ts | ptc & %te end
-# events -> tokens. tix: the index of the last token at or before each event
-ev dup dup [text 10 = :isnl 1 ^ dup scan 1 - :tix drop %start end
-&start >NT
-~NT 0 * N + >tend
-te idx !tend
-# 5. kinds. A token is a string or rune (by its first byte), a word (by its word state), or an operator.
-start [text :c0 34 = c0 96 = | {STRING} * c0 39 = {CHAR} * + >kstr
-tend start - >len
-# numbers: the word state after the last byte says integer or float; a final 'i' says imaginary
-tend 1 - :e1 [text 105 = {IMAG} e1 [ws :we 2 = we 6 = | {INT} {FLOAT} sel sel >knum
-# identifiers: a keyword if its first twelve bytes hash to one and are equal to it
-start Tm min {{text Neg 4 len 4 min - 8 * >> & :w0 start 4 + Tm min {{text Neg 4 len 4 - 0 max 4 min - 8 * >> & :w1 start 8 + Tm min {{text Neg 4 len 8 - 0 max 4 min - 8 * >> & :w2 drop drop end
-w0 {kwp[0]} * w1 {kwp[1]} * + w2 {kwp[2]} * + {kwp[3]} >> 255 & :hk @kwah 16 << hk @kwal | w0 = hk @kwbh 16 << hk @kwbl | w1 = & hk @kwc w2 = & len 12 <= & hk @kwk * :kk 0 = {IDENT} * kk + >kid
-# operators: a perfect hash of (first byte, second byte, length)
-start 1 + Tm min [text len 1 > * {opp[1]} * c0 {opp[0]} * + len {opp[2]} * + {opp[3]} >> 255 & @opk >kop
-kstr 0 > kstr start [ws :w1s 1 = kid w1s 0 > knum kop sel sel sel >kind
-# a newline is a semicolon if the event before it is a token that asks for one
-tix 0 max @kind >ek
-ek @semitab tix 0 >= & isnl & isnl prev 1 ^ & isnl 1 ^ | >keep
+#   tc    token byte;  ts  first byte of a token
+bytes :c @gk :k back @gk :bk 5 = bk 6 = 2 * + 8 * + 0 k 7 = /esc :es 2 = 32 * + + @mcls \\mdfa :m 8 * k + @strt :sv m 0 = sv 0 = & c 47 = peek 47 = peek 42 = | & 1 ^ & :code c @gw c 46 = peek @gw 2 = & + * \\wdfa :ws 0 over prev :pws drop drop 0 != pws 0 = & :wst drop back @gfc c @gsc 24 * + @e2t :t dup 1 = swap 3 = | t 2 = peek 46 = & | back2 @gfc back @gsc 24 * + @e2t :pt 3 = c 61 = & pt 2 = c 46 = & | 2 * + 1 + c @gop code * ws 0 = * * :oc 0 0 oc /odfa :os drop drop drop drop k 1 = m 6 != & :nl ws 0 != | os 0 != | sv 0 != | :tc wst os 1 = | nl | sv 5 = | sv 3 = es 2 != & | :ts %ev 0 0 0 tc prev :ptc drop drop drop drop 1 ^ ts | ptc & %te end
 &ev 1 - >Em
-isnl 1 ^ ek @semitab & idx Em = & $Ls
-ev keep outif4
+&te >Te
+Te 1 - >Tem
+# One line over the tokens: kind from the first bytes (w0), the length, the word state at the end; keywords
+# by a perfect hash of the first twelve bytes. kc = kind, plus 256 if a newline after this token is a semicolon.
+ev :s idx Te < idx Tem min 0 max @te N sel :e over - :len drop dup {{text :w0 255 & :c0 @fam :f0 6 = w0 8 >> 255 & :c1 @fam 2 = & f0 2 = | :isnum drop e 1 - :e1 [text 105 = {IMAG} e1 [ws :we 2 = we 6 = | {INT} {FLOAT} sel sel :knum drop w0 Neg 4 len 4 min - 8 * >> & :a s 4 + Tm min {{text Neg 4 len 4 - 0 max 4 min - 8 * >> & :b s 8 + Tm min {{text Neg 4 len 8 - 0 max 4 min - 8 * >> & :d drop drop drop a {kwp[0]} * b {kwp[1]} * + d {kwp[2]} * + {kwp[3]} >> 255 & :hk @kwa a = hk @kwb b = & hk @kwc d = & len 12 <= & hk @kwk * :kk 0 = {IDENT} * kk + :kid drop c1 len 1 > * {opp[1]} * c0 {opp[0]} * + len {opp[2]} * + {opp[3]} >> 255 & @opk :kop drop f0 1 = kid kop sel :x1 drop isnum knum x1 sel :x2 drop f0 4 = {CHAR} x2 sel :x3 drop f0 3 = {STRING} x3 sel :x4 drop f0 5 = 0 x4 sel :kd @semitab 256 * kd + swap drop >kc
+# a newline is a semicolon if the token before it asks for one
+kc 255 > idx Em = & $Ls
+ev kc 255 & 0 != kc prev 255 > | outif4
 ~1 0 * N + Ls outif4
-isnl 1 ^ ek {SEMI} sel keep outif4
+kc 255 & :kk2 0 = {SEMI} * kk2 + kk2 0 != kc prev 255 > | outif4
 ~1 0 * {SEMI} + Ls outif4
 '''.split('\n')
 sys.stdout.write('\n'.join(L))
