@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """lineprof.py INPUT [COMPILER] -- where does the self-hosted compiler spend its time?
-There is no profiler on this VM, so: compile every prefix of src/compiler.strand (each line is one
+(Written before tools/perfprof.c, which uses the CPU's counters and is the better instrument.) This one works by timing: compile every prefix of src/compiler.strand (each line is one
 loop and a prefix is a valid program), run each prefix on INPUT, and report the differences between
 consecutive prefixes: user ms, system ms, page faults, grouped by the section comments. Vectors die
 earlier in a truncated program than in the full one, so memory reuse differs slightly; the totals

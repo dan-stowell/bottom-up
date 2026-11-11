@@ -8,7 +8,7 @@
 // separately for the runtime stub (the first STUBLEN bytes after the 112-byte ELF header) and for the
 // code the compiler generated. Output is written to stderr; the program's stdout goes to /dev/null.
 // Counts are instructions, not time and not elements: a vector instruction is one whether it moves
-// 16 dwords or 64 bytes. There is no profiler on this VM, so this is also the only exact answer to
+// 16 dwords or 64 bytes. (Where the time goes is tools/perfprof.c's business.) This is the exact answer to
 // "how much of the run is the scalar glue". About a microsecond per instruction.
 #define _GNU_SOURCE
 #include <fcntl.h>

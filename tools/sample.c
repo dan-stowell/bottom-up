@@ -2,7 +2,7 @@
 // The child runs freely; every 250 microseconds it is interrupted, its instruction pointer is recorded,
 // and it continues. Writes "address count" lines to the file named by SAMPLE_OUT (default sample.txt);
 // tools/whereis.py attributes them to the program's tokens. One thread: run under `taskset -c N`.
-// There is no perf on this VM; this is the substitute. Sampling skews towards instructions after slow ones.
+// Superseded by tools/perfprof.c (the CPU's counters do work here); kept because REVIEWS.md, review 8, is about it.
 #define _GNU_SOURCE
 #include <fcntl.h>
 #include <signal.h>

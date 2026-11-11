@@ -296,3 +296,29 @@ Language additions this round: byte vectors and positions from byte lines, `[x` 
 `.x` `'x` `<x` `,x`, slice copies `(src )dst`, 8-state automata `\t`, `peek` `back`
 `back2`, ten-digit literals, a static type rule and a wider alias rule. Thread pool:
 position sinks as sum carries, a warmed-up dry pass, retries.
+
+## Addendum 6 — the lexer made right, and a pool that runs it once (2026-11-11)
+
+- **The fifth audit** (REVIEWS.md, review 8; unfinished like the fourth) found three inputs
+  on which the Go lexer disagreed with go/scanner, all in numbers (`x.0`, `0a`, `...0`),
+  and that the scanner the Go compiler really uses is faster than go/scanner: 497-513 ms
+  for the corpus. The word automaton was rewritten from `scanNumber`; a differential
+  fuzzer (`tests/golex_fuzz.py`) now compares the two lexers on random accepted input.
+- **`bytesz`**: a byte line over the input and one zero byte, so that a file need not end
+  in a newline.
+- **A one-pass thread pool** for lines whose only running sums are the counts of their
+  sinks: states guessed from a warm-up and verified, results written to scratch per
+  thread and copied into place in parallel, only wrong ranges redone, a block that cannot
+  be fixed run serially without giving up the rest of the line. The lexer on 92.5 MB:
+  454-470 ms on one CPU, 295-306 on two (was 382), 171-177 on four (204), 116-135 on eight
+  (131).
+- **Measurement**: the CPU's counters work on this VM after all. `tools/perfprof.c` is a
+  real profiler; `bench/primcost.py` gives the cost of every byte-line primitive in cycles
+  (GOLEX.md has the table and what it overturned: instruction counts mislead, logic is
+  nearly free, an automaton is 50-70 cycles, and fresh memory costs 1.4 microseconds a
+  page here, which is a fifth of the lexer's time).
+
+What that says about where to go: the lexer's remaining cost is four automata, memory it
+writes once and reads once, and a keyword check that visits every token. The second of
+those is a property of the runtime, not of the lexer: every line materialises its result
+for the next. Running lines block by block is the change that would pay everywhere.
