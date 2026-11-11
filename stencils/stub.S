@@ -35,7 +35,7 @@
   .quad 0x1000                      # p_align: the last field of the program header
 _start:
   lea rbx,[rip+dataend]
-  mov r15,[rsp]                     # argc: any argument = "eager" mode, fork even tiny lines (tests)
+  mov r15,[rsp]                     # argc: one argument = "eager" mode, fork even tiny lines (tests)
   # how many CPUs may we use?
   sub rsp,128
   mov qword ptr [rsp],0
@@ -60,8 +60,13 @@ _start:
   cmp ecx,1
   je 2f
   mov eax,0x80000                   # default: split lines of 512 K elements or more
-  cmp r15,1
-  jbe 2f
+  cmp r15,3                         # two arguments: "chaos" (below, at `chaos`); three or more: chaos and eager
+  jb 11f
+  mov dword ptr [rip+f_chaos],1
+  je 2f
+11:
+  cmp r15,2
+  jb 2f
   mov eax,64
   mov qword ptr [rip+f_blk],4096
   mov qword ptr [rip+f_blkscan],4096
@@ -279,7 +284,7 @@ exit:
 # +24 last seq, +32 output end, +40 continuation, +48 reset-accumulators flag, +64 scratch,
 # +128 sum acc, +192 max acc, +256 W, +1280 IN, +2304 OUT, +3328 OUT', +4352 INw
 # (16 zmm each: zmm8..zmm23); one-pass lines: +56 rerun-this-range flag, +5376 the counts its sinks start
-# from (8 qwords), +5440 what to copy afterwards (8 x to, from, bytes).
+# from (8 qwords), +5440 what to copy afterwards (8 x to, from, bytes), +5632 chaos: noise for its carries.
 .macro savecar base
   .irp i,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23
   vmovdqu32 [\base+(\i-8)*64],zmm\i
@@ -392,11 +397,15 @@ dj_spec:                            # speculative pass (no dry pass came before)
 1:
   .endr
   mov eax,[rbx-720]
+  vpbroadcastd zmm24,dword ptr [r13+5632]   # chaos: this range's guesses, spoiled (0 otherwise)
   .irp i,16,17,18,19,20,21,22,23
   bt eax,\i-16
-  jnc 1f
-  vpbroadcastd zmm\i,dword ptr [r13+5376+8*(\i-16)]
+  jc 1f
+  vpxord zmm\i,zmm\i,zmm24
+  jmp 2f
 1:
+  vpbroadcastd zmm\i,dword ptr [r13+5376+8*(\i-16)]
+2:
   .endr
   savecar r13+1280
   jmp dj_real0
@@ -405,8 +414,12 @@ dj_real:
   je 0f
   cmp dword ptr [r13+56],0
   jne 0f
-  vmovdqu32 zmm28,[r13+128]         # a range of a one-pass line whose carries were right: what it did stands
-  vmovdqu32 zmm29,[r13+192]
+  vmovdqu32 zmm28,[r13+128]         # a range of a one-pass line told not to rerun: what it did stands, and
+  vmovdqu32 zmm29,[r13+192]         # so do the carries it did it with (W) -- those are what fs7 must compare,
+  lea rsi,[r13+256]                 # not the ones derived since. Whether skipping was right is then fs7's
+  lea rdi,[r13+1280]                # finding, not the skipper's assumption.
+  mov ecx,128
+  rep movsq
   jmp dj_end
 0:
   cmp r13,[rip+wbase]
@@ -439,6 +452,19 @@ dj_real0:
   bt eax,\i-16
   jnc 1f
   vpbroadcastd zmm\i,dword ptr [r13+5376+8*(\i-16)]
+1:
+  .endr
+0:
+  cmp dword ptr [rip+f_chaos],0
+  je 0f
+  mov eax,0x7fff                    # chaos, of another kind: fs7 compares only the last element of a `prev`
+  kmovw k1,eax                      # carry, on the claim that nothing else of it is read. Spoil the rest,
+  vpbroadcastd zmm24,dword ptr [rip+f_rng]   # in every range, the first included.
+  mov eax,[rbx-712]
+  .irp i,16,17,18,19,20,21,22,23
+  bt eax,\i
+  jnc 1f
+  vpxord zmm\i{k1},zmm\i,zmm24
 1:
   .endr
 0:
@@ -708,6 +734,7 @@ fg4:
   inc edx
   cmp edx,8
   jb fg1
+  call chaos
   mov dword ptr [rip+j_mode],3
   lea rax,[rip+fs7]
   mov [rip+f_cont],rax
@@ -743,6 +770,36 @@ fs3:
   inc ecx
   cmp ecx,[rip+nthreads]
   jb fs2
+  call chaos
+  cmp dword ptr [rip+f_chaos],0
+  je 3f
+  mov r10,[rip+wbase]               # chaos: spoil the carries just derived (IN and INw) of the ranges chosen
+  mov ecx,1
+1:
+  add r10,8192
+  vpbroadcastd zmm24,dword ptr [r10+5632]
+  xor edx,edx
+2:
+  cmp edx,8
+  jb 21f
+  lea eax,[rdx-8]
+  bt dword ptr [rbx-720],eax        # (never a sink's count: a sink writes where its count says)
+  jc 22f
+21:
+  mov rax,rdx
+  shl rax,6
+  vpxord zmm25,zmm24,[r10+rax+1280]
+  vmovdqu32 [r10+rax+1280],zmm25
+  vpxord zmm25,zmm24,[r10+rax+4352]
+  vmovdqu32 [r10+rax+4352],zmm25
+22:
+  inc edx
+  cmp edx,16
+  jb 2b
+  inc ecx
+  cmp ecx,[rip+nthreads]
+  jb 1b
+3:
   cmp dword ptr [rip+f_spec],0
   je fs6
   # A retry of a one-pass line reruns only the ranges whose carries, as now derived, differ from the ones
@@ -780,6 +837,13 @@ ff4:
   test esi,esi
   setnz sil
   movzx esi,sil
+  cmp dword ptr [rip+f_chaos],0
+  je 5f
+  mov edi,[r10+5632]                # chaos: decide wrongly, sometimes
+  shr edi,9
+  and edi,1
+  xor esi,edi
+5:
   mov [r10+56],esi
   add r9d,esi
   inc ecx
@@ -962,6 +1026,44 @@ fsretry:                            # some carry was guessed wrong. The real pas
   dec edx
   jnz 1b
   jmp fs1
+# Chaos (two command-line arguments; tests only). Everything the pool does to *choose* the carries a range
+# starts from -- warm-ups, the dry pass, derivation, retries -- is an optimisation: a block stands only if
+# the verification at fs7 finds every range's carries equal to what the range before it ended with, and
+# otherwise it is redone. So spoiling those choices must never change a program's output. In this mode
+# about half the ranges of every pass start from carries xor-ed with noise (each range's noise is at +5632
+# of its block; the first range, which has the true carries, is never touched, nor is a sink's count,
+# which is where the sink writes). tests/pool.py and tests/fuzz_sem.py run every program this way too.
+chaos:
+  cmp dword ptr [rip+f_chaos],0
+  je 9f
+  mov r10,[rip+wbase]
+  mov ecx,1
+  mov rax,[rip+f_rng]
+1:
+  add r10,8192
+  mov rdx,rax
+  shl rdx,13
+  xor rax,rdx
+  mov rdx,rax
+  shr rdx,7
+  xor rax,rdx
+  mov rdx,rax
+  shl rdx,17
+  xor rax,rdx
+  mov rdx,rax
+  shr rdx,32
+  or edx,1
+  bt eax,8
+  jc 2f
+  xor edx,edx
+2:
+  mov [r10+5632],edx
+  inc ecx
+  cmp ecx,[rip+nthreads]
+  jb 1b
+  mov [rip+f_rng],rax
+9:
+  ret
 derive:                             # zmm24 = carry edx after a range, from IN [rdi+1280], W [rdi+256]
   vmovdqu32 zmm24,[rdi+1280]        # and the range's dry result zmm25; eax = the line's carry kinds
   cmp edx,8
@@ -1200,6 +1302,7 @@ f_maxlow: .long 0
 f_bad:    .long 0
 f_spec:   .long 0                   # 1: this block of a one-pass line is being run without a dry pass
 f_line:   .long 0                   # 1: the line is a one-pass line
+f_chaos:  .long 0                   # 1: spoil the pool's guesses (tests)
 f_nbad:   .long 0                   # blocks of this line that had to be run serially
 f_cnt:    .long 0
           .long 0
@@ -1216,6 +1319,7 @@ f_ret:    .quad 0
 f_cont:   .quad 0
 f_r13:    .quad 0
 f_r8in:   .quad 0
+f_rng:    .quad 0x9e3779b97f4a7c15  # chaos: xorshift state
 f_scr:    .quad 0                   # one-pass lines: the scratch areas
 f_tot:    .fill 64,1,0              # per sink-count register: the true count after the block
 f_blk:      .quad 0x4000000000000000   # elements per block: plain lines (everything)

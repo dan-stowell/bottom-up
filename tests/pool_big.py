@@ -30,21 +30,24 @@ def main():
         for iname, inp in ins:
             open(B + 'pb.in', 'wb').write(inp); outs = []
             for cs in sets:
-                p = subprocess.run(['taskset', '-c', ','.join(map(str, cs)), exe], stdin=open(B + 'pb.in', 'rb'), stdout=subprocess.PIPE)
-                outs.append((p.returncode, p.stdout))
+                for args in ([], ['chaos', '.']):            # chaos: the pool's guesses spoiled with noise (stub.S)
+                    p = subprocess.run(['taskset', '-c', ','.join(map(str, cs)), exe] + args, stdin=open(B + 'pb.in', 'rb'), stdout=subprocess.PIPE)
+                    outs.append((p.returncode, p.stdout))
             if outs[0][0] or any(o != outs[0] for o in outs): sys.exit(f'FAIL pool_big {name} on "{iname}": {[(o[0], len(o[1])) for o in outs]}')
     # ... and the paths meant to run did run: a copy of the binary with that entry replaced by exit_group(77)
     nm = subprocess.run(['nm', B + 'stub.o'], capture_output=True, text=True, check=True).stdout
     sym = {l.split()[-1]: int(l.split()[0], 16) for l in nm.splitlines() if len(l.split()) == 3}
     patch = bytes.fromhex('b8e7000000bf4d0000000f05'); ins = dict(ins); npath = 0
-    for name, iname, label, k, what in (('rate', 'random', 'fcopied', 2, 'pieces copied into place'), ('rate', 'nothing, then everything', 'fcopied', min(4, ncpu), 'pieces copied into place'),
+    for name, iname, label, k, what, *args in (('rate', 'random', 'fcopied', 2, 'pieces copied into place'), ('rate', 'nothing, then everything', 'fcopied', min(4, ncpu), 'pieces copied into place'),
                                         ('toggle', 'random', 'fsretry', min(4, ncpu), 'retry'), 
-                                        ('toggle, pack, prev', 'rare toggles', 'fsretry', min(4, ncpu), 'retry')):
+                                        ('toggle, pack, prev', 'rare toggles', 'fsretry', min(4, ncpu), 'retry'),
+                                        ('toggle', 'nothing, then everything', 'fsretry', min(4, ncpu), 'retry under chaos', 'chaos', '.'),
+                                        ('toggle', 'nothing, then everything', 'fsbad', 2, 'serial block under chaos', 'chaos', '.')):
         if ncpu < k: continue
         elf = subprocess.run([B + 'stage2'], input=PROGS[name].encode(), capture_output=True).stdout
         at = 112 + sym[label]; open(B + 'pb.in', 'wb').write(ins[iname])
         open(B + 'pbq', 'wb').write(elf[:at] + patch + elf[at + 12:]); os.chmod(B + 'pbq', 0o755)
-        st = subprocess.run(['taskset', '-c', ','.join(map(str, cpus[:k])), B + 'pbq'], stdin=open(B + 'pb.in', 'rb'), stdout=subprocess.DEVNULL).returncode
+        st = subprocess.run(['taskset', '-c', ','.join(map(str, cpus[:k])), B + 'pbq'] + args, stdin=open(B + 'pb.in', 'rb'), stdout=subprocess.DEVNULL).returncode
         if st != 77: sys.exit(f'FAIL pool_big path: {name} on "{iname}" with {k} CPUs never reached "{what}" (exit {st})')
         npath += 1
     print(f'PASS pool_big, {npath} path checks ({len(PROGS)} programs x {len(ins)} inputs x {len(sets)} CPU sets)')

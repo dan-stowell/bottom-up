@@ -90,8 +90,9 @@ for name, src in PROGS.items():
             st, out = strand.interp(src.encode(), open(files[n], 'rb').read())
             assert (st, hashlib.sha256(out).hexdigest()) == want[:2], (name, n, 'serial run disagrees with interpreter')
         for cpus in cpusets:
-            for mode in ([exe], [exe, 'eager']):
-                if len(mode) == 2 and n > 600000: continue
+            # 'chaos': the pool's guesses spoiled with noise (stub.S); the output must not notice
+            for mode in ([exe], [exe, 'eager'], [exe, 'chaos', '.'], [exe, 'eager', 'chaos', '.']):
+                if len(mode) in (2, 4) and n > 600000: continue
                 for pipe in (False, True):
                     if pipe and n > 600000: continue
                     for rep in range(3 if n > 4097 else 1):       # a few repetitions: scheduling varies
