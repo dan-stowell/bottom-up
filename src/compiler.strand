@@ -14,9 +14,11 @@
 #   ev   positions of token starts and of newlines, in order;  te0  positions just past a token
 #   E_QUOTE: a string still open at a newline or at '#'; an opening quote not at a token start;
 #            a closing quote followed by a token character
+# (The zeros before each '%' only move it to a stack depth whose carry register is free: a position sink
+# counts what it has written in the sum carry of its depth, like a scan.)
 0 1 - >Neg
 0 8 - >Neg8
-bytes :text :c @lcls /ldfa :s s 2 = c 32 > s 0 = & | :tc dup prev :ptc 1 ^ & c 10 = | %ev ptc tc 1 ^ & %te0 dup prev 2 = c 10 = c 35 = | & c 34 = :isq s 2 = & ptc & | 0 isq s 0 = & prev c 32 > & s 1 != & | | swap drop $Eq2
+bytes :text :c @lcls /ldfa :s s 2 = c 32 > s 0 = & | :tc dup prev :ptc 1 ^ & c 10 = | :evm drop 0 0 0 evm %ev drop drop drop ptc tc 1 ^ & :tem drop 0 0 0 0 tem %te0 drop drop drop drop dup prev 2 = c 10 = c 35 = | & c 34 = :isq s 2 = & ptc & | 0 isq s 0 = & prev c 32 > & s 1 != & | | swap drop $Eq2
 # ... and a string still open at the end of the text: every earlier line has an even number of quotes
 bytes :cq @lcls /ldfa 1 != cq 34 = & $Qn
 Eq2 Qn 1 & + 0 > halt
@@ -144,7 +146,11 @@ Ecy 0 > 10 * halt
 ~NL2 0 * >lss
 last cls @isscat & slot * last ln1 Neg sel !lss
 ln1 @lss dup 0 > swap slot = & cls @readsvec & $Ea
-Ea 0 > 11 * halt
+# ... nor the vector it copies slices into; and all of a line's slices go to one vector
+~NL2 0 * >lsl
+cls Cslices = :issl slot * issl ln1 Neg sel !lsl
+ln1 @lsl :ls dup 0 > swap slot = & cls @readsvec & cls Cslices = slot ls != & | $Eb
+Ea Eb + 0 > 11 * halt
 # every used variable is defined somewhere
 ~S1 0 * >def
 cls @defines dup slot Neg sel !def

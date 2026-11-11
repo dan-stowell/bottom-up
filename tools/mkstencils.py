@@ -197,7 +197,7 @@ st(IOTA, 0, LOOPHEAD + "  vmovdqa32 zmm0,zmm26", pre=f"  mov r12d,dword ptr [rbx
 st(KW['input'], 0, LOOPHEAD + "  mov rsi,[rbx-16]\n  vpmovzxbd zmm0{k7}{z},xmmword ptr [rsi+rax]", pre="  mov r12,[rbx-8]\n" + SETUP)
 # stdin as little-endian dwords (a trailing partial dword is ignored)
 st(KW['input4'], 0, LOOPHEAD + "  mov rsi,[rbx-16]\n  vmovdqu32 zmm0{k7}{z},[rsi+rax*4]", pre="  mov r12,[rbx-8]\n  shr r12,2\n" + SETUP)
-st(STOREV, 1, pre=ALLOC('rdi'), text="  vmovdqu32 [rdi+rax*4]{k6},zmm0" + LOOPEND + f"""
+st(STOREV, 1, pre=ALLOC('rdi'), text="  kortestw k6,k6\n  jz 3f\n  vmovdqu32 [rdi+rax*4]{k6},zmm0\n3:" + LOOPEND + f"""
   lea rcx,[rbx+{DISP}]""" + RELEASE + """
   mov [rcx],rdi
   mov [rcx+8],r12""")
@@ -274,7 +274,7 @@ st(ZEROSV, 1, LOOPEND + "\n  cmp r12,1" + failif('e') + """
   mov [rcx],rdi
   mov [rcx+8],r8""")
 # `v .x`: the low bytes of a dword line, as a byte vector
-st(STOREVN, 1, pre=ALLOC('rdi'), text="  vpmovdb xmm24,zmm0\n  vmovdqu8 [rdi+rax]{k6},xmm24" + LOOPEND + f"""
+st(STOREVN, 1, pre=ALLOC('rdi'), text="  kortestw k6,k6\n  jz 3f\n  vpmovdb xmm24,zmm0\n  vmovdqu8 [rdi+rax]{k6},xmm24\n3:" + LOOPEND + f"""
   lea rcx,[rbx+{DISP}]""" + RELEASE + """
   mov [rcx],rdi
   mov [rcx+8],r12""")
@@ -350,9 +350,11 @@ for d in range(4, 9):
   pop r11
   pop rbp
   pop rax""", pre=VETO)
-# tee stores: keep the value on the stack and keep the loop going, so one line can define many vectors
+# tee stores: keep the value on the stack and keep the loop going, so one line can define many vectors.
+# (Every store into a vector is skipped outright when no lane is kept, as in the pool's dry pass: a fully
+# masked store to memory that has not been touched yet takes a microcode assist, hundreds of cycles.)
 for d in range(1, 9):
-    st(TEE, d, f"  mov rsi,[rbx+{DISP}]\n  vmovdqu32 [rsi+rax*4]{{k6}},zmm{d-1}",
+    st(TEE, d, f"  kortestw k6,k6\n  jz 3f\n  mov rsi,[rbx+{DISP}]\n  vmovdqu32 [rsi+rax*4]{{k6}},zmm{d-1}\n3:",
        pre=ALLOC('rsi') + f"\n  lea rcx,[rbx+{DISP}]\n  mov [rcx],rsi\n  mov [rcx+8],r12")
 for d in range(1, 9):       # chunk-local vectors: the slot itself holds the current chunk
     st(TEEL, d, f"  vmovdqu32 [rsp+{DISPL}],zmm{d-1}")
@@ -426,9 +428,9 @@ LOOPENDB = """
   jmp r15
 8:"""
 FLUSHCHK = "  cmp r8,[rbx-56]\n  jb 3f\n  call [rbx-648]\n3:\n"
-st(BKW('bytes'), 0, LOOPHEADB + "  mov rsi,[rbx-16]\n  mov [rbx-752],rsi\n  vmovdqu8 zmm0{k7}{z},[rsi+rax]", pre="  mov r12,[rbx-8]\n" + SETUPB)
-# `peek`: the line's source one element ahead (0 past the end). The lead leaves its source pointer in
-# [rbx-752] every chunk; the load is masked to the elements that exist, so it never touches a byte
+st(BKW('bytes'), 0, LOOPHEADB + "  mov rsi,[rbx-16]\n  vmovdqu8 zmm0{k7}{z},[rsi+rax]", pre="  mov r12,[rbx-8]\n  mov rsi,[rbx-16]\n  mov [rbx-752],rsi\n" + SETUPB)
+# `peek`: the line's source one element ahead (0 past the end). The lead's prologue leaves its source
+# pointer in [rbx-752] (once: a cell written in the loop by every thread would bounce between cores); the load is masked to the elements that exist, so it never touches a byte
 # beyond the source.
 for d in range(1, 8):
     st(BKW('peek'), d, f"""  mov rsi,[rbx-752]
@@ -711,34 +713,54 @@ st(INPUTV, 0, f"  lea rcx,[rbx+{DISP}]" + RELEASE + """
   mov rsi,[rbx-8]
   mov [rcx+8],rsi""")
 # a byte line over a byte vector
-st(BYTESV, 0, LOOPHEADB + f"  mov rsi,[rbx+{DISP}]\n  mov [rbx-752],rsi\n  vmovdqu8 zmm0{{k7}}{{z}},[rsi+rax]", pre=f"  mov r12,[rbx+{DISP8}]\n" + SETUPB)
+st(BYTESV, 0, LOOPHEADB + f"  mov rsi,[rbx+{DISP}]\n  vmovdqu8 zmm0{{k7}}{{z}},[rsi+rax]", pre=f"  lea rcx,[rbx+{DISP}]\n  mov r12,[rcx+8]\n  mov rsi,[rcx]\n  mov [rbx-752],rsi\n" + SETUPB)
 # ---- the bridge to dword lines (spec.py). `>x` on a byte line keeps the bytes as a vector.
-st(STOREVB, 1, pre=ALLOC('rdi'), text="  vmovdqu8 [rdi+rax]{k6},zmm0" + LOOPENDB + f"""
+st(STOREVB, 1, pre=ALLOC('rdi'), text="  kortestq k6,k6\n  jz 3f\n  vmovdqu8 [rdi+rax]{k6},zmm0\n3:" + LOOPENDB + f"""
   lea rcx,[rbx+{DISP}]""" + RELEASE + """
   mov [rcx],rdi
   mov [rcx+8],r12""")
 for d in range(1, 9):     # ':x' on a byte line, when x is read after the line: the same store, as a tee
-    st(TEEBX, d, f"  mov rsi,[rbx+{DISP}]\n  vmovdqu8 [rsi+rax]{{k6}},zmm{d-1}",
+    st(TEEBX, d, f"  kortestq k6,k6\n  jz 3f\n  mov rsi,[rbx+{DISP}]\n  vmovdqu8 [rsi+rax]{{k6}},zmm{d-1}\n3:",
        pre=ALLOC('rsi') + f"\n  lea rcx,[rbx+{DISP}]\n  mov [rcx],rsi\n  mov [rcx+8],r12")
 # `m %x` on a byte line appends the positions of the nonzero lanes to the dword vector x: four
-# compresses of the lane indices, 16 lanes each. Like the dword '%' tee it keeps its cursor in the
-# slot and keeps the line on one thread.
+# compresses of the lane indices, 16 lanes each. How many it has written so far is a running sum, kept
+# in the sum carry of its depth like `scan`'s, so the thread pool splits the line the same way: the dry
+# pass only counts, every thread then starts from the exact count of the ranges before it and writes
+# its positions where they belong. Each store is masked to the positions found: another thread may
+# already have written just past them. (The slot's length is written every chunk; the pool always
+# leaves a serial tail, so the last write is the right one.)
 for d in range(2, 9):    # never at depth 1: a line must not end on a tee
-    r = d - 1
-    st(WHEREB, d, f"""  lea rcx,[rbx+{DISP}]
-  vptestmb k1{{k7}},zmm{r},zmm{r}
+    r = d - 1; C = 16 + r
+    st(WHEREB, d, f"""  vptestmb k1{{k7}},zmm{r},zmm{r}
+  vmovd edx,xmm{C}
+  kortestw k5,k5
+  jz 3f
+  lea rcx,[rbx+{DISP}]
   mov rsi,[rcx]
-  mov rdx,[rcx+8]
   vpbroadcastd zmm24,eax
+  push r8
+  mov r8d,-1
   vpaddd zmm24,zmm24,zmm30""" + """
   vpcompressd zmm25{k1}{z},zmm24
-  vmovdqu32 [rsi+rdx*4],zmm25
   kmovw r10d,k1
   popcnt r10d,r10d
+  bzhi r9d,r8d,r10d
+  kmovw k2,r9d
+  vmovdqu32 [rsi+rdx*4]{k2},zmm25
   add rdx,r10
   kshiftrq k1,k1,16
-  vpaddd zmm24,zmm24,dword ptr [rbx-44]{1to16}""" * 4 + """
-  mov [rcx+8],rdx""", pre=ALLOC('rsi') + f"\n  lea rcx,[rbx+{DISP}]\n  mov [rcx],rsi\n  mov qword ptr [rcx+8],0\n" + VETO)
+  vpaddd zmm24,zmm24,dword ptr [rbx-44]{1to16}""" * 4 + f"""
+  pop r8
+  test r15,r15                      # the length: only on the serial path (a cell written by every thread
+  jnz 4f                            # every chunk would bounce between cores; the serial tail writes it last)
+  mov [rcx+8],rdx
+  jmp 4f
+3:
+  kmovq r10,k1
+  popcnt r10,r10
+  add rdx,r10
+4:
+  vpbroadcastd zmm{C},edx""", pre=ALLOC('rsi') + f"\n  lea rcx,[rbx+{DISP}]\n  mov [rcx],rsi\n  mov qword ptr [rcx+8],0\n  vpxord zmm{C},zmm{C},zmm{C}\n  or dword ptr [rbx-712],{1 << r}\n  mov dword ptr [rbx-680],0")
 
 asm = ".intel_syntax noprefix\n.text\n"
 for kind, D in (('S', S), ('Q', PRE)):
@@ -838,7 +860,7 @@ with open(f'{ROOT}/src/tables.strand', 'w') as f:
     f.write(data('pow10', [10 ** i for i in range(MAXDIGITS)]))
     f.write(f"{len(stub)} >Stublen\n")
     for nm, v in [('Rels', rels), ('Rell', rell), ('Relp', relp), ('Kn', K), ('Ncode', NCODE), ('Cdata', DATA), ('Cstr', STR), ('Cnone', NONE), ('Cerr', ERR),
-                  ('Cscatter', SCATTER), ('Ctee', TEE), ('Cteec', TEEC), ('Cvect', VECT), ('Cbytes', KW['bytes']), ('Cvec', VEC), ('Clen', LEN), ('Nsig5', 5), ('Slot', SLOT), ('Nd', ND), ('Vbase', VBASE), ('Maxname', MAXNAME), ('Maxdig', MAXDIGITS),
+                  ('Cscatter', SCATTER), ('Cslices', SLICES), ('Ctee', TEE), ('Cteec', TEEC), ('Cvect', VECT), ('Cbytes', KW['bytes']), ('Cvec', VEC), ('Clen', LEN), ('Nsig5', 5), ('Slot', SLOT), ('Nd', ND), ('Vbase', VBASE), ('Maxname', MAXNAME), ('Maxdig', MAXDIGITS),
                   ('Ha1', HA1), ('Hb1', HB1), ('Hs1', HS1), ('Ha2', HA2), ('Hb2', HB2), ('Hs2', HS2)]\
                  + [('Ru%d' % r, RACE_U[r]) for r in range(ROUNDS)] + [('Rv%d' % r, RACE_V[r]) for r in range(ROUNDS)]:
         f.write(f"{v} >{nm}\n")

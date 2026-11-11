@@ -139,6 +139,7 @@ CARRY = [0] * NCLS                  # 1: uses sum-carry register of its depth, 2
 CARRY[KW['scan']] = 1; CARRY[KW['prev']] = 1; CARRY[KW['scanmax']] = 2
 CARRY[BK + KW['prev']] = 1
 CARRY[FSM8B] = 1
+CARRY[WHEREB] = 1                   # ... and so does the count of positions a byte-line '%' has written
 CARRY[FSMB] = 1                    # the automaton's carry (a transition function) lives in zmm16+r too
 USES[VECT] = 1; READSVEC[VECT] = 1
 # Byte lines read stored byte vectors too: `x` on a byte line pushes the byte vector x, element for

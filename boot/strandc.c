@@ -181,6 +181,9 @@ int main(void) {
       if (seen & bit) ERR(10); seen |= bit;
     }
     if (T_isscat[tok[j].cls]) for (int k = i; k <= j; k++) if (T_readsvec[tok[k].cls] && tok[k].slot == tok[j].slot) ERR(11);
+    { int sl = 0;                            // ... nor the vector it copies slices into; one slice destination per line
+      for (int k = i; k <= j; k++) if (tok[k].cls == C_SLICES) { if (sl && sl != tok[k].slot) ERR(11); sl = tok[k].slot; }
+      if (sl) for (int k = i; k <= j; k++) if (T_readsvec[tok[k].cls] && tok[k].slot == sl) ERR(11); }
     i = j + 1;
   }
   die();

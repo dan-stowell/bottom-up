@@ -162,12 +162,13 @@ N 1 - >Tm
 #         5 string, 6 raw string, 7 rune
 #   sv    string value of (k, m): see strt
 #   code  the byte is program text: in code, not a closing quote, not the '/' that opens a comment
-#   ws    word state after the byte: 0 none, 1 identifier, 2 decimal, 3 fraction, 4 after e/p, 5 exponent, 6 hex
+#   wl    word state after the byte: 0 none, 1 identifier, 2 decimal, 3 fraction, 4 after e/p, 5 exponent, 6 hex
+#         (kept as ws for the token line; this line reads its own copy, wl, so that it can be split across threads)
 #   t,pt  what (previous byte, this byte) and (the two before) are as operators: 0 nothing, 1 an operator,
 #         2 "..", 3 an operator that '=' extends
 #   os    operator state: how many bytes of the current operator have been read
 #   tc    token byte;  ts  first byte of a token
-bytes :c @gk :k back @gk :bk 5 = bk 6 = 2 * + 8 * + 0 k 7 = /esc :es 2 = 32 * + + @mcls \\mdfa :m 8 * k + @strt :sv m 0 = sv 0 = & c 47 = peek 47 = peek 42 = | & 1 ^ & :code c @gw c 46 = peek @gw 2 = & + * \\wdfa :ws 0 over prev :pws drop drop 0 != pws 0 = & :wst drop back @gfc c @gsc 24 * + @e2t :t dup 1 = swap 3 = | t 2 = peek 46 = & | back2 @gfc back @gsc 24 * + @e2t :pt 3 = c 61 = & pt 2 = c 46 = & | 2 * + 1 + c @gop code * ws 0 = * * :oc 0 0 oc /odfa :os drop drop drop drop k 1 = m 6 != & :nl ws 0 != | os 0 != | sv 0 != | :tc wst os 1 = | nl | sv 5 = | sv 3 = es 2 != & | :ts %ev 0 0 0 tc prev :ptc drop drop drop drop 1 ^ ts | ptc & %te end
+bytes :c @gk :k back @gk :bk 5 = bk 6 = 2 * + 8 * + 0 k 7 = /esc :es 2 = 32 * + + @mcls \\mdfa :m 8 * k + @strt :sv m 0 = sv 0 = & c 47 = peek 47 = peek 42 = | & 1 ^ & :code c @gw c 46 = peek @gw 2 = & + * \\wdfa :wl :ws 0 over prev :pws drop drop 0 != pws 0 = & :wst drop back @gfc c @gsc 24 * + @e2t :t dup 1 = swap 3 = | t 2 = peek 46 = & | back2 @gfc back @gsc 24 * + @e2t :pt 3 = c 61 = & pt 2 = c 46 = & | 2 * + 1 + c @gop code * wl 0 = * * :oc 0 0 oc /odfa :os drop drop drop drop k 1 = m 6 != & :nl wl 0 != | os 0 != | sv 0 != | :tc wst os 1 = | nl | sv 5 = | sv 3 = es 2 != & | :ts drop 0 0 0 tc prev :ptc drop drop drop drop 0 0 0 0 ts %ev drop drop drop drop 1 ^ ts | ptc & :tem drop 0 0 0 0 0 0 tem %te drop drop drop drop drop drop end
 &ev 1 - >Em
 &te >Te
 Te 1 - >Tem

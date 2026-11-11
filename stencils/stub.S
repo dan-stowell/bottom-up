@@ -303,6 +303,14 @@ dojob:                              # r13 = this thread's block; continues at [r
   lea r14,[rip+justret]
   mov rbp,rax
   mov ecx,[rbx-708]
+  cmp dword ptr [rip+j_mode],1      # the dry pass of a line with automata warms up over 64 chunks: the
+  jne 1f                            # state an automaton is in after them is taken as the state it enters
+  test dword ptr [rbx-712],0xff000000   # its range in (below), and the longer the run-up, the more
+  jz 1f                             # often that guess is right for everything downstream of it
+  shl ecx,6
+  cmp rcx,rax
+  cmova rcx,rax
+1:
   sub rax,rcx
   setrange
   lea r8,[r13+64]
@@ -311,12 +319,12 @@ dojob:                              # r13 = this thread's block; continues at [r
 dj_warm:
   cmp dword ptr [rip+j_mode],1
   jne dj_run
-  mov eax,[rbx-712]                 # an automaton's dry pass must report the function of its range
-  .irp i,16,17,18,19,20,21,22,23    # alone, so forget what the warm-up chunk did to it
-  bt eax,\i+8
-  jnc 1f
-  vpxord zmm\i,zmm\i,zmm\i
-1:
+  mov eax,[rbx-712]                 # An automaton enters its range in the state e the warm-up left it
+  .irp i,16,17,18,19,20,21,22,23    # in: its carry becomes the permutation s -> s ^ e (stored xor
+  bt eax,\i+8                       # identity: e in every byte). What follows it on the line then sees
+  jnc 1f                            # the states it would see if e is right, and the function of the
+  vpbroadcastb zmm\i,xmm\i          # range alone is recovered afterwards by peeling the permutation
+1:                                  # off (derive), whether e was right or not.
   .endr
   savecar r13+256
   kxorq k5,k5,k5
@@ -699,11 +707,8 @@ derive:                             # zmm24 = carry edx after a range, from IN [
   bt dword ptr [rbx-716],r9d
   jc 58f
   vpxord zmm24,zmm24,dword ptr [rbx-896]{1to16}
-  cmp dword ptr [rip+f_retry],0     # after a real pass, OUT = M o (^e): undo the ^e first
-  je 57f
-  vpbroadcastb zmm26,byte ptr [rdi+256]
+  vpbroadcastb zmm26,byte ptr [rdi+256]   # OUT = M o (^e), e = byte 0 of W: undo the ^e first
   vpxord zmm24,zmm24,zmm26
-57:
   vpxord zmm25,zmm25,dword ptr [rbx-896]{1to16}
   vpshufb zmm24,zmm25,zmm24
   vpxord zmm24,zmm24,dword ptr [rbx-896]{1to16}
@@ -711,11 +716,8 @@ derive:                             # zmm24 = carry edx after a range, from IN [
   ret
 58:                                 # an 8-state automaton: the same with 8-byte functions
   vpxorq zmm24,zmm24,qword ptr [rbx-896]{1to8}
-  cmp dword ptr [rip+f_retry],0
-  je 59f
   vpbroadcastb zmm26,byte ptr [rdi+256]
   vpxord zmm24,zmm24,zmm26
-59:
   vpxorq zmm25,zmm25,qword ptr [rbx-896]{1to8}
   vpshufb zmm24,zmm25,zmm24
   vpxorq zmm24,zmm24,qword ptr [rbx-896]{1to8}

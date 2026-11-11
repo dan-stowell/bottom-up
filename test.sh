@@ -24,6 +24,18 @@ for l in link link2; do
   ./build/$l < build/job40 > build/$l.out; ./build/linkjob ref < build/job40 | cmp - build/$l.out
   echo "PASS $l"
 done
+echo "--- a Go lexer written in Strand against go/scanner, on part of the Go standard library, one CPU and all"
+if command -v go >/dev/null; then
+  (cd explore/golex && go build -o ../../build/golex .)
+  find "$(go env GOROOT)/src/go" "$(go env GOROOT)/src/strconv" "$(go env GOROOT)/src/math" -name '*.go' -type f | sort > build/gofiles.small
+  ./build/golex corpus build/gofiles.small > build/gosmall.go 2>/dev/null
+  ./build/golex dump build/gosmall.go > build/gosmall.tok 2>/dev/null
+  python3 examples/golex_gen.py | cmp - examples/golex.strand
+  ./build/stage2 < examples/golex.strand > build/golex_strand && chmod +x build/golex_strand
+  taskset -c "$(python3 -c 'import os; print(min(os.sched_getaffinity(0)))')" ./build/golex_strand < build/gosmall.go | cmp - build/gosmall.tok
+  ./build/golex_strand < build/gosmall.go | cmp - build/gosmall.tok
+  echo "PASS golex ($(($(stat -c %s build/gosmall.tok) / 8)) tokens)"
+else echo "SKIP golex: no go toolchain"; fi
 echo "--- big inputs: the three compilers agree"
 for f in big8 many; do
   [ $f = big8 ] && python3 tools/mkbig.py 8 > build/big8.strand

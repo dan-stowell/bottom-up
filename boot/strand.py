@@ -187,6 +187,9 @@ def analyze(src: bytes):
         if ISSCAT[lt[-1].cls]:
             for t in lt:
                 if READSVEC[t.cls] and t.slot == lt[-1].slot: raise CompileError(E_ALIAS)
+        # ... nor the vector it copies slices into, and all of a line's slices go to one vector
+        sl = {t.slot for t in lt if t.cls == SLICES}
+        if len(sl) > 1 or any(READSVEC[t.cls] and t.slot in sl for t in lt): raise CompileError(E_ALIAS)
     defined = {t.slot for t in toks if DEFINES[t.cls]}
     for t in toks:
         if USES[t.cls] and t.isname and t.slot not in defined: raise CompileError(E_UNDEF)
