@@ -115,3 +115,17 @@ fuzzing covers the runtime predates `tests/pool.py` (32 programs, 3,968 runs at 
 block sizes, compared with the same binary on one CPU); the 4 GiB cumulative output limit
 described earlier is not enforced by the streaming runtime; the input limit is
 `0x7fe00000` bytes exactly; and byte lines are not `i32` lines.
+
+## The build driver (2026-11-11)
+
+`driver/main.go` (`build/sb`) is Go, not Strand. It is orchestration: it starts processes, keeps a ready
+queue ordered by the cost of the chain above each package, and hands out CPU tokens. None of that is
+data-parallel work over bytes; measured, the driver's own CPU is under 1 s of a 265 core-second build.
+What it delegates today, and so what is still scalar and stock: the plan (`go list`), parse, types,
+code generation (`go tool compile`), assembly (`go tool asm`), the link (`go tool link`).
+The one Strand phase in the build is the lexer (`examples/golex.strand`), whose tokens nothing
+downstream consumes yet.
+
+Known difference from `go build`: the binary carries no module build info (`go version -m` shows no
+dependency list, `debug.ReadBuildInfo` returns nothing), because the driver does not write the
+`modinfo` line of the link's import config.
