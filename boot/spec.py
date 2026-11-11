@@ -6,7 +6,7 @@ The first K classes are the keywords, in prelude order.
 """
 KEYWORDS = ['+', '-', '*', '&', '|', '^', 'min', 'max', '<<', '>>',
             '<', '<=', '>', '>=', '=', '!=', 'sel', 'scan', 'scanmax', 'prev',
-            'dup', 'drop', 'swap', 'over', 'input', 'out', 'out4', 'halt', 'end', 'idx', 'input4', 'outif', 'outif4', 'bytes', 'peek']
+            'dup', 'drop', 'swap', 'over', 'input', 'out', 'out4', 'halt', 'end', 'idx', 'input4', 'outif', 'outif4', 'bytes', 'peek', 'back', 'back2']
 K = len(KEYWORDS)
 PRELUDE = ' '.join(KEYWORDS)
 
@@ -28,7 +28,7 @@ for k in ['+', '-', '*', '&', '|', '^', 'min', 'max', '<<', '>>', '<', '<=', '>'
     DELTA[KW[k]] = -1
 DELTA[KW['sel']] = -2
 DELTA[KW['outif']] = DELTA[KW['outif4']] = -2
-for k in ['dup', 'over', 'input', 'idx', 'input4', 'bytes', 'peek']:
+for k in ['dup', 'over', 'input', 'idx', 'input4', 'bytes', 'peek', 'back', 'back2']:
     DELTA[KW[k]] = 1
 for c in [VEC, VECLEAD, SCAL, SCALLEAD, LEN, LENLEAD, IOTA, VECL, LENL]:
     DELTA[c] = 1
@@ -143,13 +143,14 @@ CARRY[FSMB] = 1                    # the automaton's carry (a transition functio
 USES[VECT] = 1; READSVEC[VECT] = 1
 # Byte lines read stored byte vectors too: `x` on a byte line pushes the byte vector x, element for
 # element (its length must be the line's). `peek` pushes the line's own source one element ahead:
-# element i is source element i + 1, and 0 for the last. VECBXT is to VECBX what VECT is to VEC.
+# element i is source element i + 1, and 0 for the last; `back` and `back2` push it one and two
+# elements behind (0 where there is none). VECBXT is to VECBX what VECT is to VEC.
 USES[VECBXT] = 1; READSVEC[VECBXT] = 1
 TVOF = list(range(NCLS))            # the class a push takes when it re-reads a persistent tee on the tee's own line
 TVOF[VEC] = VECT; TVOF[VECBX] = VECBXT
 
 MAXNAME = 16                        # longest name: four dwords, which *are* the name
-MAXDIGITS = 9
+MAXDIGITS = 10                      # a literal has at most ten digits; its value is taken mod 2^32
 
 # ---- name resolution is part of the language definition -------------------------------------------
 # Names are told apart by a 64-bit fingerprint and resolved by a 4-round "scatter race".
@@ -175,9 +176,11 @@ def name_hash(name: bytes):
         a = (x * HA2) & M32; h2 = (h2 + (a ^ (a >> HS2)) * HB2) & M32
     return h1, h2
 # Keywords are names with a fixed meaning. They take no part in the race and have no slot. How an
-# implementation recognises them is its own business; for table-driven ones, KWSHIFT is a shift for
-# which (h1 >> KWSHIFT) & 255 is different for every keyword.
-KWSHIFT = next(s for s in range(25) if len({(name_hash(k.encode())[0] >> s) & 255 for k in KEYWORDS}) == K)
+# implementation recognises them is its own business; for table-driven ones, KWMUL and KWSHIFT are
+# such that ((h1 * KWMUL) >> KWSHIFT) & 255 is different for every keyword.
+def kw_slot(h1): return (((h1 * KWMUL) & M32) >> KWSHIFT) & 255
+KWMUL, KWSHIFT = next((m, s) for m in range(1, 4001, 2) for s in range(8, 25)
+                      if len({(((name_hash(k.encode())[0] * m) & M32) >> s) & 255 for k in KEYWORDS}) == K)
 def race_mask(ntokens):
     """table size - 1: twice the smallest power of two above the token count"""
     m = ntokens

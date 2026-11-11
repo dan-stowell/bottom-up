@@ -10,7 +10,7 @@ CASES = [
  (b'1 2 3 "abc" =d\nd out\n', 0), (b'=d\n', 0), (b'"" =d\n', 0), (b'"a # b" =d\n', E_QUOTE),
  (b'input >x # trailing "comment" with quotes\nx out\n', 0),
  (b'"abc =d\n', E_QUOTE), (b'1 a"b" =d\n', E_QUOTE), (b'"a"b =d\n', E_QUOTE), (b'"a""b" =d\n', E_QUOTE),
- (b'12a >A\n', E_LEX), (b'1234567890 >A\n', E_LEX), (b'999999999 >A\n', 0), (b'~1x out\n', E_LEX),
+ (b'12a >A\n', E_LEX), (b'1234567890 >A\n', 0), (b'12345678901 >A\n', E_LEX), (b'9999999999 >A\n', 0), (b'4294967295 >A\n', 0), (b'999999999 >A\n', 0), (b'~1x out\n', E_LEX),
  (b'1 >' + b'A' * 16 + b'\n', 0), (b'1 >' + b'A' * 17 + b'\n', E_NAMELEN), (b'input >' + b'x' * 17 + b'\n', E_NAMELEN),
  (b'input %% out\n', E_TOKEN), (b'input >scan\n', E_TOKEN), (b'input @Out out\n', E_TOKEN), (b'1 >a\n', 0), (b'1 $a\n', E_TOKEN),
  (b'input "x" & out\n', E_DATA), (b'1 input =d\n', E_DATA), (b'1 =d 2\n', E_DATA), (b'1 >A =d\n', E_DATA), (b'~3 4 =d\n', E_DATA),

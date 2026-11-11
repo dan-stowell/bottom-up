@@ -442,6 +442,15 @@ for d in range(1, 8):
   bzhi rdx,rdx,rcx
   kmovq k1,rdx
   vmovdqu8 zmm{d}{{k1}}{{z}},[rsi+rax+1]""")
+    for kw_, n_ in (('back', 1), ('back2', 2)):       # the source one or two elements behind: a load, no carry
+        st(BKW(kw_), d, f"""  mov rsi,[rbx-752]
+  kmovq k1,k7
+  test rax,rax
+  jnz 3f
+  kshiftrq k1,k1,{n_}
+  kshiftlq k1,k1,{n_}
+3:
+  vmovdqu8 zmm{d}{{k1}}{{z}},[rsi+rax-{n_}]""")
     # a stored byte vector, element for element
     st(VECBX, d, f"  mov rsi,[rbx+{DISP}]\n  vmovdqu8 zmm{d}{{k7}}{{z}},[rsi+rax]", pre=f"  cmp r12,[rbx+{DISP8}]" + failif('e'))
     st(VECBXT, d, f"  mov rsi,[rbx+{DISP}]\n  vmovdqu8 zmm{d}{{k7}}{{z}},[rsi+rax]", pre=f"  cmp r12,[rbx+{DISP8}]" + failif('e') + "\n" + VETO)
@@ -803,13 +812,11 @@ with open(f'{ROOT}/src/tables.strand', 'w') as f:
     # the lexer's automaton: byte -> class (other, blank, newline, '#', '"'), then state (code, comment, string)
     f.write(data('lcls', [2 if c == 10 else 3 if c == 35 else 4 if c == 34 else 1 if c <= 32 else 0 for c in range(256)]))
     f.write(data('ldfa', [0, 1, 2, 0,  0, 1, 2, 0,  0, 0, 0, 0,  1, 1, 1, 0,  2, 1, 0, 0]))
-    # keywords: (h1 >> Kwshift) & 255 is different for each; kwl/kwh0..3 hold their names as dwords (entry 0: none)
+    # keywords: (h1 >> Kwshift) & 255 is different for each; kww0..3 hold their names as dwords (entry 0: none)
     kwidx = [0] * 256
-    for k, w in enumerate(KEYWORDS): kwidx[(name_hash(w.encode())[0] >> KWSHIFT) & 255] = k + 1
+    for k, w in enumerate(KEYWORDS): kwidx[kw_slot(name_hash(w.encode())[0])] = k + 1
     f.write(data('kwidx', kwidx))
-    for j in range(4):                  # (in 16-bit halves: a literal has at most nine digits)
-        f.write(data('kwl%d' % j, [0] + [name_words(w.encode())[j] & 65535 for w in KEYWORDS]))
-        f.write(data('kwh%d' % j, [0] + [name_words(w.encode())[j] >> 16 for w in KEYWORDS]))
+    for j in range(4): f.write(data('kww%d' % j, [0] + [name_words(w.encode())[j] for w in KEYWORDS]))
     # decimal literals: three 4-digit groups A, B, C, left-aligned and '0'-filled; for a literal of L digits
     # value = (A * lm1[L] >> ls1[L]) + (B * lm2[L] >> ls2[L]) + (C * lm3[L] >> ls3[L])  (exact reciprocals)
     R = {1: (52429, 19), 2: (5243, 19), 3: (8389, 23)}
@@ -819,8 +826,8 @@ with open(f'{ROOT}/src/tables.strand', 'w') as f:
         if have >= 4: return (10 ** (have - 4), 0)
         return R[4 - have]
     for g in range(3):
-        f.write(data('lm%d' % (g + 1), [scale(L, 4 * g)[0] for L in range(10)])); f.write(data('ls%d' % (g + 1), [scale(L, 4 * g)[1] for L in range(10)]))
-    f.write(f"{KWSHIFT} >Kwshift\n")
+        f.write(data('lm%d' % (g + 1), [scale(L, 4 * g)[0] for L in range(MAXDIGITS + 1)])); f.write(data('ls%d' % (g + 1), [scale(L, 4 * g)[1] for L in range(MAXDIGITS + 1)]))
+    f.write(f"{KWSHIFT} >Kwshift\n{KWMUL} >Kwmul\n")
     f.write(data('sten', sten))
     for n in tabs: f.write(data(n, tabs[n]))
     f.write(data('tail', tail)); f.write(data('stub', stub)); f.write(data('ehdr', ehdr))

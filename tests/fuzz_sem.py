@@ -24,7 +24,7 @@ class Gen:
     def newcls(self): self.cls += 1; return self.cls
     def lit(self):
         r = self.r
-        return str(r.choice([0, 1, 2, 3, 7, 15, 16, 17, 31, 32, 33, 64, 255, 256, 65535, 999999999, r.randrange(1000)]))
+        return str(r.choice([0, 1, 2, 3, 7, 15, 16, 17, 31, 32, 33, 64, 255, 256, 65535, 999999999, 4294967295, 2147483648, 9999999999, 1000000007, r.randrange(1000)]))
     def scalar(self):
         return self.r.choice(self.scal) if self.scal and self.r.random() < .5 else self.lit()
     def expr(self, lcls, depth_budget=7):
@@ -83,7 +83,7 @@ class Gen:
             elif ch < .72 and ('p', d) not in used: used.add(('p', d)); toks.append('prev')
             elif ch < .76 and ('p', d) not in used: used.add(('p', d)); toks.append('/' + self.automaton())
             elif ch < .79 and ('p', d) not in used: used.add(('p', d)); toks.append('\\' + self.automaton(8))
-            elif ch < .80 and d < 7: toks.append('peek'); d += 1
+            elif ch < .80 and d < 7: toks.append(r.choice(['peek', 'back', 'back2'])); d += 1
             elif ch < .805 and d < 7 and self.bvecs: toks.append(r.choice(self.bvecs)); d += 1      # a stored byte vector (fails unless its length is the line's)
             elif ch < .82 and d < 7: toks.append(r.choice(['dup', 'over'] if d >= 2 else ['dup'])); d += 1
             elif ch < .84 and d >= 2: toks.append(r.choice(['swap', 'drop'])); d -= toks[-1] == 'drop'

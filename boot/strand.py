@@ -85,7 +85,7 @@ def analyze(src: bytes):
                 errs.add(E_LEX)
                 pool.append(0)
             else:
-                pool.append(int(t.name))
+                pool.append(int(t.name) & M32)
         if t.str:
             pool.extend(t.raw[1:-1])
         if t.isname and len(t.name) > MAXNAME: errs.add(E_NAMELEN)
@@ -288,7 +288,7 @@ def interp(src: bytes, inp: bytes):
     sca = {}      # slot -> int
     for lt in lines.values():
         s = lt[-1]
-        if s.cls == DATA: vec[s.slot] = pool[lt[0].poolidx:s.poolidx]
+        if s.cls == DATA: vec[s.slot] = [w32(x) for x in pool[lt[0].poolidx:s.poolidx]]
     out = bytearray()
     class RO(list): pass                 # the input as a vector: read-only
     try:
@@ -309,6 +309,8 @@ def interp(src: bytes, inp: bytes):
                     if k == 'bytes': n = len(inp); st.append(list(inp)); lsrc = st[-1]
                     elif c == BYTESV: n = len(v); st.append([x & 255 for x in v]); lsrc = list(st[-1])
                     elif k == 'peek': st.append(lsrc[1:] + [0] * (1 if n else 0))
+                    elif k == 'back': st.append(([0] + lsrc)[:n])
+                    elif k == 'back2': st.append(([0, 0] + lsrc)[:n])
                     elif c in (VECBX, VECBXT):
                         if len(v) != n: raise Fail()
                         st.append([x & 255 for x in v])
@@ -355,7 +357,7 @@ def interp(src: bytes, inp: bytes):
                     elif c == WHEREB: vec[t.slot] = [i for i, q in enumerate(st.pop()) if q]
                     else: raise AssertionError(c)
                     continue
-                sval = (pool[t.poolidx] if t.lit else sca.get(t.slot, 0))
+                sval = (w32(pool[t.poolidx]) if t.lit else sca.get(t.slot, 0))     # a literal is a dword: 4294967295 is -1
                 v = vec.get(t.slot, [])
                 if c == INPUTV: vec[t.slot] = RO(inp)
                 elif c == VECLEAD: n = len(v); st.append(list(v))

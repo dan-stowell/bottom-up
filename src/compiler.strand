@@ -37,7 +37,7 @@ tend start - :len 1 > c0 @sigtab :s0 0 > & start 1 + Tm min [text 127 min @opcta
 ~NT 1 + NTm min @first idx NTm = | >last
 
 # ---------------------------------------------------------------- a token's name is four dwords
-# Names have at most 16 bytes and literals 9 digits, so everything about a token's text is in four
+# Names have at most 16 bytes and literals 10 digits, so everything about a token's text is in four
 # gathers from its first byte: mj masks the bytes of dword j that belong to the name.
 ns Tm min {text Neg 4 nlen 4 min - 8 * >> :m0 & :w0 ns 4 + Tm min {text Neg 4 nlen 4 - 0 max 4 min - 8 * >> :m1 & :w1 ns 8 + Tm min {text Neg 4 nlen 8 - 0 max 4 min - 8 * >> :m2 & :w2 ns 12 + Tm min {text Neg 4 nlen 12 - 0 max 4 min - 8 * >> & :w3 drop drop drop end
 # literals: fill each dword with '0' past the literal's end; all bytes must be digits (E_LEX); the three
@@ -49,14 +49,14 @@ ns Tm min {text Neg 4 nlen 4 min - 8 * >> :m0 & :w0 ns 4 + Tm min {text Neg 4 nl
 w0 m0 Neg ^ Z30 & | Z30 ^ :va dup 4 >> M0f & 0 = swap Z06 + 4 >> M0f & 0 = & :dk0 va 2561 * 8 >> Mff & 6553601 * 16 >> :ga drop end
 w1 m1 Neg ^ Z30 & | Z30 ^ :vb dup 4 >> M0f & 0 = swap Z06 + 4 >> M0f & 0 = & :dk1 vb 2561 * 8 >> Mff & 6553601 * 16 >> :gb drop end
 w2 m2 Neg ^ Z30 & | Z30 ^ :vc dup 4 >> M0f & 0 = swap Z06 + 4 >> M0f & 0 = & :dk2 vc 2561 * 8 >> Mff & 6553601 * 16 >> :gc drop end
-nlen 9 min :dl @lm1 ga * dl @ls1 >> dl @lm2 gb * dl @ls2 >> + dl @lm3 gc * dl @ls3 >> + lit * :val lit nlen Maxdig > dk0 dk1 & dk2 & 1 ^ | & swap drop $El
+nlen Maxdig min :dl @lm1 ga * dl @ls1 >> dl @lm2 gb * dl @ls2 >> + dl @lm3 gc * dl @ls3 >> + lit * :val lit nlen Maxdig > dk0 dk1 & dk2 & 1 ^ | & swap drop $El
 El 0 > 2 * halt
 isname nlen Maxname > & $En
 En 0 > 3 * halt
 # the fingerprint: two sums over the four dwords (boot/spec.py, name_hash)
 w0 Ha1 * dup Hs1 >> ^ Hb1 * w1 1 + Ha1 * dup Hs1 >> ^ Hb1 * + w2 2 + Ha1 * dup Hs1 >> ^ Hb1 * + w3 3 + Ha1 * dup Hs1 >> ^ Hb1 * + :h1 w0 Ha2 * dup Hs2 >> ^ Hb2 * w1 1 + Ha2 * dup Hs2 >> ^ Hb2 * + w2 2 + Ha2 * dup Hs2 >> ^ Hb2 * + w3 3 + Ha2 * dup Hs2 >> ^ Hb2 * + :h2 drop end
 # keywords: one lookup by fingerprint, confirmed by comparing the four dwords
-h1 Kwshift >> 255 & @kwidx :ki @kwh0 16 << ki @kwl0 | w0 = ki @kwh1 16 << ki @kwl1 | w1 = & ki @kwh2 16 << ki @kwl2 | w2 = & ki @kwh3 16 << ki @kwl3 | w3 = & ki * isname * :kw 0 = isname & :nm end
+h1 Kwmul * Kwshift >> 255 & @kwidx :ki @kww0 w0 = ki @kww1 w1 = & ki @kww2 w2 = & ki @kww3 w3 = & ki * isname * :kw 0 = isname & :nm end
 
 # ---------------------------------------------------------------- the constant pool
 # One unit per literal, one per byte of a string, in token order: a prefix sum places each token's units.
