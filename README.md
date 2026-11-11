@@ -28,7 +28,7 @@ bytes dup @cls /dfa 1 != outif                             # drop '#' comments o
 | [AUDIT.md](AUDIT.md) | current audit verdict, investigation backlog, and original correctness/benchmark review |
 | [AUDIT_FOLLOWUP.md](AUDIT_FOLLOWUP.md) | detailed review of the audit response and new automata, with fresh measurements and counterexamples |
 | [REPORT.md](REPORT.md) | what is new, what was measured, what failed, what next |
-| [GOLEX.md](GOLEX.md) | a Go lexer in Strand, token for token equal to `go/scanner` on the standard library: 537 ms on one core, 192 ms on eight, against 601 ms for `go/scanner`'s scan |
+| [GOLEX.md](GOLEX.md) | a Go lexer in Strand, token for token equal to `go/scanner` on the standard library: 531 ms on one core, 180 ms on eight, against 601 ms for `go/scanner`'s scan |
 | [LINKING.md](LINKING.md) | what shape linking has, and a linker written in Strand |
 | [SWEETSPOT.md](SWEETSPOT.md) | where this beats ordinary C (filters, table lookups, small automata), where it only ties (everything GCC vectorises, and hand-written intrinsics), which compiler phases fit, and why |
 | [DESIGN.md](DESIGN.md) | the language and why each compiler phase disappears |

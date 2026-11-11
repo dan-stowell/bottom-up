@@ -29,10 +29,10 @@ Whole process (start, map the file, lex, write 136 MB of output to /dev/null), m
 |---|---|---|
 | `go/scanner`, scan only | 601 ms | 154 MB/s, 35 ns per token |
 | the same in a process that reads the file and writes the tokens | 1,142 ms | |
-| Strand, 1 CPU | 537 ms | 172 MB/s |
-| Strand, 2 CPUs | 425 ms | |
-| Strand, 4 CPUs | 238 ms | |
-| Strand, 8 CPUs | 192 ms | 480 MB/s |
+| Strand, 1 CPU | 531 ms | 174 MB/s |
+| Strand, 2 CPUs | 396 ms | |
+| Strand, 4 CPUs | 248 ms | |
+| Strand, 8 CPUs | 180 ms | 515 MB/s |
 
 (Earlier versions of the same program on one core: 1,143 ms, then 610, then 537; the changes
 are in the git history and each was a change of shape, not of tuning.)
@@ -89,10 +89,17 @@ All added for this, all general (DESIGN.md):
 
 One core, 537 ms, of which about 100 ms is the kernel faulting in 200 MB of vectors.
 
-- **The byte line executes several hundred vector instructions per 64 bytes**, of which the
-  four automata are under 200. The rest is table lookups (nine instructions each, about
-  twenty of them), comparisons, and moving values to stack depths whose carry register is
-  free. A line has eight carry registers and this one uses all eight.
+- **The byte line executes about 880 instructions per 64 bytes** (measured with
+  `tools/simdratio.c`: 76% vector, 7% mask, 18% scalar, no gathers), of which the four
+  automata are under 200. The rest is table lookups (eight instructions each, about twenty
+  of them), comparisons, literals, and moving values to stack depths whose carry register
+  is free. A line has eight carry registers and this one uses all eight.
+- **Fewer instructions did not mean proportionally less time.** Rewriting the line without
+  byte multiplies (eight instructions each; tables now hand out pre-scaled values) removed
+  13% of its instructions and 1% of its time. Every flag in this line is a 64-byte vector
+  and every `&` and `|` a 512-bit operation, which this CPU executes as two 256-bit ones.
+  A lexer written by hand keeps such flags as 64-bit masks in general registers. A mask
+  type in the language is the change I expect most from, and have not made.
 - **The token line does seven gathers per token** for the keyword check, and gathers cost
   scalar-loop prices on this CPU (HARDWARE.md). Most tokens are not identifiers and do not
   need them; SIMD lanes cannot skip work.

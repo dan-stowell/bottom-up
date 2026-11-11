@@ -47,7 +47,11 @@ def mclass(k, pk, esc):
     if k == 5: return 5 if pk == 1 else 6 if pk == 2 else 7
     if k == 6: return 8 if pk == 1 else 9
     return 0
-mcls = [mclass(i & 7, (i >> 3) & 3, i >> 5 & 1) if (i >> 3) & 3 < 3 and i < 64 else 0 for i in range(256)]
+# index: 4 * kind + 32 * (kind of the byte before) + 2 * escaped. Tables hand out their values already
+# scaled (gk4, gpk, gsc24): a byte multiply is eight instructions, an addition one.
+mcls = [mclass((i >> 2) & 7, i >> 5, (i >> 1) & 1) if i >> 5 < 3 and not i & 1 else 0 for i in range(256)]
+gk4 = [4 * x for x in gk]
+gpk = tab256(lambda c: 32 if c == 47 else 64 if c == 42 else 0)
 C, C1, LC, BO, BC, S, R, Q = range(8)       # code, code just after */, // comment, /* just opened, /* comment, "string", `raw`, 'rune'
 def mstep(cl, s):
     if s in (C, C1):
@@ -92,6 +96,8 @@ fcid = {ch: i + 1 for i, ch in enumerate(OPCH)}                       # 1..23
 SC = '=+-<>&|^.'                                                      # second characters of two-character operators
 gfc = tab256(lambda c: fcid.get(chr(c), 0))
 gsc = tab256(lambda c: SC.index(chr(c)) + 1 if chr(c) in SC else 0)
+gsc24 = [24 * x for x in gsc]
+gopm = [255 * x for x in gop] if False else tab256(lambda c: 255 if chr(c) in OPCH else 0)
 gop = tab256(lambda c: 1 if chr(c) in OPCH else 0)
 def pairval(a, b):                          # 0 not an operator; 1 an operator; 2 ".." (only as the start of "..."); 3 one that '=' extends
     if a + b == '..': return 2
@@ -140,7 +146,7 @@ def strv(k, m):
     if m == S and k == 2 or m == Q and k == 3: return 3
     if m >= S: return 1
     return 1 if m == C and k in (2, 3, 4) else 0
-strt = [strv(i & 7, i >> 3) if i < 64 else 0 for i in range(256)]
+strt = [strv(i >> 3, i & 7) if i < 64 else 0 for i in range(256)]      # index: 8 * kind + context
 # what a token is, from its first byte: 0 operator, 1 identifier, 2 number, 3 string, 4 rune, 5 newline, 6 '.' (a number if a digit follows)
 fam = tab256(lambda c: 5 if c == 10 else 3 if c in (34, 96) else 4 if c == 39 else 6 if c == 46 else 2 if 48 <= c <= 57 else 1 if gw[c] in (1, 3, 4, 5) else 0)
 kww = [[0] * 256 for _ in range(3)]
@@ -162,7 +168,7 @@ for a_ in OPCH:
             if len(o3) == 3 and o3[1:] == a_ + b_: e3k[ix] = OPS[o3]
 semib = [1 if k in SEMI_AFTER else 0 for k in range(256)]
 
-for n, v in (('gk', gk), ('mcls', mcls), ('mdfa', mdfa), ('esc', esc), ('strt', strt), ('gw', gw), ('wdfa', wdfa), ('gfc', gfc), ('gsc', gsc), ('gop', gop), ('e2t', e2t), ('odfa', odfa),
+for n, v in (('gk4', gk4), ('gpk', gpk), ('mcls', mcls), ('mdfa', mdfa), ('esc', esc), ('strt', strt), ('gw', gw), ('wdfa', wdfa), ('gfc', gfc), ('gsc24', gsc24), ('gopm', gopm), ('e2t', e2t), ('odfa', odfa),
              ('wkt', wkt), ('e1k', e1k), ('e2k', e2k), ('e3k', e3k), ('semib', semib), ('kwk', kwk), ('kwa', kww[0]), ('kwb', kww[1]), ('kwc', kww[2])):
     L.append(data(n, v))
 L += f'''0 1 - >Neg
@@ -171,11 +177,12 @@ L += f'''0 1 - >Neg
 N 1 - >Tm
 # One line over the bytes. Left behind: where tokens start (ev) and end (te), and the kind of each (kb),
 # decided at its last byte. A newline outside strings counts as a token of kind 0; most are dropped later.
-#   k     kind of byte;  es  escape state (2: this byte is escaped)
+#   k     4 * kind of byte (tables hand out scaled values: a byte multiply is eight instructions);
+#         es  escape state (2: this byte is escaped);  b1, nx  the bytes before and after
 #   m     context after the byte: 0 code, 1 code (just after */), 2 // comment, 3 /* (just opened), 4 /* comment,
 #         5 string, 6 raw string, 7 rune
 #   sv    string value of (k, m): see strt
-#   code  the byte is program text: in code, not a closing quote, not the '/' that opens a comment
+#   code  255 if the byte is program text: in code, not a closing quote, not the '/' that opens a comment
 #   wl    word state after the byte: 0 none, 1 identifier, 2 decimal, 3 fraction, 4 after e/p, 5 exponent, 6 hex
 #   t,pt  what (previous byte, this byte) and (the two before) are as operators: 0 nothing, 1 an operator,
 #         2 "..", 3 an operator that '=' extends;  pti  the table index of the pair before
@@ -183,7 +190,7 @@ N 1 - >Tm
 #   tc    token byte;  ts  first byte of a token;  tem  first byte after a token
 #   pp    wl + 8 tc + 16 os of the byte before (one carry for all three);  kp  the kind of the token that just ended
 # The runs of zeros move a value to a stack depth whose carry register is free: a line has eight.
-bytes :c @gk :k back @gk :bk 5 = bk 6 = 2 * + 8 * + 0 k 7 = /esc :es 2 = 32 * + + @mcls \\mdfa :m 8 * k + @strt :sv m 0 = sv 0 = & c 47 = peek 47 = peek 42 = | & 1 ^ & :code c @gw c 46 = peek @gw 2 = & + * \\wdfa :wl drop back @gfc c @gsc 24 * + @e2t :t dup 1 = swap 3 = | t 2 = peek 46 = & | back2 @gfc back @gsc 24 * + :pti @e2t :pt 3 = c 61 = & pt 2 = c 46 = & | 2 * + 1 + c @gop code * wl 0 = * * :oc 0 0 oc /odfa :os drop drop drop drop k 1 = m 6 != & peek 0 != & :nl wl 0 != | os 0 != | sv 0 != | :tc 8 * wl + os 16 * + 0 over prev :pp drop drop drop wl 0 != pp 7 & :pw 0 = & os 1 = | nl | sv 5 = | sv 3 = es 2 != & | :ts drop 0 0 0 0 ts %ev drop drop drop drop tc 1 ^ ts | pp 8 & 0 != & :tem drop 0 0 0 0 0 tem %te drop drop drop drop drop pp 48 & :po drop pw 0 != pw back 105 = 8 * + @wkt po 32 = pti @e2k po 48 = pti @e3k back @e1k sel sel sel :kp drop 0 0 0 0 0 kp tem ^kb drop drop drop drop drop end
+bytes :c @gk4 :k back :b1 @gpk + 0 k 28 = /esc :es 2 & + + @mcls \\mdfa :m k + k + @strt :sv m 0 = sv 0 = & c 47 = peek :nx 47 = nx 42 = | & 1 ^ & 1 ^ 1 - :code c @gw c 46 = nx @gw 2 = & + & \\wdfa :wl drop b1 @gfc c @gsc24 + @e2t :t dup 1 = swap 3 = | t 2 = nx 46 = & | back2 @gfc b1 @gsc24 + :pti @e2t :pt 3 = c 61 = & pt 2 = c 46 = & | dup + + 1 + c @gopm & code & wl 1 min 1 - & :oc 0 0 oc /odfa :os drop drop drop drop k 4 = m 6 != & nx 0 != & :nl wl 0 != | os 0 != | sv 0 != | :tc 1 ^ 1 - 8 & wl + os 16 * + 0 over prev :pp drop drop drop wl 0 != pp 7 & :pw 0 = & os 1 = | nl | sv 5 = | sv 3 = es 2 != & | :ts drop 0 0 0 0 ts %ev drop drop drop drop tc 1 ^ ts | pp 8 & 0 != & :tem drop 0 0 0 0 0 tem %te drop drop drop drop drop pp 48 & :po drop pw 0 != 0 b1 105 = - 8 & pw + @wkt po 32 = pti @e2k po 48 = pti @e3k b1 @e1k sel sel sel :kp drop 0 0 0 0 0 kp tem ^kb drop drop drop drop drop end
 # A token that runs to the end of the input has no end position, so the input must end outside a token.
 # Its last byte, if a newline, is left out above (peek is 0 there) and handled with the end of input below.
 &ev &te - 0 != 3 * halt
