@@ -22,7 +22,7 @@ operators, quotes and comments, keeping the lines go/scanner accepts without err
 million of them agree, on one core and on all.
 
 What that does not cover: input `go/scanner` reports errors for (two files were left out; the
-lexer does not diagnose anything), a leading byte-order mark, NUL bytes. Identifier
+lexer does not diagnose anything), a leading byte-order mark, NUL bytes (taken as newlines). Identifier
 characters above 0x7F are taken to be letters, which `go/scanner` checks properly; the corpus
 has 50,582 such bytes and no disagreement, but an input with a non-letter there would differ.
 Carriage returns were excluded from the corpus out of caution; the audit found no mismatch
@@ -143,8 +143,8 @@ Still true:
   masks in general registers, where `and`, `or` and "shift by one" cost almost nothing. A
   mask type in the language is the change I expect most from, and have not made.
 
-Known gaps: the input must end outside a token (a final newline is fine; a file whose last
-byte is part of a token is refused with status 3), and it must not contain NUL bytes.
+A file need not end in a newline: the byte line runs one byte past the input (`bytesz`, added
+for this), so the last token has a byte after it like every other.
 
 Next: cheaper table lookups for small tables, the keyword check only for tokens that can be
 keywords, a line's carry budget, and then the same lexer for a second language to see what

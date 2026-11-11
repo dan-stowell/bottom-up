@@ -60,6 +60,7 @@ input 64 > $N        # vector line: lead `input`, ops, sink `$N` (sum into scala
 | `end` | sink: discard the result (the line's work was its tees) |
 | `input4` | lead only: stdin as little-endian 32-bit integers |
 | `bytes` | lead only: stdin as bytes on **64 unsigned byte lanes** — a *byte line* (below) |
+| `bytesz` | the same, over stdin followed by one zero byte |
 | `/abc` | byte lines only: run the 4-state automaton `abc` over the line; each element becomes the state after reading it (below) |
 | `outif`, `outif4` | sink: `vals mask outif` appends the selected values to stdout (a streaming filter) |
 | `out`, `out4` | sink: append to stdout as bytes / as little-endian dwords |

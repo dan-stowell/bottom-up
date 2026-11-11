@@ -9,7 +9,7 @@ KWB = {k: i for i, k in enumerate(KEYWORDS)}
 for ln, line in enumerate(open(sys.argv[1], encoding='latin1').read().split('\n'), 1):
     h = line.find('#'); toks = (line[:h] if h >= 0 else line).split()
     if not toks or toks[-1][0] == '=': continue
-    byteline = toks[0] == 'bytes' or toks[0][0] == "'"
+    byteline = toks[0] in ('bytes', 'bytesz') or toks[0][0] == "'"
     d = 0; trace = []
     for i, t in enumerate(toks):
         c0 = t[0]; sg = SIGILS.index(c0) + 1 if c0 in SIGILS and len(t) > 1 and opclass(min(ord(t[1]), 127)) in (1, 2, 3) else 0

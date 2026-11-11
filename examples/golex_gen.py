@@ -35,8 +35,9 @@ def tab256(f): return [f(c) for c in range(256)]
 L = []
 
 # ---- 1. context
-# byte kinds: 0 other, 1 newline, 2 ", 3 ', 4 `, 5 /, 6 *, 7 backslash
-gk = tab256(lambda c: {10: 1, 34: 2, 39: 3, 96: 4, 47: 5, 42: 6, 92: 7}.get(c, 0))
+# byte kinds: 0 other, 1 newline (and the zero byte that `bytesz` puts after the input: the end of the input ends
+# what a newline ends), 2 ", 3 ', 4 `, 5 /, 6 *, 7 backslash
+gk = tab256(lambda c: {0: 1, 10: 1, 34: 2, 39: 3, 96: 4, 47: 5, 42: 6, 92: 7}.get(c, 0))
 # classes for the context automaton, from (kind, kind of the byte before: 0 other / 1 slash / 2 star, escaped?)
 #   0 other  1 newline  2 "  3 '  4 `  5 / after /  6 / after *  7 /  8 * after /  9 *
 def mclass(k, pk, esc):
@@ -231,9 +232,9 @@ N 1 - >Tm
 #   tc    token byte;  ts  first byte of a token;  tem  first byte after a token
 #   pp    wl + 8 tc + 16 os of the byte before (one carry for all three);  kp  the kind of the token that just ended
 # The runs of zeros move a value to a stack depth whose carry register is free: a line has eight.
-bytes :c @gk4 :k back :b1 @gpk + 0 k 28 = /esc :es 2 & + + @mcls \\mdfa :m k + k + @strt :sv m 0 = sv 0 = & c 47 = peek :nx 47 = nx 42 = | & 1 ^ & 1 ^ 1 - :code c @gcat b1 @gb1 + back2 @glo + nx 48 - 10 min 10 = 1 - 128 & + @wcls & \\wdfa :wl drop b1 @gfc c @gsc24 + @e2t :t dup 1 = swap 3 = | t 2 = nx 46 = & | back2 @gfc b1 @gsc24 + :pti @e2t :pt 3 = c 61 = & pt 2 = c 46 = & | dup + + 1 + c @gopm & code & wl 3 min 3 = :wf 1 - & :oc 0 0 oc /odfa :os drop drop drop drop k 4 = m 6 != & nx 0 != & :nl wf | os 0 != | sv 0 != | :tc 1 ^ 1 - 8 & wl + os 16 * + 0 over prev :pp drop drop drop wl dup + dup + dup + pp 7 & :pw + @wst c 46 = 1 + & 0 != os 1 = | nl | sv 5 = | sv 3 = es 2 != & | :ts drop 0 0 0 0 ts %ev drop drop drop drop tc 1 ^ ts | pp 8 & 0 != & :tem drop 0 0 0 0 0 tem %te drop drop drop drop drop pp 48 & :po drop pw 3 min 3 = 0 b1 105 = - 8 & pw + @wkt po 32 = pti @e2k po 48 = pti @e3k b1 @e1k sel sel sel :kp drop 0 0 0 0 0 kp tem ^kb drop drop drop drop drop end
-# A token that runs to the end of the input has no end position, so the input must end outside a token.
-# Its last byte, if a newline, is left out above (peek is 0 there) and handled with the end of input below.
+bytesz :c @gk4 :k back :b1 @gpk + 0 k 28 = /esc :es 2 & + + @mcls \\mdfa :m k + k + @strt :sv m 0 = sv 0 = & c 47 = peek :nx 47 = nx 42 = | & 1 ^ & 1 ^ 1 - :code c @gcat b1 @gb1 + back2 @glo + nx 48 - 10 min 10 = 1 - 128 & + @wcls & \\wdfa :wl drop b1 @gfc c @gsc24 + @e2t :t dup 1 = swap 3 = | t 2 = nx 46 = & | back2 @gfc b1 @gsc24 + :pti @e2t :pt 3 = c 61 = & pt 2 = c 46 = & | dup + + 1 + c @gopm & code & wl 3 min 3 = :wf 1 - & :oc 0 0 oc /odfa :os drop drop drop drop k 4 = m 6 != & c 0 != & :nl wf | os 0 != | sv 0 != | :tc 1 ^ 1 - 8 & wl + os 16 * + 0 over prev :pp drop drop drop wl dup + dup + dup + pp 7 & :pw + @wst c 46 = 1 + & 0 != os 1 = | nl | sv 5 = | sv 3 = es 2 != & | :ts drop 0 0 0 0 ts %ev drop drop drop drop tc 1 ^ ts | pp 8 & 0 != & :tem drop 0 0 0 0 0 tem %te drop drop drop drop drop pp 48 & :po drop pw 3 min 3 = 0 b1 105 = - 8 & pw + @wkt po 32 = pti @e2k po 48 = pti @e3k b1 @e1k sel sel sel :kp drop 0 0 0 0 0 kp tem ^kb drop drop drop drop drop end
+# The line runs one byte past the input (bytesz), so every token has an end; only input go/scanner rejects
+# (an unterminated raw string or comment) leaves one open.
 &ev &te - 0 != 3 * halt
 # One line over the tokens, for keywords: an identifier is one if its first twelve bytes hash to a keyword
 # and are equal to it. kf: the final kind of every token.
@@ -243,9 +244,7 @@ ev :s te over - :len drop dup {{text Neg 4 len 4 min - 8 * >> & :a s 4 + Tm min 
 'kf @semib dup prev - $Lq
 Lq 255 & >Ls
 ev 'keepb outif4
-N 0 > >Has
-~Has 0 * Tm + [text 10 = $Lb
-~1 0 * N + Lb - Ls outif4
+~1 0 * N + Ls outif4
 'kf :k2 0 = {SEMI} * k2 + keepb outif
 ~1 0 * {SEMI} + Ls outif
 '''.split('\n')

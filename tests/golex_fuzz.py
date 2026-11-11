@@ -4,7 +4,8 @@
 Each round writes a few thousand random lines, built from the pieces where a lexer's token boundaries are
 decided (digits, dots, exponent and prefix letters, operators, quotes, comments). `golex lines` keeps
 the lines go/scanner accepts without error and gives their tokens; the Strand lexer must give the same
-bytes for the kept file, on one core and on all. Found by the fifth audit: x.0, 0a, 1ii, ...0."""
+bytes for the kept file, on one core and on all. Then whole files, some without a final newline, some ending
+on a page boundary. Found by the fifth audit: x.0, 0a, 1ii, ...0."""
 import os, random, subprocess, sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 B = os.path.join(ROOT, 'build')
@@ -23,7 +24,7 @@ def main():
     r = random.Random(int(sys.argv[2]) if len(sys.argv) > 2 else 1)
     lexer = os.path.join(B, 'golex_strand'); ref = os.path.join(B, 'golex')
     cpu0 = str(min(os.sched_getaffinity(0)))
-    kept = 0
+    kept = files = 0
     for rd in range(rounds):
         src = os.path.join(B, 'gofuzz.in'); ok = os.path.join(B, 'gofuzz.ok')
         with open(src, 'w') as f:
@@ -40,5 +41,17 @@ def main():
                 print(f'FAIL golex fuzz round {rd} ({" ".join(cmd)}), status {p.returncode}: {text[s:e]!r}\n  go/scanner {ex}\n  strand     {got}')
                 sys.exit(1)
         kept += want and len(open(ok, 'rb').read().split(b'\n')) - 1
-    print(f'PASS golex fuzz ({rounds} rounds, {kept} lines go/scanner accepts)')
+        # whole files: constructs that span lines, no newline at the end, sizes that end on a page boundary
+        for i in range(60):
+            text = '\n'.join(line(r) for _ in range(r.choice((0, 1, 2, 5, 40)))) + r.choice(('', '\n', ' ', 'x', '1.', '+', '"s"', '//c', '/*c*/', '`r\nr`'))
+            if i % 10 == 0: text = text.rjust(4096 * r.choice((1, 2)))
+            open(src, 'w').write(text)
+            p = subprocess.run([ref, 'dump', src], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            if not p.stderr.startswith(b'scanner errors: 0'): continue
+            q = subprocess.run([lexer], stdin=open(src, 'rb'), stdout=subprocess.PIPE)
+            files += 1
+            if q.returncode or q.stdout != p.stdout:
+                print(f'FAIL golex fuzz round {rd}, status {q.returncode}: file {text.encode()!r}\n  go/scanner {decode(p.stdout)}\n  strand     {decode(q.stdout)}')
+                sys.exit(1)
+    print(f'PASS golex fuzz ({rounds} rounds: {kept} lines and {files} whole files that go/scanner accepts)')
 main()

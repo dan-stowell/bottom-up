@@ -300,7 +300,7 @@ def interp(src: bytes, inp: bytes):
             if not lt[0].code: continue
             st = []
             n = None
-            byteline = lt[0].cls in (BK + KW['bytes'], BYTESV)
+            byteline = lt[0].cls in (BK + KW['bytes'], BK + KW['bytesz'], BYTESV)
             slsrc = ([t.slot for t in lt if t.cls == SLSRC] or [None])[-1]     # prologues run first: the line's last `(x`
             for t in lt:
                 c = t.cls
@@ -310,6 +310,7 @@ def interp(src: bytes, inp: bytes):
                     sval = (pool[t.poolidx] if t.lit else sca.get(t.slot, 0)) & 255
                     v = vec.get(t.slot, [])
                     if k == 'bytes': n = len(inp); st.append(list(inp)); lsrc = st[-1]
+                    elif k == 'bytesz': n = len(inp) + 1; st.append(list(inp) + [0]); lsrc = st[-1]
                     elif c == BYTESV: n = len(v); st.append([x & 255 for x in v]); lsrc = list(st[-1])
                     elif k == 'peek': st.append(lsrc[1:] + [0] * (1 if n else 0))
                     elif k == 'back': st.append(([0] + lsrc)[:n])

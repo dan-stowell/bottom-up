@@ -72,7 +72,7 @@ class Gen:
         return toks
     def byteline(self):
         """a streaming byte line: 64 lanes, byte arithmetic, table lookups, local tees, streaming sinks"""
-        r = self.r; toks = ['bytes']; d = 1; used = set(); teed = []; newvecs = []
+        r = self.r; toks = [r.choice(('bytes', 'bytes', 'bytesz'))]; d = 1; used = set(); teed = []; newvecs = []
         if not hasattr(self, 'bvecs'): self.bvecs = []
         if not hasattr(self, 'pbvecs'): self.pbvecs = []
         self.bvecs += self.pbvecs; self.pbvecs = []

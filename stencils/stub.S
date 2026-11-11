@@ -135,11 +135,21 @@ _start:
   mov [rbx-16],r13
   cmp r12,0x7fe00000                # vectors are limited to 2^31-1 elements
   jae nomem
-  mov eax,9                         # mmap(0, size, PROT_READ, MAP_PRIVATE, 0, 0)
-  xor edi,edi
+  mov eax,9                         # reserve size + one page of zeros, so that the byte after the input is a 0
+  xor edi,edi                       # that can be read (`bytesz`) whatever the size ...
+  lea rsi,[r12+4096]
+  mov edx,1
+  mov r10d,0x22                     # MAP_PRIVATE | MAP_ANONYMOUS
+  mov r8,-1
+  xor r9d,r9d
+  syscall
+  cmp rax,-4096
+  ja useread
+  mov rdi,rax
+  mov eax,9                         # ... and mmap(there, size, PROT_READ, MAP_PRIVATE | MAP_FIXED, 0, 0) over it
   mov rsi,r12
   mov edx,1
-  mov r10d,2
+  mov r10d,0x12
   xor r8d,r8d
   xor r9d,r9d
   syscall

@@ -30,6 +30,7 @@ PROGS = {
  'gather': '~256 255 swap - >t\ninput @t out\n',
  'store then read next line': 'input 3 * >a\na a prev - >b\nb out4\n',
  'bytes prev': 'bytes dup prev - out\n',
+ 'bytesz': 'bytesz dup prev - peek + back2 ^ :x 0 0 x 0 = %z drop drop out\nz out4\n',
  'bytes words': 'bytes 32 > dup prev 1 ^ & $W\n~1 W + out4\n',
  'bytes filter': 'bytes dup 97 >= over 122 <= & outif\n',
  'bytes table': '~256 3 * 7 + >t\nbytes @t :c c prev ^ out\n',

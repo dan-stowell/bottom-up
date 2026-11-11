@@ -431,6 +431,8 @@ LOOPENDB = """
 8:"""
 FLUSHCHK = "  cmp r8,[rbx-56]\n  jb 3f\n  call [rbx-648]\n3:\n"
 st(BKW('bytes'), 0, LOOPHEADB + "  mov rsi,[rbx-16]\n  vmovdqu8 zmm0{k7}{z},[rsi+rax]", pre="  mov r12,[rbx-8]\n  mov rsi,[rbx-16]\n  mov [rbx-752],rsi\n" + SETUPB)
+# the input and the zero byte the stub keeps after it
+st(BKW('bytesz'), 0, LOOPHEADB + "  mov rsi,[rbx-16]\n  vmovdqu8 zmm0{k7}{z},[rsi+rax]", pre="  mov r12,[rbx-8]\n  inc r12\n  mov rsi,[rbx-16]\n  mov [rbx-752],rsi\n" + SETUPB)
 # `peek`: the line's source one element ahead (0 past the end). The lead's prologue leaves its source
 # pointer in [rbx-752] (once: a cell written in the loop by every thread would bounce between cores); the load is masked to the elements that exist, so it never touches a byte
 # beyond the source.

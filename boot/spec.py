@@ -6,7 +6,7 @@ The first K classes are the keywords, in prelude order.
 """
 KEYWORDS = ['+', '-', '*', '&', '|', '^', 'min', 'max', '<<', '>>',
             '<', '<=', '>', '>=', '=', '!=', 'sel', 'scan', 'scanmax', 'prev',
-            'dup', 'drop', 'swap', 'over', 'input', 'out', 'out4', 'halt', 'end', 'idx', 'input4', 'outif', 'outif4', 'bytes', 'peek', 'back', 'back2']
+            'dup', 'drop', 'swap', 'over', 'input', 'out', 'out4', 'halt', 'end', 'idx', 'input4', 'outif', 'outif4', 'bytes', 'peek', 'back', 'back2', 'bytesz']
 K = len(KEYWORDS)
 PRELUDE = ' '.join(KEYWORDS)
 
@@ -28,7 +28,7 @@ for k in ['+', '-', '*', '&', '|', '^', 'min', 'max', '<<', '>>', '<', '<=', '>'
     DELTA[KW[k]] = -1
 DELTA[KW['sel']] = -2
 DELTA[KW['outif']] = DELTA[KW['outif4']] = -2
-for k in ['dup', 'over', 'input', 'idx', 'input4', 'bytes', 'peek', 'back', 'back2']:
+for k in ['dup', 'over', 'input', 'idx', 'input4', 'bytes', 'peek', 'back', 'back2', 'bytesz']:
     DELTA[KW[k]] = 1
 for c in [VEC, VECLEAD, SCAL, SCALLEAD, LEN, LENLEAD, IOTA, VECL, LENL]:
     DELTA[c] = 1
@@ -52,7 +52,8 @@ LOCALOF[TEE], LOCALOF[VEC], LOCALOF[LEN] = TEEL, VECL, LENL
 SLOT = 64                           # bytes per slot: {ptr, len, byte-table ptr} or one zmm chunk
 
 # Byte lines. A line whose lead is `bytes` runs with 64 unsigned byte lanes per chunk instead of 16
-# dword lanes. Every token on it takes the class BYTEOF[cls]; classes with no byte meaning map to BAD,
+# dword lanes (`bytesz` is the same over the input followed by one zero byte: a scanner that decides a
+# token at the byte after it needs a byte after the last). Every token on it takes the class BYTEOF[cls]; classes with no byte meaning map to BAD,
 # which has no stencil. Named vectors do not exist in byte lines except as chunk-local tees.
 BYTEOF = list(range(NCLS))
 for _c in range(NCODE): BYTEOF[_c] = BAD
@@ -90,7 +91,7 @@ LEADOF[WIDEV] = BYTESV
 #                        lane, p + 4 > len a runtime failure. Overlapping stores land in lane order.
 BYTEOF[BYTESV] = BYTESV
 ISBLEAD = [0] * NCLS                # leads that make their line a byte line
-ISBLEAD[KW['bytes']] = ISBLEAD[BYTESV] = 1
+ISBLEAD[KW['bytes']] = ISBLEAD[KW['bytesz']] = ISBLEAD[BYTESV] = 1
 ISSCAT = [0] * NCLS                 # sinks that write into an existing vector (a line may not also read it)
 ISSCAT[SCATTER] = ISSCAT[SCATTER4] = 1
 ISTEEC = [0] * NCLS                 # '%' compress-tees: one definition, never re-read on their own line
