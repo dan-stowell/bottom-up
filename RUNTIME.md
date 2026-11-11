@@ -43,7 +43,7 @@ this way as well as normally (10,912 runs), `tests/fuzz_sem.py` every random pro
 `tests/pool_big.py` its large inputs, and `test.sh` the Go lexer and the declaration
 index. `tests/pool_big.py` also checks that under chaos the retry and the serial fallback
 are reached on an input where they never are otherwise, so the noise is real. (The lexer
-under chaos on eight cores takes about three times as long, and writes the same tokens.)
+under chaos on eight cores takes about four times as long, and writes the same tokens.)
 
 Two things are deliberately not spoiled, because they are not guesses. The first range's
 carries are the caller's. And a sink's count is where the sink writes: on a one-pass line it
@@ -82,9 +82,9 @@ checks it but tests against the one-CPU run.
 
 What the comparison needs to know about a carry is a fact about the language, not about
 the stub: a sum is compared whole, a `prev` by its last element, an automaton by its
-state. Today the stencils tell the stub by setting bits in their prologues. It belongs in
-`boot/spec.py`, next to the table that says which classes have a carry at all, with the
-prologues generated from it.
+state. That is now written down once, in `boot/spec.py` (`CARRYKIND`, `CARRYBITS`), next to
+the table that says which classes have a carry at all; the stencils' declarations to the
+stub are generated from it instead of being typed into each prologue.
 
 The larger observation is that the policy half is the language's own arithmetic one level
 up. Deriving the carries at the start of each range from every range's effect is a prefix

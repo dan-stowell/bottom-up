@@ -95,6 +95,11 @@ RELEASE = """
   mov [rsi],r9
   mov [rdx],rsi
 4:"""
+def carrydecl(kind, r):
+    """a prologue's declaration, to the stub, of the carry its token keeps in zmm16+r (zmm8+r for a maximum):
+    the bits of [rbx-712] / -716 / -720 the pool reads, from spec.CARRYBITS"""
+    b712, b716, b720 = CARRYBITS[kind]
+    return '\n  '.join(f'or dword ptr [rbx-{cell}],{bits << r}' for cell, bits in ((712, b712), (716, b716), (720, b720)) if bits)
 def failif(cc_ok):   # continue if cc_ok, else call the fail handler
     return f"""
   j{cc_ok} 2f
@@ -148,10 +153,10 @@ for d in range(1, 9):
         for sh in (15, 14, 12, 8):
             t += f"  valignd zmm24,zmm{r},zmm25,{sh}\n  {op} zmm{r},zmm{r},zmm24\n"
         return t + f"  {op} zmm{r},zmm{r},zmm{carry}\n  valignd zmm24,zmm{r},zmm{r},15\n  vpbroadcastd zmm{carry},xmm24"
-    st(KW['scan'], d, scan('vpaddd', '  vpxord zmm25,zmm25,zmm25', 16 + r), pre=f'  vpxord zmm{16+r},zmm{16+r},zmm{16+r}\n  or dword ptr [rbx-712],{1 << r}\n  mov dword ptr [rbx-680],0')
-    st(KW['scanmax'], d, scan('vpmaxsd', '  vpslld zmm25,zmm31,31', 8 + r), pre=f'  vpslld zmm{8+r},zmm31,31\n  or dword ptr [rbx-712],{1 << (8 + r)}\n  mov dword ptr [rbx-680],0')
+    st(KW['scan'], d, scan('vpaddd', '  vpxord zmm25,zmm25,zmm25', 16 + r), pre=f'  vpxord zmm{16+r},zmm{16+r},zmm{16+r}\n  {carrydecl(CK_SUM, r)}\n  mov dword ptr [rbx-680],0')
+    st(KW['scanmax'], d, scan('vpmaxsd', '  vpslld zmm25,zmm31,31', 8 + r), pre=f'  vpslld zmm{8+r},zmm31,31\n  {carrydecl(CK_MAX, r)}\n  mov dword ptr [rbx-680],0')
     st(KW['prev'], d, f"  valignd zmm24,zmm{r},zmm{16+r},15\n  vmovdqa32 zmm{16+r},zmm{r}\n  vmovdqa32 zmm{r},zmm24",
-       pre=f'  vpxord zmm{16+r},zmm{16+r},zmm{16+r}\n  or dword ptr [rbx-712],{1 << (16 + r)}\n  mov dword ptr [rbx-680],0')
+       pre=f'  vpxord zmm{16+r},zmm{16+r},zmm{16+r}\n  {carrydecl(CK_PREV, r)}\n  mov dword ptr [rbx-680],0')
     if d <= 7: st(KW['dup'], d, f"  vmovdqa32 zmm{d},zmm{r}")
     if d <= 7: st(KW['idx'], d, f"  vmovdqa32 zmm{d},zmm26")       # lane indices i..i+15
     st(GATHER, d, f"  lea rcx,[rbx+{DISP}]" + bounds(r) + f"""
@@ -497,7 +502,7 @@ for d in range(1, 9):
   vpsllq zmm25,zmm{r},8
   vpsrlq zmm24,zmm24,56
   vmovdqa64 zmm{16+r},zmm{r}
-  vporq zmm{r},zmm25,zmm24""", pre=f'  vpxord zmm{16+r},zmm{16+r},zmm{16+r}\n  or dword ptr [rbx-712],{1 << (16 + r)}\n  mov dword ptr [rbx-680],0')
+  vporq zmm{r},zmm25,zmm24""", pre=f'  vpxord zmm{16+r},zmm{16+r},zmm{16+r}\n  {carrydecl(CK_PREV, r)}\n  mov dword ptr [rbx-680],0')
     # 256-entry table lookup: the prologue narrows the i32 table to bytes once; the body is two vpermi2b
     st(TABLEB, d, f"""  lea rcx,[rbx+{DISP}]
   mov rsi,[rcx+16]
@@ -627,7 +632,7 @@ for d in range(1, 9):
   vpandd zmm24,zmm24,dword ptr [rbx-824]{{1to16}}
   vmovdqu8 [rdx],zmm24
   vpxord zmm{C},zmm{C},zmm{C}
-  or dword ptr [rbx-712],{1 << (24 + r)}
+  {carrydecl(CK_AUTO4, r)}
   mov dword ptr [rbx-680],{r + 1}""")
 # `v m ^x`: pack the bytes of v selected by m into the byte vector x. One compress per chunk; the count
 # is a sum carry, as for '%', so the line can be split across threads.
@@ -655,7 +660,7 @@ for d in range(3, 9):
   vmovdqu8 [rsi+rdx]{{k2}},zmm24
 3:
   add edx,r10d
-  vpbroadcastd zmm{C},edx""", pre=ALLOC('rsi') + f"\n  lea rcx,[rbx+{DISP}]\n  mov [rcx],rsi\n  mov qword ptr [rcx+8],0\n  mov [rbx-{1152 - 8 * m}],rcx\n  or dword ptr [rbx-720],{1 << m}\n  vpxord zmm{C},zmm{C},zmm{C}\n  or dword ptr [rbx-712],{1 << m}\n  mov dword ptr [rbx-680],0")
+  vpbroadcastd zmm{C},edx""", pre=ALLOC('rsi') + f"\n  lea rcx,[rbx+{DISP}]\n  mov [rcx],rsi\n  mov qword ptr [rcx+8],0\n  mov [rbx-{1152 - 8 * m}],rcx\n  vpxord zmm{C},zmm{C},zmm{C}\n  {carrydecl(CK_COUNT1, m)}\n  mov dword ptr [rbx-680],0")
 # ---- 8-state automata: `x \\t`. The same construction with 8-byte functions in qword lanes: register t
 # (zmm8+t, eight of them) gets the functions of bytes 8g+t, one qword per group g, by `vpermi2q` from a
 # 16-qword table; a 7-step chain composes within groups, a Kogge-Stone scan over the 8 group functions
@@ -725,8 +730,7 @@ def fsm8_pre(d):
   vpbroadcastd zmm25,eax
 """ + half(0) + half(1) + f"""  xor eax,eax
   vpxord zmm{C},zmm{C},zmm{C}
-  or dword ptr [rbx-712],{1 << (24 + r)}
-  or dword ptr [rbx-716],{1 << r}
+  {carrydecl(CK_AUTO8, r)}
   mov dword ptr [rbx-680],{r + 1}""")
 for d in range(1, 9): st(FSM8B, d, fsm8_body(d), pre=fsm8_pre(d))
 st(SUMB, 1, """  vmovdqu8 zmm24{k6}{z},zmm0
@@ -812,7 +816,7 @@ for d in range(2, 9):    # never at depth 1: a line must not end on a tee
   jnz 8f                            # nothing: the serial tail after a pool block may be such a chunk
   mov [rcx+8],rdx
 8:
-  vpbroadcastd zmm{C},edx""", pre=ALLOC('rsi') + f"\n  lea rcx,[rbx+{DISP}]\n  mov [rcx],rsi\n  mov qword ptr [rcx+8],0\n  mov [rbx-{1152 - 8 * r}],rcx\n  or dword ptr [rbx-720],{257 << r}\n  vpxord zmm{C},zmm{C},zmm{C}\n  or dword ptr [rbx-712],{1 << r}\n  mov dword ptr [rbx-680],0")
+  vpbroadcastd zmm{C},edx""", pre=ALLOC('rsi') + f"\n  lea rcx,[rbx+{DISP}]\n  mov [rcx],rsi\n  mov qword ptr [rcx+8],0\n  mov [rbx-{1152 - 8 * r}],rcx\n  vpxord zmm{C},zmm{C},zmm{C}\n  {carrydecl(CK_COUNT4, r)}\n  mov dword ptr [rbx-680],0")
 
 asm = ".intel_syntax noprefix\n.text\n"
 for kind, D in (('S', S), ('Q', PRE)):

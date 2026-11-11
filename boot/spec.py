@@ -148,6 +148,24 @@ CARRY[FSM8B] = 1
 CARRY[PACKB] = 1
 CARRY[WHEREB] = 1                   # ... and so does the count of positions a byte-line '%' has written
 CARRY[FSMB] = 1                    # the automaton's carry (a transition function) lives in zmm16+r too
+# What kind of thing a carry is. The thread pool starts every range of a line but the first from carries
+# it has guessed or derived, and keeps a block only if each range's carries turn out equal to the ones
+# the range before it ended with (RUNTIME.md). "Equal" is by kind, and it must cover everything a token
+# reads of its carry:
+#   CK_SUM     a running sum (scan): every lane.            CK_MAX   a running maximum (scanmax): every lane.
+#   CK_PREV    the previous chunk (prev): its last element.  CK_AUTO4 / CK_AUTO8  an automaton: its state.
+#   CK_COUNT4 / CK_COUNT1  how many dwords / bytes a sink has written: every lane -- except on a line whose
+#              running sums are all counts, where each range writes to scratch memory and the count is
+#              not a guess at all.
+# CARRYBITS[kind] = the bits a token's prologue sets, shifted by its register, in the stub's cells
+# [rbx-712], [rbx-716], [rbx-720]: this table is the only place the two sides meet.
+CK_SUM, CK_MAX, CK_PREV, CK_AUTO4, CK_AUTO8, CK_COUNT4, CK_COUNT1 = range(1, 8)
+CARRYBITS = {CK_SUM: (1, 0, 0), CK_MAX: (1 << 8, 0, 0), CK_PREV: (1 << 16, 0, 0), CK_AUTO4: (1 << 24, 0, 0), CK_AUTO8: (1 << 24, 1, 0),
+             CK_COUNT4: (1, 0, 257), CK_COUNT1: (1, 0, 1)}
+CARRYKIND = [0] * NCLS
+CARRYKIND[KW['scan']] = CK_SUM; CARRYKIND[KW['scanmax']] = CK_MAX; CARRYKIND[KW['prev']] = CARRYKIND[BK + KW['prev']] = CK_PREV
+CARRYKIND[FSMB] = CK_AUTO4; CARRYKIND[FSM8B] = CK_AUTO8; CARRYKIND[WHEREB] = CK_COUNT4; CARRYKIND[PACKB] = CK_COUNT1
+assert all((CARRYKIND[c] != 0) == (CARRY[c] != 0) for c in range(NCLS)) and all((CARRYKIND[c] == CK_MAX) == (CARRY[c] == 2) for c in range(NCLS))
 USES[VECT] = 1; READSVEC[VECT] = 1
 # Byte lines read stored byte vectors too: `x` on a byte line pushes the byte vector x, element for
 # element (its length must be the line's). `peek` pushes the line's own source one element ahead:
