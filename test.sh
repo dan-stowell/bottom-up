@@ -37,6 +37,15 @@ if command -v go >/dev/null; then
   ./build/golex_strand < build/gosmall.go | cmp - build/gosmall.tok
   echo "PASS golex ($(($(stat -c %s build/gosmall.tok) / 5)) tokens)"
   python3 tests/golex_fuzz.py 12
+  # package-level declarations (nesting by a running sum, an automaton over the tokens) against go/parser
+  { echo tests/go/decls.go; cat build/gofiles.small; } > build/gofiles.decl
+  ./build/golex pcorpus build/gofiles.decl > build/godecl.go 2>/dev/null
+  ./build/golex decls build/gofiles.decl > build/godecl.ref
+  python3 examples/godecl_gen.py | cmp - examples/godecl.strand
+  ./build/stage2 < examples/godecl.strand > build/godecl && chmod +x build/godecl
+  taskset -c "$(python3 -c 'import os; print(min(os.sched_getaffinity(0)))')" ./build/godecl < build/godecl.go | cmp - build/godecl.ref
+  ./build/godecl < build/godecl.go | cmp - build/godecl.ref
+  echo "PASS godecl ($(($(stat -c %s build/godecl.ref) / 5)) declarations)"
 else echo "SKIP golex: no go toolchain"; fi
 echo "--- big inputs: the three compilers agree"
 for f in big8 many; do

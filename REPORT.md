@@ -318,6 +318,12 @@ position sinks as sum carries, a warmed-up dry pass, retries.
   nearly free, an automaton is 50-70 cycles, and fresh memory costs 1.4 microseconds a
   page here, which is a fifth of the lexer's time).
 
+- **One step past the lexer** (`examples/godecl.strand`, GOLEX.md): the package-level
+  declarations of the standard library, 335,742 names identical to `go/parser`'s, in three
+  lines on top of the lexer: a running sum for nesting, an 8-state automaton over tokens,
+  a 4-state one for the keyword. 500 ms on one core, 140 on eight; `go/parser` takes about
+  3 seconds to parse the same files (and builds far more).
+
 What that says about where to go: the lexer's remaining cost is four automata, memory it
 writes once and reads once, and a keyword check that visits every token. The second of
 those is a property of the runtime, not of the lexer: every line materialises its result

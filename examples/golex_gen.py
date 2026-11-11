@@ -248,4 +248,4 @@ ev 'keepb outif4
 'kf :k2 0 = {SEMI} * k2 + keepb outif
 ~1 0 * {SEMI} + Ls outif
 '''.split('\n')
-sys.stdout.write('\n'.join(L))
+if __name__ == '__main__': sys.stdout.write('\n'.join(L))

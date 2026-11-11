@@ -84,6 +84,45 @@ keyword if its first twelve bytes hash to one and are equal to it. Three short l
 
 Nothing in it is specific to Go beyond the tables and the two lines.
 
+## One step past the lexer: package-level declarations
+
+`examples/godecl.strand` is the lexer and three more lines. It writes, for every name
+declared at package level (functions, methods, variables, constants, types), the offset of
+the name and what it is. That is what a compiler's parser has to find before anything can
+be resolved, and what `ctags` or an editor's symbol list is.
+
+1. **Nesting**: +1 for every `(` `[` `{`, -1 for every closer, and a running sum over the
+   tokens. On all cores, like any prefix sum.
+2. **An 8-state automaton over the tokens** (kinds are bytes, so a line over tokens is a
+   byte line, with the same automata as a line over text). Its input is each token's kind
+   and whether it is nested not at all, once, or more. After `func` it waits for a name,
+   passing over a receiver; after `var`, `const` or `type` it takes a list of names, or a
+   parenthesised group with one list per statement; everything else it skips to the next
+   semicolon at the right depth. The lexer's automatic semicolons are what make "one
+   statement" visible without a grammar.
+3. **A 4-state automaton** remembers which of the four keywords was last seen outside all
+   brackets.
+
+On the 8,041 files of the standard library that `go/parser` accepts (92.4 MB, 17.0 million
+tokens) the output is byte-identical to a walk over `go/parser`'s declarations: **335,742
+names**, on one core and on eight. `tests/go/decls.go` holds the shapes the library does not
+dwell on (grouped and generic declarations, receivers of every form, declarations inside
+function bodies that must not be listed), and `test.sh` runs both.
+
+| | time |
+|---|---|
+| `go/parser`, parsing only, one thread (it builds the whole syntax tree) | 2,776-3,362 ms |
+| Strand, lexer and declarations, 1 CPU | 492-506 ms |
+| 2 CPUs | 324-341 ms |
+| 4 CPUs | 189-231 ms |
+| 8 CPUs | 131-151 ms |
+
+The three lines add about 45 ms to the lexer on one core, under 3 ns per token. The
+comparison with `go/parser` is not like for like: it produces a tree with every expression
+in it, this produces a list of names. What the row says is that the first thing a parser
+must establish — where the declarations are and what they bind — does not need a parser,
+and that nesting, the part of parsing that looks most sequential, is a prefix sum.
+
 ## What it needed from the language
 
 All added for this, all general (DESIGN.md):
