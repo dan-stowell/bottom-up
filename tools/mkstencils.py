@@ -462,7 +462,17 @@ BBIN = {'+': 'vpaddb', '-': 'vpsubb', '&': 'vpandd', '|': 'vpord', '^': 'vpxord'
 for d in range(2, 9):
     a, b = d - 2, d - 1
     for k, ins in BBIN.items(): st(BKW(k), d, f"  {ins} zmm{a},zmm{a},zmm{b}")
-    for k, imm in CMP.items(): st(BKW(k), d, f"  vpcmpub k1,zmm{a},zmm{b},{imm}\n  vmovdqu8 zmm{a}{{k1}}{{z}},[rbx-1024]")     # 64 bytes of 1
+    # Byte comparisons without a mask register in between: (a xor b) or a saturating difference is nonzero
+    # exactly when the answer is yes, min with 1 makes that 0/1, xor with 1 negates. Two or three plain
+    # vector instructions, each one cycle deep; compare-into-mask then mask-into-vector was three times that,
+    # and a lexer's flags are chains of these.
+    ONE = "[rbx-1024]"                                 # 64 bytes of 1
+    st(BKW('!='), d, f"  vpxord zmm{a},zmm{a},zmm{b}\n  vpminub zmm{a},zmm{a},{ONE}")
+    st(BKW('='), d, f"  vpxord zmm{a},zmm{a},zmm{b}\n  vpminub zmm{a},zmm{a},{ONE}\n  vpxord zmm{a},zmm{a},{ONE}")
+    st(BKW('>'), d, f"  vpsubusb zmm{a},zmm{a},zmm{b}\n  vpminub zmm{a},zmm{a},{ONE}")
+    st(BKW('<'), d, f"  vpsubusb zmm{a},zmm{b},zmm{a}\n  vpminub zmm{a},zmm{a},{ONE}")
+    st(BKW('<='), d, f"  vpsubusb zmm{a},zmm{a},zmm{b}\n  vpminub zmm{a},zmm{a},{ONE}\n  vpxord zmm{a},zmm{a},{ONE}")
+    st(BKW('>='), d, f"  vpsubusb zmm{a},zmm{b},zmm{a}\n  vpminub zmm{a},zmm{a},{ONE}\n  vpxord zmm{a},zmm{a},{ONE}")
     st(BKW('*'), d, f"""  vpmullw zmm24,zmm{a},zmm{b}
   vpsrlw zmm25,zmm{a},8
   vpsrlw zmm26,zmm{b},8
@@ -628,14 +638,17 @@ for d in range(3, 9):
   lea rcx,[rbx+{DISP}]
   mov rsi,[rcx]
   vpcompressb zmm24{{k1}}{{z}},zmm{v}
+  test r15,r15
+  jnz 5f
+  vmovdqu8 [rsi+rdx],zmm24
+  lea r9,[rdx+r10]
+  mov [rcx+8],r9
+  jmp 3f
+5:
   mov r9,-1
   bzhi r9,r9,r10
   kmovq k2,r9
   vmovdqu8 [rsi+rdx]{{k2}},zmm24
-  test r15,r15
-  jnz 3f
-  lea r9,[rdx+r10]
-  mov [rcx+8],r9
 3:
   add edx,r10d
   vpbroadcastd zmm{C},edx""", pre=ALLOC('rsi') + f"\n  lea rcx,[rbx+{DISP}]\n  mov [rcx],rsi\n  mov qword ptr [rcx+8],0\n  vpxord zmm{C},zmm{C},zmm{C}\n  or dword ptr [rbx-712],{1 << m}\n  mov dword ptr [rbx-680],0")
@@ -748,44 +761,53 @@ st(STOREVB, 1, pre=ALLOC('rdi'), text="  kortestq k6,k6\n  jz 3f\n  vmovdqu8 [rd
 for d in range(1, 9):     # ':x' on a byte line, when x is read after the line: the same store, as a tee
     st(TEEBX, d, f"  kortestq k6,k6\n  jz 3f\n  mov rsi,[rbx+{DISP}]\n  vmovdqu8 [rsi+rax]{{k6}},zmm{d-1}\n3:",
        pre=ALLOC('rsi') + f"\n  lea rcx,[rbx+{DISP}]\n  mov [rcx],rsi\n  mov [rcx+8],r12")
-# `m %x` on a byte line appends the positions of the nonzero lanes to the dword vector x: four
-# compresses of the lane indices, 16 lanes each. How many it has written so far is a running sum, kept
+# `m %x` on a byte line appends the positions of the nonzero lanes to the dword vector x: one byte
+# compress of the lane numbers 0..63, then 16 results at a time widened, offset and stored, for as many
+# as there are (a quarter of the bytes or fewer start a token in real text, so usually once or twice). How many it has written so far is a running sum, kept
 # in the sum carry of its depth like `scan`'s, so the thread pool splits the line the same way: the dry
 # pass only counts, every thread then starts from the exact count of the ranges before it and writes
 # its positions where they belong. Each store is masked to the positions found: another thread may
 # already have written just past them. (The slot's length is written every chunk; the pool always
 # leaves a serial tail, so the last write is the right one.)
+def where_parts(masked):
+    out = ""
+    for q in range(4):
+        if q: out += f"  cmp r10,{16 * q}\n  jbe 6f\n  vextracti32x4 xmm26,zmm24,{q}\n  vpmovzxbd zmm26,xmm26\n"
+        else: out += "  vpmovzxbd zmm26,xmm24\n"
+        out += "  vpaddd zmm26,zmm26,zmm25\n"
+        if masked: out += (f"  lea r9,[r10-{16 * q}]\n" if q else "  mov r9,r10\n") + "  mov eax,-1\n  bzhi eax,eax,r9d\n  kmovw k2,eax\n" + f"  vmovdqu32 [rsi+{64 * q}]{{k2}},zmm26\n"
+        else: out += f"  vmovdqu32 [rsi+{64 * q}],zmm26\n"
+    return out
 for d in range(2, 9):    # never at depth 1: a line must not end on a tee
     r = d - 1; C = 16 + r
     st(WHEREB, d, f"""  vptestmb k1{{k7}},zmm{r},zmm{r}
   vmovd edx,xmm{C}
-  kortestw k5,k5
-  jz 3f
-  lea rcx,[rbx+{DISP}]
-  mov rsi,[rcx]
-  vpbroadcastd zmm24,eax
-  push r8
-  mov r8d,-1
-  vpaddd zmm24,zmm24,zmm30""" + """
-  vpcompressd zmm25{k1}{z},zmm24
-  kmovw r10d,k1
-  popcnt r10d,r10d
-  bzhi r9d,r8d,r10d
-  kmovw k2,r9d
-  vmovdqu32 [rsi+rdx*4]{k2},zmm25
-  add rdx,r10
-  kshiftrq k1,k1,16
-  vpaddd zmm24,zmm24,dword ptr [rbx-44]{1to16}""" * 4 + f"""
-  pop r8
-  test r15,r15                      # the length: only on the serial path (a cell written by every thread
-  jnz 4f                            # every chunk would bounce between cores; the serial tail writes it last)
-  mov [rcx+8],rdx
-  jmp 4f
-3:
   kmovq r10,k1
   popcnt r10,r10
-  add rdx,r10
+  lea rcx,[rbx+{DISP}]
+  kortestw k5,k5
+  jz 4f
+  test r10,r10
+  jz 4f
+  mov rsi,[rcx]
+  lea rsi,[rsi+rdx*4]
+  vmovdqu8 zmm25,[rbx-1088]
+  vpcompressb zmm24{{k1}}{{z}},zmm25
+  vpbroadcastd zmm25,eax
+  test r15,r15
+  jnz 5f
+""" + where_parts(False) + """6:
+  jmp 4f
+5:
+  push rax
+""" + where_parts(True).replace("jbe 6f", "jbe 7f") + f"""7:
+  pop rax
 4:
+  add edx,r10d
+  test r15,r15                      # the length, on the serial path only, and even when this chunk found
+  jnz 8f                            # nothing: the serial tail after a pool block may be such a chunk
+  mov [rcx+8],rdx
+8:
   vpbroadcastd zmm{C},edx""", pre=ALLOC('rsi') + f"\n  lea rcx,[rbx+{DISP}]\n  mov [rcx],rsi\n  mov qword ptr [rcx+8],0\n  vpxord zmm{C},zmm{C},zmm{C}\n  or dword ptr [rbx-712],{1 << r}\n  mov dword ptr [rbx-680],0")
 
 asm = ".intel_syntax noprefix\n.text\n"

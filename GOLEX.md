@@ -27,20 +27,20 @@ Whole process (start, map the file, lex, write 136 MB of output to /dev/null), m
 
 | | time | |
 |---|---|---|
-| `go/scanner`, scan only | 601 ms | 154 MB/s, 35 ns per token |
+| `go/scanner`, scan only | 604-608 ms | 153 MB/s, 35 ns per token |
 | the same in a process that reads the file and writes the tokens | 1,142 ms | |
-| Strand, 1 CPU | 531 ms | 174 MB/s |
-| Strand, 2 CPUs | 396 ms | |
-| Strand, 4 CPUs | 248 ms | |
-| Strand, 8 CPUs | 180 ms | 515 MB/s |
+| Strand, 1 CPU | 447-453 ms | 205 MB/s |
+| Strand, 2 CPUs | 368-382 ms | |
+| Strand, 4 CPUs | 204-213 ms | |
+| Strand, 8 CPUs | 125-137 ms | 700 MB/s |
 
-(Earlier versions of the same program on one core: 1,143 ms, then 610, then 537; the changes
-are in the git history and each was a change of shape, not of tuning.)
+(The same program on one core over the last day: 1,143 ms, 610, 537, 516, 448. Peak memory
+is 294 MB for the 93 MB input.)
 
-So: on one core Strand does the whole job, file to tokens, in a little less time than
-`go/scanner` takes for the scan alone, and on eight cores in a third of it. It is not the
-several-fold single-core win that the byte-lane primitives suggest on paper; the reasons
-are below and are the work list.
+So: on one core Strand does the whole job, file to tokens, in three quarters of the time
+`go/scanner` takes for the scan alone, and on eight cores in under a quarter of it. It is
+not the several-fold single-core win that the byte-lane primitives suggest on paper; the
+reasons are below and are the work list.
 
 ## How it works
 
@@ -87,25 +87,47 @@ All added for this, all general (DESIGN.md):
 
 ## Where the time goes, and what is next
 
-One core, 537 ms, of which about 100 ms is the kernel faulting in 200 MB of vectors.
+There is no profiler on this VM, so there are now two small ones: `tools/simdratio.c`
+single-steps a binary and counts instructions by kind, and `tools/sample.c` stops it every
+250 microseconds and records where it was; `tools/whattime.py` maps both back to tokens of
+the source. On one core (1,457 samples):
 
-- **The byte line executes about 880 instructions per 64 bytes** (measured with
-  `tools/simdratio.c`: 76% vector, 7% mask, 18% scalar, no gathers), of which the four
-  automata are under 200. The rest is table lookups (eight instructions each, about twenty
-  of them), comparisons, literals, and moving values to stack depths whose carry register
-  is free. A line has eight carry registers and this one uses all eight.
-- **Fewer instructions did not mean proportionally less time.** Rewriting the line without
-  byte multiplies (eight instructions each; tables now hand out pre-scaled values) removed
-  13% of its instructions and 1% of its time. Every flag in this line is a 64-byte vector
-  and every `&` and `|` a 512-bit operation, which this CPU executes as two 256-bit ones.
-  A lexer written by hand keeps such flags as 64-bit masks in general registers. A mask
-  type in the language is the change I expect most from, and have not made.
-- **The token line does seven gathers per token** for the keyword check, and gathers cost
-  scalar-loop prices on this CPU (HARDWARE.md). Most tokens are not identifiers and do not
-  need them; SIMD lanes cannot skip work.
+| share | where |
+|---|---|
+| 72% | the line over the bytes |
+| 24% | the keyword line over the tokens |
+| 4% | semicolons and output |
+
+and by kind of token: position sinks 20%, the two 8-state automata 19%, the two 4-state
+automata 13%, table lookups 11%, the keyword line's text gathers 8%, tees 4%, pushes 4%,
+literals 4%, packing 3%.
+
+What the profilers found, in the order found:
+
+- **The position sinks were 29% of the run.** Four compress-and-store rounds per chunk, with
+  masked stores. Now one byte compress of the lane numbers and as many widen-and-store
+  steps as there are results (usually one or two), unmasked on the serial path: 516 to
+  448 ms. What is left of their 20% is mostly the first touch of the memory they write
+  (two 80 MB vectors): about 85 ms of the 448 is the kernel.
+- **Comparisons through mask registers were slow**: compare into a mask, then mask into a
+  vector. A lexer's flags are chains of them. They are now two or three plain vector
+  instructions (xor or saturating subtract, then min with 1).
+- **Byte multiplies are eight instructions**, and removing every one of them from the line
+  (tables hand out pre-scaled values) took 13% of its instructions and 1% of its time: this
+  line is not limited by instruction count. It executes about 880 instructions per 64
+  bytes, 76% of them vector.
+- **Two cells written by every thread every chunk** made eight threads slower than one.
+
+Still true:
+
+- **The token line does seven gathers per token**, at scalar-loop prices on this CPU, and
+  most tokens are not identifiers and do not need them. SIMD lanes cannot skip work.
 - **The dry pass doubles the byte line's work on more than one core.**
-- **A fixed-size cost**: every vector is as long as the input, so 93 MB of source means
-  330 MB of fresh pages. A streaming form would reuse them.
+- **Every vector is as long as the input.** 93 MB of source is 200 MB of fresh pages. A
+  streaming form would reuse them.
+- **Every flag is a 64-byte vector.** A lexer written by hand keeps its flags as 64-bit
+  masks in general registers, where `and`, `or` and "shift by one" cost almost nothing. A
+  mask type in the language is the change I expect most from, and have not made.
 
 Known gaps: the input must end outside a token (a final newline is fine; a file whose last
 byte is part of a token is refused with status 3), and it must not contain NUL bytes.

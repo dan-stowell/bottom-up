@@ -277,8 +277,11 @@ absolute time. In order:
   read by index) and the compiler's own lexer moved onto it; names became four dwords;
   code emission became slice copies and dword stores. The self-hosted compiler went from
   52 ms to 45 ms for 1 MB of source (the scalar C one: 41 ms) and from 2.5x the C
-  compiler's memory to a little under it. On one core it is still about 10% slower than
-  scalar C (fourth audit: 395 ms against 360 at 8.3 MB); on eight cores, 312 against 369.
+  compiler's memory to a little under it. At that point it was about 10% slower than scalar C
+  on one core (fourth audit: 395 ms against 360 at 8.3 MB). After the stencil changes the
+  lexer work forced (cheaper comparisons and position sinks), on today's larger tables:
+  55.8 ms against 61.0 for 1.36 MB of source, 506 ms against 573 for 10.9 MB, one core;
+  383 ms on eight. At 169 KB the C compiler is still ahead, 5.9 ms against 6.5.
 - **What it executes** is now measured, not estimated (`tools/simdratio.c`): compiling its
   own source, 10.2M instructions, 57% vector, 3% gather/scatter, 9% mask, 31% scalar. The
   3% is where about half the time goes.
@@ -287,7 +290,7 @@ absolute time. In order:
   linker in Strand produces the C reference's 262 MB image byte for byte, in 303 ms
   against 238.
 - **A Go lexer** (GOLEX.md): byte-identical to `go/scanner` on 92.5 MB of the standard
-  library, 531 ms on one core and 180 on eight, against 601 ms for `go/scanner`'s scan.
+  library, 450 ms on one core and 130 on eight, against 605 ms for `go/scanner`'s scan.
 
 Language additions this round: byte vectors and positions from byte lines, `[x` `{x` `}x`,
 `.x` `'x` `<x` `,x`, slice copies `(src )dst`, 8-state automata `\t`, `peek` `back`

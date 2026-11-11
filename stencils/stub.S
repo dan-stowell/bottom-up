@@ -3,7 +3,7 @@
 # See SCALAR_LEDGER.md.
 #
 # Layout contract with the stencils (rbx = address of the first byte after this blob):
-#   [rbx-1024..-960) 64 bytes of 1
+#   [rbx-1088..-1024) the bytes 0..63   [rbx-1024..-960) 64 bytes of 1
 #   [rbx-960..-768) constants of the automaton stencils (see the end of this file)
 #   [rbx-712] carries the current line uses: bit r = running sum in zmm16+r, bit 8+r = running max
 #             in zmm8+r, bit 16+r = prev in zmm16+r, bit 24+r = automaton function in zmm16+r
@@ -914,6 +914,8 @@ f_blkout:   .quad 0x400000             #   bytes of output per block
 f_a28:    .fill 64,1,0
 f_a29:    .fill 64,1,0
   .balign 64
+  .byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31   # [rbx-1088] bytes 0..63
+  .byte 32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63
   .fill 64,1,1                      # [rbx-1024] 64 bytes of 1: what a byte comparison yields
   .long 0,0x04040404,0x08080808,0x0c0c0c0c, 0,0x04040404,0x08080808,0x0c0c0c0c   # [rbx-960] dword offsets
   .long 0,0x04040404,0x08080808,0x0c0c0c0c, 0,0x04040404,0x08080808,0x0c0c0c0c   #   within a 128-bit lane
