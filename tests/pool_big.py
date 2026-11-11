@@ -37,8 +37,8 @@ def main():
     nm = subprocess.run(['nm', B + 'stub.o'], capture_output=True, text=True, check=True).stdout
     sym = {l.split()[-1]: int(l.split()[0], 16) for l in nm.splitlines() if len(l.split()) == 3}
     patch = bytes.fromhex('b8e7000000bf4d0000000f05'); ins = dict(ins); npath = 0
-    for name, iname, label, k, what in (('rate', 'random', 'fo4', 2, 'pieces moved together'), ('rate', 'nothing, then everything', 'fo9', 2, 'collision found'),
-                                        ('toggle', 'random', 'fsretry', min(4, ncpu), 'retry'), ('toggle', 'random', 'fsbad', 2, 'serial block'),
+    for name, iname, label, k, what in (('rate', 'random', 'fcopied', 2, 'pieces copied into place'), ('rate', 'nothing, then everything', 'fcopied', min(4, ncpu), 'pieces copied into place'),
+                                        ('toggle', 'random', 'fsretry', min(4, ncpu), 'retry'), 
                                         ('toggle, pack, prev', 'rare toggles', 'fsretry', min(4, ncpu), 'retry')):
         if ncpu < k: continue
         elf = subprocess.run([B + 'stage2'], input=PROGS[name].encode(), capture_output=True).stdout

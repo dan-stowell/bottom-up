@@ -39,13 +39,16 @@ Whole process (start, map the file, lex, write 136 MB of output to /dev/null), m
 | `go/scanner`, scan only | 549-608 ms | 153-168 MB/s |
 | the Go compiler's own scanner (`cmd/compile/internal/syntax`), scan only | 497-513 ms | measured by the fifth audit's harness |
 | the same in a process that reads the file and writes the tokens | 1,142 ms | |
-| Strand, 1 CPU | 447-453 ms | 205 MB/s |
-| Strand, 2 CPUs | 368-382 ms | |
-| Strand, 4 CPUs | 204-213 ms | |
-| Strand, 8 CPUs | 125-137 ms | 700 MB/s |
+| Strand, 1 CPU | 456-460 ms | 200 MB/s |
+| Strand, 2 CPUs | 292-297 ms | (382 before the one-pass pool, below) |
+| Strand, 3 CPUs | 206-210 ms | (319) |
+| Strand, 4 CPUs | 165-177 ms | (204) |
+| Strand, 8 CPUs | 101-121 ms | (131) 760-900 MB/s |
 
-(The same program on one core over the last day: 1,143 ms, 610, 537, 516, 448. Peak memory
-is 294 MB for the 93 MB input.)
+Strand's rows are minimum and median of 11 runs, timed around `taskset` and the process.
+(The same program on one core over the last day: 1,143 ms, 610, 537, 516, 448; the ten
+milliseconds since are the price of getting numbers right. Peak memory is 294 MB for the
+93 MB input.)
 
 So: on one core Strand does the whole job, file to tokens, in about 50 ms less than the Go
 compiler's scanner takes for the scan alone, and on eight cores in about a quarter of it.
@@ -92,10 +95,15 @@ All added for this, all general (DESIGN.md):
   (`v m ^x`) and read lane for lane on a dword line (`'x`), and literals up to ten digits.
 - **Position sinks that run on all cores**: `%x` keeps its count in a sum carry, so the
   pool splits the line like a prefix sum.
-- A **better guess in the pool's dry pass**: each automaton enters its range in the state
-  a 4 KB warm-up leaves it in, and the guess is peeled off afterwards. With five carries
-  feeding each other, guessing state 0 cost four retries per block; now 5 retries in 24
-  blocks on this corpus.
+- A **pool that runs such a line once, not twice.** A line with running sums used to run a
+  dry pass on every core to learn where each range's results go and in what state it
+  starts, then the real pass. For this line every running sum is the count of a sink, so:
+  each automaton enters its range in the state a 4 KB warm-up leaves it in (checked against
+  the range before afterwards, as always; about 3% of ranges guess wrong, and now only
+  those are redone), each range writes its tokens to scratch memory of its own, and when
+  the counts are known every core copies its piece into place. On two cores that took the
+  lexer from 382 to 295 ms. `tests/pool_big.py` feeds it inputs built to defeat the guesses.
+- **`bytesz`**: a byte line over the input and one zero byte after it.
 
 ## Where the time goes, and what is next
 
@@ -136,7 +144,9 @@ Still true:
 
 - **The token line does seven gathers per token**, at scalar-loop prices on this CPU, and
   most tokens are not identifiers and do not need them. SIMD lanes cannot skip work.
-- **The dry pass doubles the byte line's work on more than one core.**
+- **Eight cores do 3.8 times the work of one, not 8.** The byte line itself goes from 331
+  to about 50 ms of each core's time; around it are ranges redone after a wrong guess while
+  the other cores wait, first touches of fresh memory, and the lines that write the output.
 - **Every vector is as long as the input.** 93 MB of source is 200 MB of fresh pages. A
   streaming form would reuse them.
 - **Every flag is a 64-byte vector.** A lexer written by hand keeps its flags as 64-bit

@@ -188,8 +188,11 @@ derived carries, a real pass and a verification. A carry that depends on another
 sum of a sum, an automaton fed by an automaton's states) is guessed wrong by the dry pass;
 the real pass then ran the carries it depends on exactly, so its own start and end values
 give the right carries for one more pass. The pool retries like that while the number of
-passes stays below the number of threads, and otherwise finishes the block on one thread
-(SWEETSPOT.md, "Dependent carries"). Parallel execution is therefore a property of the
+passes stays below the number of threads, and otherwise runs that block on one thread
+(SWEETSPOT.md, "Dependent carries"). A line whose only running sums are the counts of its
+sinks (`%x`, `^x` on a byte line) skips the dry pass: states are guessed from a warm-up and
+verified, every range writes its results to scratch memory, and once the counts are known
+each thread copies its own piece into place; only ranges that guessed wrong are redone. Parallel execution is therefore a property of the
 line *and* the thread count, not a guarantee: `tests/pool.py` asserts which path each of
 its programs takes. The compiler's source did not change for any of this.
 

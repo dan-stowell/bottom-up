@@ -278,7 +278,8 @@ exit:
 # Per-thread block (8192 bytes, allocated when the pool starts): +0 lo, +8 hi, +16 output start,
 # +24 last seq, +32 output end, +40 continuation, +48 reset-accumulators flag, +64 scratch,
 # +128 sum acc, +192 max acc, +256 W, +1280 IN, +2304 OUT, +3328 OUT', +4352 INw
-# (16 zmm each: zmm8..zmm23), +5376 the counts a speculative pass starts its sinks from (8 qwords).
+# (16 zmm each: zmm8..zmm23); one-pass lines: +56 rerun-this-range flag, +5376 the counts its sinks start
+# from (8 qwords), +5440 what to copy afterwards (8 x to, from, bytes).
 .macro savecar base
   .irp i,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23
   vmovdqu32 [\base+(\i-8)*64],zmm\i
@@ -295,6 +296,20 @@ exit:
 .endm
 
 dojob:                              # r13 = this thread's block; continues at [r13+40]
+  cmp dword ptr [rip+j_mode],4
+  jne 0f
+  lea r9,[r13+5440]                 # mode 4: copy this thread's pieces of a one-pass block into place
+  mov edx,8
+1:
+  mov rdi,[r9]
+  mov rsi,[r9+8]
+  mov rcx,[r9+16]
+  rep movsb
+  add r9,24
+  dec edx
+  jnz 1b
+  jmp [r13+40]
+0:
   mov r11,[rip+j_head]
   mov rdi,[rip+j_rdi]
   mov r12,[rip+j_n]
@@ -370,10 +385,10 @@ dj_dry:
   jmp dj_end
 dj_spec:                            # speculative pass (no dry pass came before): guess this range's carries.
   mov eax,[rbx-712]                 # Automata: the state the warm-up left them in, as in the dry pass.
-  .irp i,16,17,18,19,20,21,22,23    # `prev`: what the warm-up left. A sink's count: a number the pool
-  bt eax,\i+8                       # chose (fscan) that is, it hopes, no smaller than the true count, so
-  jnc 1f                            # that the range writes its results where no other range's are, and
-  vpbroadcastb zmm\i,xmm\i          # the pool moves them down afterwards.
+  .irp i,16,17,18,19,20,21,22,23    # `prev`: what the warm-up left. A sink's count: the one that makes
+  bt eax,\i+8                       # the sink write to this thread's scratch area (fscan).
+  jnc 1f
+  vpbroadcastb zmm\i,xmm\i
 1:
   .endr
   mov eax,[rbx-720]
@@ -386,6 +401,14 @@ dj_spec:                            # speculative pass (no dry pass came before)
   savecar r13+1280
   jmp dj_real0
 dj_real:
+  cmp dword ptr [rip+f_spec],0
+  je 0f
+  cmp dword ptr [r13+56],0
+  jne 0f
+  vmovdqu32 zmm28,[r13+128]         # a range of a one-pass line whose carries were right: what it did stands
+  vmovdqu32 zmm29,[r13+192]
+  jmp dj_end
+0:
   cmp r13,[rip+wbase]
   je dj_real0                       # the first range starts from the caller's true carries
   loadcar r13+4352                  # the others: one warm-up chunk from INw
@@ -409,6 +432,16 @@ dj_real1:
   .endr
 dj_real0:
   loadcar r13+1280
+  cmp dword ptr [rip+f_spec],0
+  je 0f
+  mov eax,[rbx-720]                 # one-pass line: a sink's count starts where the pool said (fscan)
+  .irp i,16,17,18,19,20,21,22,23
+  bt eax,\i-16
+  jnc 1f
+  vpbroadcastd zmm\i,dword ptr [r13+5376+8*(\i-16)]
+1:
+  .endr
+0:
   mov eax,[rbx-712]                 # an automaton starts from "state ^ e", e = the state it is
   .irp i,16,17,18,19,20,21,22,23    # believed to enter in (stored xor identity: e in every byte).
   bt eax,\i+8                       # Only that state reaches the output, and being a permutation
@@ -514,10 +547,35 @@ fork:
   mov [rip+f_stride],rax
   mov qword ptr [rip+f_bs],0
   mov dword ptr [rip+f_nbad],0
-  mov ecx,0x10000                   # no rate yet: one result per element
-  .irp i,0,1,2,3,4,5,6,7
-  mov [rip+f_dens+8*\i],rcx
-  .endr
+  # A line whose running sums are all counts of its sinks, and that writes nothing to stdout, needs no dry
+  # pass (fscan). Its ranges write their results to scratch memory past the bump pointer: 8 areas per
+  # thread, each big enough for a range of 2^18 elements.
+  mov dword ptr [rip+f_line],0
+  mov ecx,[rbx-712]
+  mov edx,[rbx-720]
+  test ecx,0xff00
+  jnz 9f
+  and ecx,0xff
+  jz 9f
+  and edx,0xff
+  cmp ecx,edx
+  jne 9f
+  test eax,eax
+  jnz 9f
+  mov rcx,[rip+f_r13]
+  add rcx,127
+  and rcx,-64
+  mov [rip+f_scr],rcx
+  mov edx,[rip+nthreads]
+  imul rdx,rdx,0x800200
+  add rcx,rdx
+  cmp rcx,[rbx-64]
+  ja 9f
+  sub rcx,[rbx-40]                  # a count is 32 bits: the scratch must be that near every vector of the heap
+  cmp rcx,0x7fffffff
+  ja 9f
+  mov dword ptr [rip+f_line],1
+9:
   mov dword ptr [rip+f_probe],1
   test eax,eax
   jz fblock
@@ -534,6 +592,13 @@ fblock:
   je 2f
   mov rdx,[rip+f_blkprobe]
 2:
+  cmp dword ptr [rip+f_line],0
+  je 22f
+  mov edx,[rip+nthreads]            # one-pass lines: ranges of 2^18 elements, whose results fit a core's cache
+  shl rdx,18
+  cmp rdx,[rip+f_blkscan]
+  cmova rdx,[rip+f_blkscan]
+22:
   mov rax,[rip+f_stride]
   test rax,rax
   jz 3f
@@ -599,28 +664,14 @@ fscan:                              # scan line: dry pass, derive carries, real 
   # One pass instead of two when every running sum of the line is a sink's count and nothing is written
   # to stdout: the dry pass exists to find out where each range's results go and what state it starts in.
   # The state can be guessed (and checked afterwards, as always); the place need not be known at all if
-  # every range writes at the highest place its results could have, and they are moved together after.
+  # every range but the first writes to scratch memory of its own and copies its results to where they
+  # belong once the counts before it are known. A sink writes at "vector + count": a range's count
+  # starts at the distance from the vector to its scratch area.
   mov dword ptr [rip+f_spec],0
-  mov dword ptr [rip+f_spec0],0
-  mov eax,[rbx-712]
-  mov ecx,[rbx-720]
-  test eax,0xff00
-  jnz 1f
-  and eax,0xff
-  jz 1f
-  and ecx,0xff
-  cmp eax,ecx
-  jne 1f
-  cmp qword ptr [rip+f_stride],0
-  jne 1f
+  cmp dword ptr [rip+f_line],0
+  je 1f
   mov dword ptr [rip+f_spec],1
-  mov dword ptr [rip+f_spec0],1
   mov dword ptr [rip+f_soft],0
-  # Where does range t write? At the true count so far, plus twice what the ranges before it would produce
-  # at the rate of the block before this one, plus a little: close above where its results
-  # belong, so that the pages it touches are the ones the results end up in. Never above the index of its
-  # first element (no count can be higher; the first block, with no rate to go by, uses that). A range
-  # whose results run into the next range's is found out afterwards, and the block is redone exactly.
   xor edx,edx
 fg1:
   bt dword ptr [rbx-720],edx
@@ -628,25 +679,28 @@ fg1:
   mov r10,[rip+wbase]
   mov rax,rdx
   shl rax,6
-  mov r9d,[r10+rax+1280+512]        # the count so far
-  lea rdi,[rip+f_dens]
-  mov rdi,[rdi+rdx*8]               # results per element, 16 fractional bits
+  mov r9d,[r10+rax+1280+512]        # the first range: the true count so far, in place
+  mov [r10+5376+rdx*8],r9
+  mov rdi,[rbx+rdx*8-1152]
+  mov rdi,[rdi]                     # the vector
+  imul rsi,rdx,0x100040
+  add rsi,[rip+f_scr]
+  sub rsi,rdi
+  lea eax,[rdx+8]
+  bt dword ptr [rbx-720],eax
+  jnc 2f
+  shr rsi,2
+2:
   mov ecx,1
 fg2:
   add r10,8192
-  mov rsi,[r10]                     # lo
-  mov rax,rsi
-  sub rax,[rip+f_bs]
-  imul rax,rdi
-  shr rax,16
-  add rax,rax
-  mov r8d,ecx
-  shl r8,10
-  add rax,r8
-  add rax,r9
-  cmp rax,rsi
-  cmova rax,rsi
-  mov [r10+5376+rdx*8],rax
+  lea rax,[rsi+0x800200]            # the next thread's area is this far on, in bytes ...
+  lea r9,[rsi+0x200080]             # ... or in dwords
+  lea edi,[rdx+8]
+  bt dword ptr [rbx-720],edi
+  cmovc rax,r9
+  mov rsi,rax
+  mov [r10+5376+rdx*8],rsi
   inc ecx
   cmp ecx,[rip+nthreads]
   jb fg2
@@ -689,6 +743,51 @@ fs3:
   inc ecx
   cmp ecx,[rip+nthreads]
   jb fs2
+  cmp dword ptr [rip+f_spec],0
+  je fs6
+  # A retry of a one-pass line reruns only the ranges whose carries, as now derived, differ from the ones
+  # they ran with (W): the state of an automaton, the last element of a `prev`.
+  mov r10,[rip+wbase]
+  mov dword ptr [r10+56],0
+  mov ecx,1
+  xor r9d,r9d                       # ranges to rerun
+ff1:
+  add r10,8192
+  xor esi,esi
+  xor edx,edx
+ff2:
+  lea eax,[rdx+16]
+  bt dword ptr [rbx-712],eax
+  jnc ff3
+  mov rax,rdx
+  shl rax,6
+  mov edi,[r10+rax+1280+512+60]
+  xor edi,[r10+rax+256+512+60]
+  or esi,edi
+ff3:
+  lea eax,[rdx+24]
+  bt dword ptr [rbx-712],eax
+  jnc ff4
+  mov rax,rdx
+  shl rax,6
+  movzx edi,byte ptr [r10+rax+1280+512]
+  xor dil,[r10+rax+256+512]
+  or esi,edi
+ff4:
+  inc edx
+  cmp edx,8
+  jb ff2
+  test esi,esi
+  setnz sil
+  movzx esi,sil
+  mov [r10+56],esi
+  add r9d,esi
+  inc ecx
+  cmp ecx,[rip+nthreads]
+  jb ff1
+  test r9d,r9d
+  jz fsbad
+fs6:
   mov dword ptr [rip+f_soft],0
   mov dword ptr [rip+j_mode],2
   lea rax,[rip+fs7]
@@ -696,12 +795,7 @@ fs3:
   jmp runall
 fs7:
   cmp dword ptr [rip+f_soft],0
-  je 1f
-  cmp dword ptr [rip+f_spec],1      # a check that fails on guessed carries proves nothing: go and get exact ones
   jne fsbad
-  mov dword ptr [rip+f_bad],0x10000
-  jmp fsretry
-1:
   mov r10,[rip+wbase]               # verify: IN[t] == real OUT[t-1] for every carry in use
   mov ecx,1
   mov eax,[rbx-712]
@@ -712,9 +806,9 @@ fs7:
   mov r9d,eax
   shr r9d,24
   or eax,r9d
-  cmp dword ptr [rip+f_spec],1
-  jne fs8
-  mov r9d,[rbx-720]                 # after a speculative pass the counts are not compared: they are made right below
+  cmp dword ptr [rip+f_spec],0
+  je fs8
+  mov r9d,[rbx-720]                 # on a one-pass line the counts are not compared: each range has its own
   and r9d,0xff
   not r9d
   and eax,r9d
@@ -763,104 +857,92 @@ fs10:
   cmp dword ptr [rip+f_bad],0
   jne fsretry
   mov dword ptr [rip+f_probe],0
-  cmp dword ptr [rip+f_spec],1
-  jne fgood
-  # The speculative pass stands. Every sink's results lie in one piece per range, range t's at element
-  # IN[t] of the sink's vector and OUT[t] - IN[t] long. Move them together, in order (always downwards, so
-  # a forward copy is right even where source and destination overlap), and give the caller the true count.
-  xor edx,edx                       # first: did any range's results reach the next range's?
-fo1:
-  bt dword ptr [rbx-720],edx
-  jnc fo3
+  cmp dword ptr [rip+f_spec],0
+  je fgood
+  # The one-pass block stands. Every sink's results lie in one piece per range: the first range's in
+  # place, range t's in its scratch area, OUT[t] minus the count it started from long. Every thread copies
+  # its own pieces to where they belong (they are in its cache, and the pages they go to are new).
   mov r10,[rip+wbase]
-  mov rax,rdx
-  shl rax,6
-  mov ecx,[rip+nthreads]
-  dec ecx
-fo2:
-  mov esi,[r10+rax+2304+512]        # OUT[t] ...
-  add r10,8192
-  cmp esi,[r10+rax+1280+512]        # ... against IN[t+1]
-  ja fo9
-  dec ecx
-  jnz fo2
-fo3:
+  xor edx,edx
+fc0:
+  lea rax,[rdx+rdx*2]
+  mov qword ptr [r10+5440+rax*8+16],0
   inc edx
   cmp edx,8
-  jb fo1
-  jmp fo4
-fo9:
-  mov dword ptr [rip+f_bad],0x10000
-  lea rdi,[rip+f_dens]
-  mov qword ptr [rdi+rdx*8],0x10000 # and this sink's rate is not to be trusted for the next block
-  jmp fsretry
-fo4:
+  jb fc0
   xor edx,edx                       # carry register r
 fc1:
-  bt dword ptr [rbx-720],edx
-  jnc fc5
   mov r10,[rip+wbase]
   mov rax,rdx
   shl rax,6
-  mov r9d,[r10+rax+2304+512]        # the first range's count is the true one
+  mov r9d,[r10+rax+2304+512]        # the count after the first range is the true one
   mov ecx,[rip+nthreads]
   dec ecx
   mov [rip+f_cnt],ecx
 fc2:
   add r10,8192
+  lea rdi,[rdx+rdx*2]
+  lea rdi,[r10+5440+rdi*8]          # this thread's (to, from, bytes) for this register
+  mov qword ptr [rdi+16],0
+  bt dword ptr [rbx-720],edx
+  jnc fc4
   mov ecx,[r10+rax+2304+512]
-  mov esi,[r10+rax+1280+512]
+  mov rsi,[r10+5376+rdx*8]
   sub ecx,esi                       # how many, and from which element
   mov r8,[rbx+rdx*8-1152]
   mov r8,[r8]                       # the vector
-  lea edi,[rdx+8]
-  bt dword ptr [rbx-720],edi
+  push rax
+  lea eax,[rdx+8]
+  bt dword ptr [rbx-720],eax
+  pop rax
   jnc fc3
-  lea rdi,[r8+r9*4]                 # dword elements
-  lea rsi,[r8+rsi*4]
+  lea rsi,[r8+rsi*4]                # dword elements
+  lea r8,[r8+r9*4]
   add r9d,ecx
   shl rcx,2
-  jmp fc4
+  jmp fc35
 fc3:
-  lea rdi,[r8+r9]
   add rsi,r8
+  add r8,r9
   add r9d,ecx
+fc35:
+  mov [rdi],r8
+  mov [rdi+8],rsi
+  mov [rdi+16],rcx
 fc4:
-  rep movsb
   dec dword ptr [rip+f_cnt]
   jnz fc2
-  .irp i,16,17,18,19,20,21,22,23
-  cmp edx,\i-16
-  jne 1f
-  vpbroadcastd zmm\i,r9d
-1:
-  .endr
-  mov r10,[rip+wbase]               # the rate of this block, for the next
-  sub r9d,[r10+rax+1280+512]
-  shl r9,16
-  mov r8,rdx
-  mov rax,r9
-  xor edx,edx
-  mov r9d,[rip+nthreads]
-  imul r9,[rip+f_per]
-  div r9
-  mov rdx,r8
-  lea r8,[rip+f_dens]
-  mov [r8+rdx*8],rax
-fc5:
+  lea rcx,[rip+f_tot]
+  mov [rcx+rdx*8],r9
   inc edx
   cmp edx,8
   jb fc1
+  mov dword ptr [rip+j_mode],4
+  lea rax,[rip+fcopied]
+  mov [rip+f_cont],rax
+  jmp runall
+fcopied:
+  loadcar r13+2304                  # the caller ran the last range: its carries are the line's, the counts are these
+  .irp i,16,17,18,19,20,21,22,23
+  bt dword ptr [rbx-720],\i-16
+  jnc 1f
+  vpbroadcastd zmm\i,dword ptr [rip+f_tot+8*(\i-16)]
+1:
+  .endr
   jmp fgood
 fsretry:                            # some carry was guessed wrong. The real pass ran its upstream
   mov eax,[rip+f_retry]             # carries exactly, so its own (IN, OUT) pairs give the next
-  add eax,4                         # level's carries exactly: derive again from them and rerun,
-  sub eax,[rip+f_spec0]             # as long as the passes so far (dry + real + retries) plus one
-  cmp eax,[rip+nthreads]            # more still number fewer than the threads.
+  cmp dword ptr [rip+f_spec],0      # level's carries exactly: derive again from them and rerun,
+  je 1f                             # as long as the passes so far (dry + real + retries) plus one
+  cmp eax,[rip+nthreads]            # more still number fewer than the threads. (A one-pass line
+  jae fsbad                         # reruns only the ranges that were wrong: as many retries as threads.)
+  jmp 2f
+1:
+  add eax,4
+  cmp eax,[rip+nthreads]
   ja fsbad
+2:
   inc dword ptr [rip+f_retry]
-  mov dword ptr [rip+f_spec],2      # from here on the counts are exact and are verified like everything else
-  mov dword ptr [rip+f_soft],0
   mov eax,[rip+f_maxlow]            # A running max cannot be peeled: OUT = max(IN, M) hides M if IN
   not eax                           # was too high. One that missed restarts from -inf everywhere
   and eax,[rip+f_bad]               # for one pass (its values are wrong, its OUT is M), and the
@@ -1116,8 +1198,8 @@ f_probe:  .long 0
 f_retry:  .long 0
 f_maxlow: .long 0
 f_bad:    .long 0
-f_spec:   .long 0                   # 1: the pass just run was speculative (no dry pass); 2: a retry after one
-f_spec0:  .long 0                   # 1: this block began with a speculative pass
+f_spec:   .long 0                   # 1: this block of a one-pass line is being run without a dry pass
+f_line:   .long 0                   # 1: the line is a one-pass line
 f_nbad:   .long 0                   # blocks of this line that had to be run serially
 f_cnt:    .long 0
           .long 0
@@ -1134,7 +1216,8 @@ f_ret:    .quad 0
 f_cont:   .quad 0
 f_r13:    .quad 0
 f_r8in:   .quad 0
-f_dens:   .fill 64,1,0              # per sink-count register: results per element in the block before, 16 fractional bits
+f_scr:    .quad 0                   # one-pass lines: the scratch areas
+f_tot:    .fill 64,1,0              # per sink-count register: the true count after the block
 f_blk:      .quad 0x4000000000000000   # elements per block: plain lines (everything)
 f_blkscan:  .quad 0x400000             #   lines with scans
 f_blkprobe: .quad 0x10000              #   their first, probing, block
