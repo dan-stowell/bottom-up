@@ -10,7 +10,8 @@ random testing says little about composition."""
 import os, random, subprocess, sys
 H = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, os.path.join(H, '..', 'boot'))
 import strand
-comp = sys.argv[1]; T = '/tmp/strand_fsm'; os.makedirs(T, exist_ok=True)
+import tempfile
+comp = sys.argv[1]; T = tempfile.mkdtemp(prefix='strand_fsm')
 r = random.Random(3)
 pairs = [(a, b) for a in range(16) for b in range(16)]
 seq = bytearray()

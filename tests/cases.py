@@ -77,6 +77,8 @@ CASES = [
  (None, E_RACE),      # replaced below by a generated witness
 ]
 CASES = [(race_witness() if src is None else src, code) for src, code in CASES]
+import tempfile
+CASE_BIN = os.path.join(tempfile.mkdtemp(prefix='strand_case'), 'bin')     # private: two runs at once must not share it
 def main():
     comp = sys.argv[1]
     for src, code in CASES:
@@ -86,9 +88,9 @@ def main():
         p = subprocess.run([comp], input=src, capture_output=True, timeout=20)
         assert (p.returncode, p.stdout) == want, ('compiler disagrees with reference', src[:200], p.returncode, want[0], p.stderr)
         if want[0] == 0 and len(src) < 500:      # the compiled program must also behave like the interpreter
-            open('/tmp/case_bin', 'wb').write(want[1]); os.chmod('/tmp/case_bin', 0o755)
+            open(CASE_BIN, 'wb').write(want[1]); os.chmod(CASE_BIN, 0o755)
             for inp in (b'', b'a', b'Hello, world: 0123456789 abcdef', bytes(range(256)) * 3):
-                for mode in (['/tmp/case_bin'], ['/tmp/case_bin', 'eager']):
+                for mode in ([CASE_BIN], [CASE_BIN, 'eager']):
                     r = subprocess.run(mode, input=inp, capture_output=True, timeout=20)
                     assert (r.returncode, r.stdout if r.returncode == 0 else b'') == strand.interp(src, inp), ('binary disagrees with interpreter', src, len(inp), mode)
     print('PASS', comp, len(CASES), 'cases')

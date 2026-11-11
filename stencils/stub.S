@@ -457,14 +457,19 @@ dj_real0:
 0:
   cmp dword ptr [rip+f_chaos],0
   je 0f
-  mov eax,0x7fff                    # chaos, of another kind: fs7 compares only the last element of a `prev`
-  kmovw k1,eax                      # carry, on the claim that nothing else of it is read. Spoil the rest,
-  vpbroadcastd zmm24,dword ptr [rip+f_rng]   # in every range, the first included.
+  mov rax,0x0fffffffffffffff        # chaos, of another kind: fs7 compares only the last element of a `prev`
+  cmp dword ptr [rbx-708],64        # carry (on a byte line, its last four bytes), on the claim that nothing
+  jne 2f                            # else of it is read -- a byte `prev` reads only the last byte. Spoil
+  mov rax,0x7fffffffffffffff        # the rest, in every range, the first included.
+2:
+  kmovq k1,rax
+  vpbroadcastd zmm24,dword ptr [rip+f_rng]
+  vmovdqu8 zmm24{k1}{z},zmm24
   mov eax,[rbx-712]
   .irp i,16,17,18,19,20,21,22,23
   bt eax,\i
   jnc 1f
-  vpxord zmm\i{k1},zmm\i,zmm24
+  vpxord zmm\i,zmm\i,zmm24
 1:
   .endr
 0:
@@ -573,21 +578,21 @@ fork:
   mov [rip+f_stride],rax
   mov qword ptr [rip+f_bs],0
   mov dword ptr [rip+f_nbad],0
-  # A line whose running sums are all counts of its sinks, and that writes nothing to stdout, needs no dry
-  # pass (fscan). Its ranges write their results to scratch memory past the bump pointer: 8 areas per
-  # thread, each big enough for a range of 2^18 elements.
+  # A line with carries but no running sums other than the counts of its sinks, and no running maxima,
+  # needs no dry pass (fscan): `prev` and automata are guessed from a warm-up and verified. Its sinks
+  # write their results to scratch memory past the bump pointer: 8 areas per thread, each big enough for
+  # a range of 2^18 elements.
   mov dword ptr [rip+f_line],0
   mov ecx,[rbx-712]
   mov edx,[rbx-720]
+  test ecx,ecx
+  jz 9f                             # (a line with no carries at all has nothing to guess or verify)
   test ecx,0xff00
   jnz 9f
   and ecx,0xff
-  jz 9f
   and edx,0xff
   cmp ecx,edx
   jne 9f
-  test eax,eax
-  jnz 9f
   mov rcx,[rip+f_r13]
   add rcx,127
   and rcx,-64
@@ -671,10 +676,12 @@ fblock:
   add r10,8192
   dec ecx
   jnz 5b
+  cmp dword ptr [rip+f_line],0
+  jne fscan
   mov eax,[rbx-712]
-  test eax,0xff00ffff
+  test eax,0xffffffff
   jnz fscan
-  mov dword ptr [rip+j_mode],0      # plain line: one pass
+  mov dword ptr [rip+j_mode],0      # a line without carries: one pass, nothing to verify
   lea rax,[rip+fgood]
   mov [rip+f_cont],rax
   jmp runall
@@ -820,6 +827,10 @@ ff2:
   shl rax,6
   mov edi,[r10+rax+1280+512+60]
   xor edi,[r10+rax+256+512+60]
+  cmp dword ptr [rbx-708],64
+  jne 5f
+  shr edi,24                        # (a byte line: only the last byte)
+5:
   or esi,edi
 ff3:
   lea eax,[rdx+24]
@@ -893,7 +904,14 @@ fs9:
   lea r9d,[rdx+8]
   bt dword ptr [rbx-712],r9d
   jnc fs95
-  and esi,0x8000                    # `prev` reads only the last element of its carry
+  and esi,0x8000                    # `prev` reads only the last element of its carry:
+  cmp dword ptr [rbx-708],64        # the last dword, or on a byte line the last byte
+  jne fs96
+  mov rsi,rdx
+  shl rsi,6
+  movzx r9d,byte ptr [r10+rsi+8192+1280+63]
+  movzx esi,byte ptr [r10+rsi+2304+63]
+  xor esi,r9d
   jmp fs96
 fs95:
   cmp edx,8
@@ -981,6 +999,8 @@ fc4:
   inc edx
   cmp edx,8
   jb fc1
+  test dword ptr [rbx-720],0xff
+  jz fcopied                        # (no sinks: nothing to copy)
   mov dword ptr [rip+j_mode],4
   lea rax,[rip+fcopied]
   mov [rip+f_cont],rax

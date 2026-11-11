@@ -7,7 +7,8 @@ Programs target what the random fuzzer rarely builds (several found by Codex, RE
 import os, subprocess, sys, hashlib
 H = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, os.path.join(H, '..', 'boot'))
 import strand
-comp = sys.argv[1]; T = '/tmp/strand_pool'; os.makedirs(T, exist_ok=True)
+import tempfile
+comp = sys.argv[1]; T = tempfile.mkdtemp(prefix='strand_pool')    # private: two runs at once must not share inputs
 # a non-forgetting automaton whose functions do not commute: every wrong guess of a state shows
 PERM = '0 1 2 3  1 0 2 3  1 2 3 0  0 1 3 2 =d\n'
 # the same on 8 states: a transposition, an 8-cycle, a product of transpositions, a 3-cycle
@@ -103,9 +104,7 @@ for name, src in PROGS.items():
 # Which path ran? Correct output does not show whether the pool kept a block or redid it on one
 # thread (found by the second audit: a chained `prev` fell back while every test passed). A copy of
 # each binary with the fallback entry replaced by exit_group(77) answers that. DEPTH is the length
-# of the longest chain of carries feeding carries whose first guess fails on this input; the pool
-# retries while dry + real + retries stays below the thread count, so a chain of depth d must run in
-# parallel on t threads iff d - 1 <= max(0, t - 3), and must fall back otherwise.
+# of the longest chain of carries feeding carries whose first guess fails on this input.
 DEPTH = {'scan': 1, 'two independent scans': 1, 'bytes words': 1, 'automaton: strip comments': 1,
          'permutation automaton': 1, 'prev of an automaton state': 1, 'prev of a running sum': 1,
          'prev of prev of a running sum': 1, 'prev chain': 1, 'automaton + prev + sum': 1,
@@ -129,7 +128,9 @@ for name, depth in DEPTH.items():
     for cpus in cpusets:
         t = cpus.count(',') + 1
         st = subprocess.run(['taskset', '-c', cpus, exe], stdin=open(files[sizes[-1]], 'rb'), stdout=subprocess.DEVNULL).returncode
-        want = 0 if depth - 1 <= max(0, t - 3) else 77; npath += 1
+        # a line with running sums or maxima: dry pass + real pass + retries must stay below the thread count;
+        # a one-pass line (the rest) reruns only wrong ranges and may retry as often as it has threads
+        want = (0 if depth - 1 <= max(0, t - 3) else 77) if 'scan' in PROGS[name] else (0 if depth - 1 <= t else 77); npath += 1
         if st != want:
             bad += 1; print('FAIL path', name, 'threads', t, 'exit', st, 'expected', want)
 print('PASS' if not bad else 'FAILED', comp, len(PROGS), 'programs,', nrun, 'pool runs,', npath, 'path checks')

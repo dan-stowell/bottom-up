@@ -20,6 +20,10 @@ start from carries nobody has computed yet. However it gets them, **the block is
 if every range turns out to have started from exactly the carries the range before it ended
 with** (`fs7`); otherwise the first range's true carries are restored and the block is
 redone. If that comparison is right, a kept block is a serial run cut into pieces.
+(A line with no carries at all has nothing to compare and is simply cut up. Until the review
+below, a line whose only carries were `prev` was cut up the same way, on the argument that
+a one-chunk warm-up always makes `prev` right; true, but a second rule. Such lines, and
+lines that write to stdout, now go through the comparison like the rest.)
 
 Everything else the pool does is a way of making the comparison succeed more often: the
 warm-up before a range, the state an automaton is guessed to be in, the dry pass, deriving
@@ -50,6 +54,9 @@ carries are the caller's. And a sink's count is where the sink writes: on a one-
 is the address of a scratch area the pool chose, on any other line it comes from the dry
 pass and a wrong one would write outside the vector before any comparison could object.
 
+What chaos is not: a proof. The noise is one random dword per range, not every possible
+wrong carry; and it tests the claim only for the stencils and programs the tests run.
+
 ## What is left to trust
 
 `tools/stubmap.py`:
@@ -57,18 +64,17 @@ pass and a wrong one would write outside the vector before any comparison could 
 | part of the stub | instructions | can it change a program's output? |
 |---|---|---|
 | start: CPUs, heap, stacks, input | 179 | yes |
-| output, exit, failure report | 90 | yes |
+| output, exit, failure report | 93 | yes |
 | threads: start, wake, wait | 98 | yes |
-| split a line into blocks and ranges | 165 | yes |
-| run one range from given carries | 330 | yes |
-| verify: every range started where the one before ended | 69 | yes |
-| one-pass lines: scratch areas, copy into place | 164 | yes |
+| split a line into blocks and ranges | 166 | yes |
+| run one range from given carries | 336 | yes |
+| verify: every range started where the one before ended | 78 | yes |
+| one-pass lines: scratch areas, copy into place | 167 | yes |
 | a block that failed: carries restored, run serially | 42 | yes |
 | guess: warm-up, states and prev carries of a range | 151 | no: spoiled by `chaos`, output unchanged |
-| choose dry pass or one pass; derive carries; which ranges to rerun; retry | 225 | no: spoiled by `chaos`, output unchanged |
+| choose dry pass or one pass; derive carries; which ranges to rerun; retry | 228 | no: spoiled by `chaos`, output unchanged |
 | chaos (tests) | 27 | no: spoiled by `chaos`, output unchanged |
-| **total** | **1543** | 1137 yes, 406 no |
-unclassified labels (counted with the part before them): msg msgend msghex
+| **total** | **1568** | 1159 yes, 409 no |
 
 So about a quarter of the stub, and nearly all of what the last three rounds of speed work
 added, is now outside what the output depends on. What remains is of two kinds. Half is
@@ -93,3 +99,14 @@ sum over ranges for sums, a prefix composition for automata, a shift for `prev`:
 the pool runs in the middle of a line, with every register in use. Now that it cannot
 affect the output, it can be rewritten, simplified or thrown away without anyone having to
 believe the result, and the natural rewrite is in Strand.
+
+## Reviewed
+
+`REVIEW_SOL.md` is a review of the kernel by another model (gpt-6.1-sol), asked whether a
+block can be kept without the comparison covering every carry a range read, whether the
+comparison is right for each kind of carry, whether the scratch and copy arithmetic can go
+wrong, and whether chaos is a fair test. It found no wrong output and two things, both
+acted on: lines with only `prev` carries bypassed the comparison (above), and a byte line's
+`prev` was compared by its last four bytes when only the last is read, which cost retries
+and left three bytes that chaos never spoiled. It also checked the scratch-area and copy
+arithmetic by hand and found it sound for up to 16 threads.
