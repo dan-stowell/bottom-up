@@ -319,9 +319,9 @@ position sinks as sum carries, a warmed-up dry pass, retries.
   page here, which is a fifth of the lexer's time).
 
 - **One step past the lexer** (`examples/godecl.strand`, GOLEX.md): the package-level
-  declarations of the standard library, 335,742 names identical to `go/parser`'s, in three
-  lines on top of the lexer: a running sum for nesting, an 8-state automaton over tokens,
-  a 4-state one for the keyword. 500 ms on one core, 140 on eight; `go/parser` takes about
+  declarations of the standard library, and every file's package clause and imports:
+  372,762 entries identical to `go/parser`'s, in three lines on top of the lexer: a running
+  sum for nesting, an 8-state automaton over tokens, a second one for the keyword. 500 ms on one core, 140 on eight; `go/parser` takes about
   3 seconds to parse the same files (and builds far more).
 
 What that says about where to go: the lexer's remaining cost is four automata, memory it

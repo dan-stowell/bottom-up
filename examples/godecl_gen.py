@@ -3,7 +3,8 @@
 
 Input: Go source (any number of files, one after the other). Output: for every name declared at package
 level -- functions, methods, variables, constants, types -- the byte offset of the name (little-endian
-dwords), then one byte each: 1 func, 2 method, 3 var, 4 const, 5 type. `golex decls` is the reference:
+dwords), then one byte each: 1 func, 2 method, 3 var, 4 const, 5 type, 6 the path of an import, 7 the name in a
+package clause. `golex decls` is the reference:
 go/parser, and a walk over each file's declarations.
 
 It is the lexer of golex_gen.py and three more lines, which do what a parser does first:
@@ -12,7 +13,9 @@ It is the lexer of golex_gen.py and three more lines, which do what a parser doe
      declarations: after `func`, a name (after a receiver, if there is one); after var / const / type, a list
      of names, or a parenthesised group with one such list per statement; everything else is skipped to the
      next semicolon at the right depth. It is in state VL or GL exactly at a declared name;
-  3. a 4-state automaton remembers the last of func / var / const / type seen outside all brackets.
+  3. a second automaton remembers the last of func / var / const / type / import seen outside all brackets:
+     a string while that is `import` is an import path. The name after `package` is listed too, so the
+     output says where each file begins and what it imports -- the edges of the build graph.
 Semicolons are the lexer's: the automatic ones are what make "one statement" visible without parsing."""
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -61,16 +64,18 @@ def dstep(c, s):
     if c == 13: return GG
     return GSK
 ddfa = [dstep(c, s) for c in range(15) for s in range(8)]
-k2c = tab(lambda k: {FUNC: 1, VAR: 2, CONST: 3, TYPE: 4}.get(k, 0))
-kdfa = [s if c == 0 else c - 1 for c in range(5) for s in range(4)]
-symk = [1, 3, 4, 5, 2, 3, 4, 5] + [0] * 248                             # by keyword, + 4 if the token before is ')'
+k2c = tab(lambda k: {FUNC: 1, VAR: 2, CONST: 3, TYPE: 4, IMPORT: 5, PACKAGE: 6}.get(k, 0))
+kdfa = [s if c == 0 else c - 1 for c in range(7) for s in range(8)]
+# what a listed token is, by keyword state, + 8 if the token before is ')', + 16 if it is `package`
+symk = [7 if i & 16 else 2 if i & 15 == 8 else [1, 3, 4, 5, 6, 0, 0, 0][i & 7] for i in range(32)] + [0] * 224
+STRING = 9
 for n, v in (('dlt', dlt), ('kcl', kcl), ('dcls', dcls), ('ddfa', ddfa), ('k2c', k2c), ('kdfa', kdfa), ('symk', symk)): L.append(data(n, v))
 L += f'''# tkind: every token's kind, newlines that count as semicolons included (0: a newline that does not); dl: 1 + its effect on the depth
 'kf :dk 0 = {SEMI} * dk + 0 keepb - & :tkind @dlt >dl
 # pd: how deeply each token is nested (0, 1, or 2 for more); a bracket is as deep as what it stands in
 ev 0 * 'dl + 1 - :ddt scan ddt 0 max - 2 min .pd
 # dst: the declaration automaton (above); a name is declared where it is VL or GL
-'tkind :dq @kcl pd dup + dup + dup + dup + + @dcls \\ddfa :dst dq @k2c pd 0 = 0 swap - & /kdfa back {RP} = dup + dup + + @symk :dsy drop {VL} = dst {GL} = | :dem 0 0 dsy dem ^sk dem %si drop drop end
+'tkind :dq @kcl pd dup + dup + dup + dup + + @dcls \\ddfa :dst dq @k2c pd 0 = 0 swap - & \\kdfa :dks back :dpb {RP} = dup + dup + dup + + dpb {PACKAGE} = dup + dup + dup + dup + + @symk :dsy drop {VL} = dst {GL} = | dq {STRING} = dks 4 = & | dq {IDENT} = dpb {PACKAGE} = & | :dem 0 0 dsy dem ^sk dem %si drop drop end
 si @ev out4
 'sk out
 '''.split('\n')

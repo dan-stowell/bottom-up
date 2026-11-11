@@ -84,12 +84,14 @@ keyword if its first twelve bytes hash to one and are equal to it. Three short l
 
 Nothing in it is specific to Go beyond the tables and the two lines.
 
-## One step past the lexer: package-level declarations
+## One step past the lexer: declarations and imports
 
 `examples/godecl.strand` is the lexer and three more lines. It writes, for every name
 declared at package level (functions, methods, variables, constants, types), the offset of
-the name and what it is. That is what a compiler's parser has to find before anything can
-be resolved, and what `ctags` or an editor's symbol list is.
+the name and what it is; and for every file, the name in its package clause and the path
+of every import. The first is what a compiler's parser has to find before anything can be
+resolved, and what `ctags` or an editor's symbol list is. The second is the edges of the
+build graph: what `go list` reads sources for.
 
 1. **Nesting**: +1 for every `(` `[` `{`, -1 for every closer, and a running sum over the
    tokens. On all cores, like any prefix sum.
@@ -100,22 +102,24 @@ be resolved, and what `ctags` or an editor's symbol list is.
    parenthesised group with one list per statement; everything else it skips to the next
    semicolon at the right depth. The lexer's automatic semicolons are what make "one
    statement" visible without a grammar.
-3. **A 4-state automaton** remembers which of the four keywords was last seen outside all
-   brackets.
+3. **A second automaton** remembers which of `func`, `var`, `const`, `type`, `import` was
+   last seen outside all brackets. A string while that is `import` is an import path; an
+   identifier right after `package` is a file's package name.
 
 On the 8,041 files of the standard library that `go/parser` accepts (92.4 MB, 17.0 million
-tokens) the output is byte-identical to a walk over `go/parser`'s declarations: **335,742
-names**, on one core and on eight. `tests/go/decls.go` holds the shapes the library does not
+tokens) the output is byte-identical to a walk over `go/parser`'s declarations: **372,762
+entries** (65,966 functions, 31,359 methods, 16,130 variables, 204,660 constants, 17,627
+types, 28,979 imports, 8,041 package clauses), on one core and on eight. `tests/go/decls.go` holds the shapes the library does not
 dwell on (grouped and generic declarations, receivers of every form, declarations inside
 function bodies that must not be listed), and `test.sh` runs both.
 
 | | time |
 |---|---|
 | `go/parser`, parsing only, one thread (it builds the whole syntax tree) | 2,776-3,362 ms |
-| Strand, lexer and declarations, 1 CPU | 492-506 ms |
-| 2 CPUs | 324-341 ms |
-| 4 CPUs | 189-231 ms |
-| 8 CPUs | 131-151 ms |
+| Strand, lexer and declarations, 1 CPU | 494-509 ms |
+| 2 CPUs | 323-338 ms |
+| 4 CPUs | 201-238 ms |
+| 8 CPUs | 140-154 ms |
 
 The three lines add about 45 ms to the lexer on one core, under 3 ns per token. The
 comparison with `go/parser` is not like for like: it produces a tree with every expression
