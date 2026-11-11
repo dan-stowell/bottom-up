@@ -45,5 +45,6 @@ int main(int argc, char **argv) {
   for (uint32_t i = 0; i < NI; i++) { uint32_t e = exbase[imu[i]] + imo[i]; imaddr[i] = ubase[exunit[e]] + exoff[e]; }
   uint8_t *out = calloc(ubase[U] + 64, 1); uint32_t k = 0;
   for (uint32_t u = 0; u < U; u++) { uint8_t *o = out + ubase[u]; memcpy(o, code + inb[u], usize[u]);
-    for (; k < NR && runit[k] == u; k++) { uint32_t v = imaddr[rimp[k]] - (ubase[u] + roff[k]); memcpy(o + roff[k], &v, 4); } }
+    for (; k < NR && runit[k] == u; k++) { uint32_t v = imaddr[rimp[k]] - (ubase[u] + roff[k]); uint8_t *q = o + roff[k];
+      q[0] = v; q[1] = v >> 8; q[2] = v >> 16; q[3] = v >> 24; } }      // (four assignments, not memcpy: gcc's fortified memcpy made this a call per relocation; fourth audit)
   put(out, ubase[U]); return 0; }

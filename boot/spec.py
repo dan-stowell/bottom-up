@@ -163,6 +163,12 @@ HA2, HB2, HS2 = 951274213, 246822519, 13
 RACE_U = [1, 40503, 48271, 69621]
 RACE_V = [961748927, 314159265, 271828183, 141421357]
 ROUNDS = 4
+# Each of a name's four dwords is mixed with its own multiplier. (With one multiplier for all four the
+# fingerprint was a symmetric function of the adjusted dwords: any two names that were permutations of
+# each other's dwords collided, and the fourth audit wrote 24 of them down without searching.)
+HPOS = [1, 2654435761, 2246822519, 3266489917]
+HA1J = [(HA1 * p) & M32 for p in HPOS]
+HA2J = [(HA2 * p) & M32 for p in HPOS]
 def name_words(name: bytes):
     """a name as four little-endian dwords, zero-padded (a name has no zero bytes and at most 16)"""
     b = name[:MAXNAME].ljust(MAXNAME, b'\0')
@@ -173,8 +179,8 @@ def name_hash(name: bytes):
     h1 = h2 = 0
     for j, w in enumerate(name_words(name)):
         x = (w + j) & M32
-        a = (x * HA1) & M32; h1 = (h1 + (a ^ (a >> HS1)) * HB1) & M32
-        a = (x * HA2) & M32; h2 = (h2 + (a ^ (a >> HS2)) * HB2) & M32
+        a = (x * HA1J[j]) & M32; h1 = (h1 + (a ^ (a >> HS1)) * HB1) & M32
+        a = (x * HA2J[j]) & M32; h2 = (h2 + (a ^ (a >> HS2)) * HB2) & M32
     return h1, h2
 # Keywords are names with a fixed meaning. They take no part in the race and have no slot. How an
 # implementation recognises them is its own business; for table-driven ones, KWMUL and KWSHIFT are

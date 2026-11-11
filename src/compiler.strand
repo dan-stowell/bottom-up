@@ -56,7 +56,7 @@ El 0 > 2 * halt
 isname nlen Maxname > & $En
 En 0 > 3 * halt
 # the fingerprint: two sums over the four dwords (boot/spec.py, name_hash)
-w0 Ha1 * dup Hs1 >> ^ Hb1 * w1 1 + Ha1 * dup Hs1 >> ^ Hb1 * + w2 2 + Ha1 * dup Hs1 >> ^ Hb1 * + w3 3 + Ha1 * dup Hs1 >> ^ Hb1 * + :h1 w0 Ha2 * dup Hs2 >> ^ Hb2 * w1 1 + Ha2 * dup Hs2 >> ^ Hb2 * + w2 2 + Ha2 * dup Hs2 >> ^ Hb2 * + w3 3 + Ha2 * dup Hs2 >> ^ Hb2 * + :h2 drop end
+w0 Ha10 * dup Hs1 >> ^ Hb1 * w1 1 + Ha11 * dup Hs1 >> ^ Hb1 * + w2 2 + Ha12 * dup Hs1 >> ^ Hb1 * + w3 3 + Ha13 * dup Hs1 >> ^ Hb1 * + :h1 w0 Ha20 * dup Hs2 >> ^ Hb2 * w1 1 + Ha21 * dup Hs2 >> ^ Hb2 * + w2 2 + Ha22 * dup Hs2 >> ^ Hb2 * + w3 3 + Ha23 * dup Hs2 >> ^ Hb2 * + :h2 drop end
 # keywords: one lookup by fingerprint, confirmed by comparing the four dwords
 h1 Kwmul * Kwshift >> 255 & @kwidx :ki @kww0 w0 = ki @kww1 w1 = & ki @kww2 w2 = & ki @kww3 w3 = & ki * isname * :kw 0 = isname & :nm end
 

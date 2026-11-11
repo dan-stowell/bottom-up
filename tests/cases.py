@@ -5,6 +5,29 @@ import os, subprocess, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'boot'))
 import strand
 from spec import *
+def race_witness():
+    """A program that loses the four-round name race: a tree of 16 names in which every unresolved name
+    has a later blocker in each round. Searched for, so that it follows the fingerprint definition."""
+    import random
+    mask = race_mask(32); cands = [b'X%d' % i for i in range(1, 60000)]; H = {c: name_hash(c) for c in cands}
+    bykey = [{} for _ in range(ROUNDS)]
+    for c in cands:
+        for r in range(ROUNDS): bykey[r].setdefault(race_key(r, H[c], mask), []).append(c)
+    rnd = random.Random(1)
+    def build(n, r, used):
+        out = [n]
+        for i in range(r):
+            b = rnd.choice([c for c in bykey[i][race_key(i, H[n], mask)] if c not in used]); used.add(b); out += build(b, i, used)
+        return out
+    for _ in range(5000):
+        t = rnd.choice(cands)
+        try: names = build(t, ROUNDS, {t})
+        except IndexError: continue
+        src = b''.join(b'0 >%s\n' % n for n in names)
+        try: strand.analyze(src)
+        except strand.CompileError as e:
+            if e.code == E_RACE: return src
+    raise SystemExit('no race witness found')
 CASES = [
  (b'', 0), (b'\n', 0), (b'# only a comment', 0), (b'input out\n', 0), (b'input out', 0),
  (b'1 2 3 "abc" =d\nd out\n', 0), (b'=d\n', 0), (b'"" =d\n', 0), (b'"a # b" =d\n', E_QUOTE),
@@ -50,11 +73,9 @@ CASES = [
  # the two programs Codex found: a 32-bit hash collision under the old hash, and many distinct names
  (b'1 >xfntrxrmgiq\n2 >xqhhsigtfyu\n', 0), (b''.join(b'1 >X%d\n' % i for i in range(3000)), 0), (b'input 1 :k + end\n', 0), (b'1 :k >A\nk out\n', 0),
  (b"input\xff\x80 out\n", E_UNDEF), (b"\xff out\n", E_TOKEN), (b'\x01\x02input out\n', 0),
- # Four-round race loss: a 16-name collision-witness tree (not a fingerprint collision).
- # Each unresolved name has a later blocker in each round. See reviews/audit_checks.py.
- (b''.join(b'0 >X%d\n' % n for n in
-           (8806, 34724, 3291, 15615, 9114, 30380, 32583, 31619, 25728, 13517, 6970, 32025, 1628, 25831, 27855, 329)), E_RACE),
+ (None, E_RACE),      # replaced below by a generated witness
 ]
+CASES = [(race_witness() if src is None else src, code) for src, code in CASES]
 def main():
     comp = sys.argv[1]
     for src, code in CASES:

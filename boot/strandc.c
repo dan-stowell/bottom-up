@@ -89,8 +89,8 @@ int main(void) {
       memcpy(b, text + names[i].off, names[i].len < 16 ? names[i].len : 16);
       for (int j = 0; j < 4; j++) {
         uint32_t w, x, a; memcpy(&w, b + 4 * j, 4); x = w + j;
-        a = x * HA1; h1 += (a ^ (a >> HS1)) * HB1;
-        a = x * HA2; h2 += (a ^ (a >> HS2)) * HB2;
+        a = x * HA1J[j]; h1 += (a ^ (a >> HS1)) * HB1;
+        a = x * HA2J[j]; h2 += (a ^ (a >> HS2)) * HB2;
       }
       for (int k = 0; k < K; k++) if ((int)strlen(KWS[k]) == names[i].len && !memcmp(KWS[k], text + names[i].off, names[i].len)) names[i].kw = k + 1;
       names[i].h1 = h1; names[i].h2 = h2; names[i].active = !names[i].kw; names[i].clast = names[i].last;

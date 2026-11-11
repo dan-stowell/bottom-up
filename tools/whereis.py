@@ -28,4 +28,4 @@ for kd, v in sorted(bykind.items(), key=lambda kv: -kv[1][3])[:22]: print(f'{v[3
 print(f'{tot[3]:10d} {tot[0]:10d} {tot[1]:9d} {tot[2]:9d}  total')
 lines = src.split(b'\n')
 print(f'\n{"scalar":>10} {"vector":>10}  by line (top 12)')
-for ln, v in sorted(byline.items(), key=lambda kv: -kv[1][3])[:12]: print(f'{v[3]:10d} {v[0]:10d}  {lines[ln][:110].decode("latin1")}')
+for ln, v in sorted(byline.items(), key=lambda kv: -kv[1][3])[:12]: print(f'{v[3]:10d} {v[0]:10d}  {lines[ln - 1][:110].decode("latin1")}')

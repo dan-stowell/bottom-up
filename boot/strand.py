@@ -258,7 +258,7 @@ def compile_(src: bytes, want_map=False):
     out = bytes(T['ehdr']) + struct.pack('<QQ', fsize, fsize) + bytes(T['stub'])
     out += struct.pack('<%dI' % len(slotimg), *slotimg) + struct.pack('<%dI' % len(pool), *pool) + bytes(code)
     assert len(out) == fsize
-    if want_map: return out, [(vdata + datasize + off, line, raw) for off, line, raw in cmap]
+    if want_map: return out, [(vdata + datasize + off, line + 1, raw) for off, line, raw in cmap]      # lines are 1-based here
     return out
 
 
@@ -488,7 +488,7 @@ def main():
             sys.stdout.buffer.write(out); sys.exit(status)
         elif cmd == 'map':
             for addr, line, raw in compile_(src, True)[1]:
-                print('%x line %d  %s' % (addr, line, raw))   # line 0 is the prelude, so this is 1-based in the file
+                print('%x line %d  %s' % (addr, line, raw))
     except CompileError as e:
         sys.exit(e.code)
 
