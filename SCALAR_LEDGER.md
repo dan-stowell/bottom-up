@@ -129,3 +129,23 @@ downstream consumes yet.
 Known difference from `go build`: the binary carries no module build info (`go version -m` shows no
 dependency list, `debug.ReadBuildInfo` returns nothing), because the driver does not write the
 `modinfo` line of the link's import config.
+
+## The plan (2026-11-12)
+
+`driver/plan.go` finds the package graph without `go list`. What in it is Strand and what is not:
+
+- **Strand:** every byte of Go source in the build goes through `examples/godecl.strand`, whose output
+  (package clause and import paths of each file) is the plan's only source of imports and package names.
+  This is the first Strand phase in the build whose output something consumes. 75.5 MB for MinIO, about
+  220 ms of wall clock spread over 10 rounds (the same pass over the whole corpus at once is 90 ms; the
+  rounds cost more per byte, see JOURNAL).
+- **Not Strand, measured:** module resolution (go.mod, go.work, vendor/modules.txt: a few hundred lines of
+  text; with the directory checks, 14 ms warm and 70 ms cold for MinIO). Build constraints: go/build's
+  own `MatchFile`, run on the bytes already in memory; it looks only at the comment block at the head of
+  each file. The breadth-first loop itself. `//go:embed` and `//go:debug` lines are found with a regular
+  expression over the files that import `embed` and over the main package.
+- **Why the rounds are not one pass:** which files exist is only known once the imports of the previous
+  round are resolved. Ten rounds for MinIO, eleven for kube-apiserver.
+- Toolchain facts (GOROOT, version, tool and release tags) come from `build/sb.facts`, written by
+  `sb -mkfacts` when the driver is built: they are properties of the installed toolchain, not of the
+  build, in the same way `build/compile-sb` is.
