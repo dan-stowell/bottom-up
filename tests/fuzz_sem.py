@@ -59,6 +59,8 @@ class Gen:
                 v = r.choice(self.bvecs); g = r.choice('[{')
                 if r.random() < .97: toks += ["0", "max", "&" + v, "1", "-", "min", g + v]   # clamped (still fails on an empty vector)
                 else: toks.append(g + v)
+            elif ch < .835 and getattr(self, 'bvecs', None) and d < depth_budget:      # a byte vector lane for lane (fails unless its length is the line's)
+                toks.append("'" + r.choice(self.bvecs)); d += 1
             elif ch < .85 and d < depth_budget: toks.append(r.choice(['dup', 'over', 'idx'] if d >= 2 else ['dup', 'idx'])); d += 1
             elif ch < .88 and d >= 2: toks.append('swap')
             elif ch < .90 and d >= 2: toks.append('drop'); d -= 1
@@ -72,6 +74,8 @@ class Gen:
         """a streaming byte line: 64 lanes, byte arithmetic, table lookups, local tees, streaming sinks"""
         r = self.r; toks = ['bytes']; d = 1; used = set(); teed = []; newvecs = []
         if not hasattr(self, 'bvecs'): self.bvecs = []
+        if not hasattr(self, 'pbvecs'): self.pbvecs = []
+        self.bvecs += self.pbvecs; self.pbvecs = []
         if self.bvecs and r.random() < .35: toks = ["'" + r.choice(self.bvecs)]
         BOPS = ['+', '-', '*', '&', '|', '^', 'min', 'max', '<', '<=', '>', '>=', '=', '!=']
         for _ in range(r.randrange(0, 14)):
@@ -92,6 +96,8 @@ class Gen:
             elif ch < .93 and teed and d < 7: toks.append(r.choice(teed)); d += 1
             elif ch < .95 and d >= 2:              # positions of the nonzero lanes, as a dword vector
                 v = 'w%d' % self.nv; self.nv += 1; toks.append('%' + v); d -= 1; newvecs.append(v)
+            elif ch < .96 and d >= 3 and ('p', d) not in used:      # pack selected bytes into a byte vector
+                used.add(('p', d)); v = 'b%d' % self.nv; self.nv += 1; toks.append('^' + v); d -= 2; self.pbvecs.append(v)
             elif ch < .97 and d < 7:               # a byte tee that outlives the line: a byte vector
                 v = 'b%d' % self.nv; self.nv += 1; toks.append(':' + v); self.bvecs.append(v)
             else: toks.append('@' + self.table256())

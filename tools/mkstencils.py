@@ -182,6 +182,8 @@ for d in range(1, 9):
   vpsubd zmm25,zmm{r},zmm25
   vpsllvd zmm24,zmm24,zmm25
   vpsrlvd zmm{r},zmm24,zmm25""")
+    if d <= 7:       # `'x` on a dword line: a byte vector, lane for lane, widened
+        st(WIDEV, d, f"  mov rsi,[rbx+{DISP}]\n  vpmovzxbd zmm{d}{{k7}}{{z}},xmmword ptr [rsi+rax]", pre=f"  cmp r12,[rbx+{DISP8}]" + failif('e'))
     if d <= 7:
         st(VEC, d, f"  mov rsi,[rbx+{DISP}]\n  vmovdqu32 zmm{d}{{k7}}{{z}},[rsi+rax*4]",
            pre=f"  cmp r12,[rbx+{DISP8}]" + failif('e'))       # length check hoisted out of the loop
@@ -613,6 +615,30 @@ for d in range(1, 9):
   vpxord zmm{C},zmm{C},zmm{C}
   or dword ptr [rbx-712],{1 << (24 + r)}
   mov dword ptr [rbx-680],{r + 1}""")
+# `v m ^x`: pack the bytes of v selected by m into the byte vector x. One compress per chunk; the count
+# is a sum carry, as for '%', so the line can be split across threads.
+for d in range(3, 9):
+    v, m = d - 2, d - 1; C = 16 + m
+    st(PACKB, d, f"""  vptestmb k1{{k7}},zmm{m},zmm{m}
+  vmovd edx,xmm{C}
+  kmovq r10,k1
+  popcnt r10,r10
+  kortestw k5,k5
+  jz 3f
+  lea rcx,[rbx+{DISP}]
+  mov rsi,[rcx]
+  vpcompressb zmm24{{k1}}{{z}},zmm{v}
+  mov r9,-1
+  bzhi r9,r9,r10
+  kmovq k2,r9
+  vmovdqu8 [rsi+rdx]{{k2}},zmm24
+  test r15,r15
+  jnz 3f
+  lea r9,[rdx+r10]
+  mov [rcx+8],r9
+3:
+  add edx,r10d
+  vpbroadcastd zmm{C},edx""", pre=ALLOC('rsi') + f"\n  lea rcx,[rbx+{DISP}]\n  mov [rcx],rsi\n  mov qword ptr [rcx+8],0\n  vpxord zmm{C},zmm{C},zmm{C}\n  or dword ptr [rbx-712],{1 << m}\n  mov dword ptr [rbx-680],0")
 # ---- 8-state automata: `x \\t`. The same construction with 8-byte functions in qword lanes: register t
 # (zmm8+t, eight of them) gets the functions of bytes 8g+t, one qword per group g, by `vpermi2q` from a
 # 16-qword table; a 7-step chain composes within groups, a Kogge-Stone scan over the 8 group functions

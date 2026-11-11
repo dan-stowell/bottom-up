@@ -148,38 +148,57 @@ for k, kind in KW.items():
     w = words(k); i = h_save(kwp, w)
     for j in range(3): kww[j][i] = w[j]
 
+# the kind of a token, decided at its last byte
+wkt = [0] * 256                      # words: from the word state at the last byte (+8 if that byte is 'i')
+for st_, kd in ((ID, IDENT), (D, INT), (DF, FLOAT), (XS, FLOAT), (DX, FLOAT), (H, INT)):
+    wkt[st_] = kd; wkt[st_ + 8] = kd if st_ in (ID, XS) else IMAG
+e1k = tab256(lambda c: OPS.get(chr(c), STRING if c in (34, 96) else CHAR if c == 39 else 0) if c < 128 else 0)     # one byte: an operator, a closing quote, or a newline (0)
+e2k = [0] * 256; e3k = [0] * 256     # two- and three-byte operators, by (second-last, last) byte
+for a_ in OPCH:
+    for j_, b_ in enumerate(SC):
+        ix = (j_ + 1) * 24 + fcid[a_]
+        if a_ + b_ in OPS: e2k[ix] = OPS[a_ + b_]
+        for o3 in OPS:
+            if len(o3) == 3 and o3[1:] == a_ + b_: e3k[ix] = OPS[o3]
+semib = [1 if k in SEMI_AFTER else 0 for k in range(256)]
+
 for n, v in (('gk', gk), ('mcls', mcls), ('mdfa', mdfa), ('esc', esc), ('strt', strt), ('gw', gw), ('wdfa', wdfa), ('gfc', gfc), ('gsc', gsc), ('gop', gop), ('e2t', e2t), ('odfa', odfa),
-             ('fam', fam), ('kwk', kwk), ('kwa', kww[0]), ('kwb', kww[1]), ('kwc', kww[2]), ('opk', opk), ('semitab', semitab)):
+             ('wkt', wkt), ('e1k', e1k), ('e2k', e2k), ('e3k', e3k), ('semib', semib), ('kwk', kwk), ('kwa', kww[0]), ('kwb', kww[1]), ('kwc', kww[2])):
     L.append(data(n, v))
 L += f'''0 1 - >Neg
 <text
 &text >N
 N 1 - >Tm
-# One line over the bytes. Left behind: the positions where tokens start (ev) and end (te), and the word
-# state of every byte (ws). A newline outside strings counts as a token here; most are dropped later.
+# One line over the bytes. Left behind: where tokens start (ev) and end (te), and the kind of each (kb),
+# decided at its last byte. A newline outside strings counts as a token of kind 0; most are dropped later.
 #   k     kind of byte;  es  escape state (2: this byte is escaped)
 #   m     context after the byte: 0 code, 1 code (just after */), 2 // comment, 3 /* (just opened), 4 /* comment,
 #         5 string, 6 raw string, 7 rune
 #   sv    string value of (k, m): see strt
 #   code  the byte is program text: in code, not a closing quote, not the '/' that opens a comment
 #   wl    word state after the byte: 0 none, 1 identifier, 2 decimal, 3 fraction, 4 after e/p, 5 exponent, 6 hex
-#         (kept as ws for the token line; this line reads its own copy, wl, so that it can be split across threads)
 #   t,pt  what (previous byte, this byte) and (the two before) are as operators: 0 nothing, 1 an operator,
-#         2 "..", 3 an operator that '=' extends
+#         2 "..", 3 an operator that '=' extends;  pti  the table index of the pair before
 #   os    operator state: how many bytes of the current operator have been read
-#   tc    token byte;  ts  first byte of a token
-bytes :c @gk :k back @gk :bk 5 = bk 6 = 2 * + 8 * + 0 k 7 = /esc :es 2 = 32 * + + @mcls \\mdfa :m 8 * k + @strt :sv m 0 = sv 0 = & c 47 = peek 47 = peek 42 = | & 1 ^ & :code c @gw c 46 = peek @gw 2 = & + * \\wdfa :wl :ws 0 over prev :pws drop drop 0 != pws 0 = & :wst drop back @gfc c @gsc 24 * + @e2t :t dup 1 = swap 3 = | t 2 = peek 46 = & | back2 @gfc back @gsc 24 * + @e2t :pt 3 = c 61 = & pt 2 = c 46 = & | 2 * + 1 + c @gop code * wl 0 = * * :oc 0 0 oc /odfa :os drop drop drop drop k 1 = m 6 != & :nl wl 0 != | os 0 != | sv 0 != | :tc wst os 1 = | nl | sv 5 = | sv 3 = es 2 != & | :ts drop 0 0 0 tc prev :ptc drop drop drop drop 0 0 0 0 ts %ev drop drop drop drop 1 ^ ts | ptc & :tem drop 0 0 0 0 0 0 tem %te drop drop drop drop drop drop end
-&ev 1 - >Em
-&te >Te
-Te 1 - >Tem
-# One line over the tokens: kind from the first bytes (w0), the length, the word state at the end; keywords
-# by a perfect hash of the first twelve bytes. kc = kind, plus 256 if a newline after this token is a semicolon.
-ev :s idx Te < idx Tem min 0 max @te N sel :e over - :len drop dup {{text :w0 255 & :c0 @fam :f0 6 = w0 8 >> 255 & :c1 @fam 2 = & f0 2 = | :isnum drop e 1 - :e1 [text 105 = {IMAG} e1 [ws :we 2 = we 6 = | {INT} {FLOAT} sel sel :knum drop w0 Neg 4 len 4 min - 8 * >> & :a s 4 + Tm min {{text Neg 4 len 4 - 0 max 4 min - 8 * >> & :b s 8 + Tm min {{text Neg 4 len 8 - 0 max 4 min - 8 * >> & :d drop drop drop a {kwp[0]} * b {kwp[1]} * + d {kwp[2]} * + {kwp[3]} >> 255 & :hk @kwa a = hk @kwb b = & hk @kwc d = & len 12 <= & hk @kwk * :kk 0 = {IDENT} * kk + :kid drop c1 len 1 > * {opp[1]} * c0 {opp[0]} * + len {opp[2]} * + {opp[3]} >> 255 & @opk :kop drop f0 1 = kid kop sel :x1 drop isnum knum x1 sel :x2 drop f0 4 = {CHAR} x2 sel :x3 drop f0 3 = {STRING} x3 sel :x4 drop f0 5 = 0 x4 sel :kd @semitab 256 * kd + swap drop >kc
-# a newline is a semicolon if the token before it asks for one
-kc 255 > idx Em = & $Ls
-ev kc 255 & 0 != kc prev 255 > | outif4
-~1 0 * N + Ls outif4
-kc 255 & :kk2 0 = {SEMI} * kk2 + kk2 0 != kc prev 255 > | outif4
-~1 0 * {SEMI} + Ls outif4
+#   tc    token byte;  ts  first byte of a token;  tem  first byte after a token
+#   pp    wl + 8 tc + 16 os of the byte before (one carry for all three);  kp  the kind of the token that just ended
+# The runs of zeros move a value to a stack depth whose carry register is free: a line has eight.
+bytes :c @gk :k back @gk :bk 5 = bk 6 = 2 * + 8 * + 0 k 7 = /esc :es 2 = 32 * + + @mcls \\mdfa :m 8 * k + @strt :sv m 0 = sv 0 = & c 47 = peek 47 = peek 42 = | & 1 ^ & :code c @gw c 46 = peek @gw 2 = & + * \\wdfa :wl drop back @gfc c @gsc 24 * + @e2t :t dup 1 = swap 3 = | t 2 = peek 46 = & | back2 @gfc back @gsc 24 * + :pti @e2t :pt 3 = c 61 = & pt 2 = c 46 = & | 2 * + 1 + c @gop code * wl 0 = * * :oc 0 0 oc /odfa :os drop drop drop drop k 1 = m 6 != & peek 0 != & :nl wl 0 != | os 0 != | sv 0 != | :tc 8 * wl + os 16 * + 0 over prev :pp drop drop drop wl 0 != pp 7 & :pw 0 = & os 1 = | nl | sv 5 = | sv 3 = es 2 != & | :ts drop 0 0 0 0 ts %ev drop drop drop drop tc 1 ^ ts | pp 8 & 0 != & :tem drop 0 0 0 0 0 tem %te drop drop drop drop drop pp 48 & :po drop pw 0 != pw back 105 = 8 * + @wkt po 32 = pti @e2k po 48 = pti @e3k back @e1k sel sel sel :kp drop 0 0 0 0 0 kp tem ^kb drop drop drop drop drop end
+# A token that runs to the end of the input has no end position, so the input must end outside a token.
+# Its last byte, if a newline, is left out above (peek is 0 there) and handled with the end of input below.
+&ev &te - 0 != 3 * halt
+# One line over the tokens, for keywords: an identifier is one if its first twelve bytes hash to a keyword
+# and are equal to it. kf: the final kind of every token.
+ev :s te over - :len drop dup {{text Neg 4 len 4 min - 8 * >> & :a s 4 + Tm min {{text Neg 4 len 4 - 0 max 4 min - 8 * >> & :b s 8 + Tm min {{text Neg 4 len 8 - 0 max 4 min - 8 * >> & :d drop drop drop a {kwp[0]} * b {kwp[1]} * + d {kwp[2]} * + {kwp[3]} >> 255 & :hk @kwa a = hk @kwb b = & hk @kwc d = & len 12 <= & hk @kwk * :kk drop 'kb :kb0 {IDENT} = kk 0 != & kk kb0 sel swap drop .kf
+# a newline is a semicolon if the token before it asks for one; so is the end of the input
+'kf :k1 0 != k1 prev @semib | >keepb
+'kf @semib dup prev - $Lq
+Lq 255 & >Ls
+ev 'keepb outif4
+N 0 > >Has
+~Has 0 * Tm + [text 10 = $Lb
+~1 0 * N + Lb - Ls outif4
+'kf :k2 0 = {SEMI} * k2 + keepb outif
+~1 0 * {SEMI} + Ls outif
 '''.split('\n')
 sys.stdout.write('\n'.join(L))

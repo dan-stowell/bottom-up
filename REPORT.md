@@ -287,7 +287,7 @@ absolute time. In order:
   linker in Strand produces the C reference's 262 MB image byte for byte, in 303 ms
   against 238.
 - **A Go lexer** (GOLEX.md): byte-identical to `go/scanner` on 92.5 MB of the standard
-  library, 630 ms on one core and 215 on eight, against 601 ms for `go/scanner`'s scan.
+  library, 537 ms on one core and 192 on eight, against 601 ms for `go/scanner`'s scan.
 
 Language additions this round: byte vectors and positions from byte lines, `[x` `{x` `}x`,
 `.x` `'x` `<x` `,x`, slice copies `(src )dst`, 8-state automata `\t`, `peek` `back`

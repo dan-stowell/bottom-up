@@ -358,6 +358,8 @@ def interp(src: bytes, inp: bytes):
                     elif c == STOREVB: vec[t.slot] = st.pop()
                     elif c == TEEBX: vec[t.slot] = list(st[-1])
                     elif c == WHEREB: vec[t.slot] = [i for i, q in enumerate(st.pop()) if q]
+                    elif c == PACKB:
+                        m = st.pop(); a = st.pop(); vec[t.slot] = [x for x, q in zip(a, m) if q]
                     else: raise AssertionError(c)
                     continue
                 sval = (w32(pool[t.poolidx]) if t.lit else sca.get(t.slot, 0))     # a literal is a dword: 4294967295 is -1
@@ -373,6 +375,9 @@ def interp(src: bytes, inp: bytes):
                 elif c == KW['input']: n = len(inp); st.append(list(inp))
                 elif c == KW['input4']:
                     n = len(inp) // 4; st.append([w32(x) for x in struct.unpack('<%dI' % n, inp[:4 * n])])
+                elif c == WIDEV:
+                    if len(v) != n: raise Fail()
+                    st.append([x & 255 for x in v])
                 elif c in (VEC, VECL, VECT):
                     if len(v) != n: raise Fail()
                     st.append(list(v))

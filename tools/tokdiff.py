@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""tokdiff.py SOURCE WANT GOT -- compare two token dumps (all offsets, then all kinds, as dwords) and
+"""tokdiff.py SOURCE WANT GOT -- compare two token dumps (all offsets as dwords, then all kinds as bytes) and
 show the first difference with its source context."""
 import struct, sys
 src = open(sys.argv[1], 'rb').read()
 def load(p):
-    d = open(p, 'rb').read(); n = len(d) // 8
-    return list(struct.unpack('<%dI' % n, d[:4 * n])), list(struct.unpack('<%dI' % n, d[4 * n:8 * n])), len(d)
+    d = open(p, 'rb').read(); n = len(d) // 5
+    return list(struct.unpack('<%dI' % n, d[:4 * n])), list(d[4 * n:5 * n]), len(d)
 (wo, wk, wl), (go_, gk, gl) = load(sys.argv[2]), load(sys.argv[3])
-print('want', len(wo), 'tokens;', 'got', len(go_), 'tokens', '(odd size!)' if gl % 8 else '')
+print('want', len(wo), 'tokens;', 'got', len(go_), 'tokens', '(odd size!)' if gl % 5 else '')
 for i in range(min(len(wo), len(go_))):
     if (wo[i], wk[i]) != (go_[i], gk[i]):
         lo = max(0, wo[i] - 60)

@@ -34,7 +34,7 @@ if command -v go >/dev/null; then
   ./build/stage2 < examples/golex.strand > build/golex_strand && chmod +x build/golex_strand
   taskset -c "$(python3 -c 'import os; print(min(os.sched_getaffinity(0)))')" ./build/golex_strand < build/gosmall.go | cmp - build/gosmall.tok
   ./build/golex_strand < build/gosmall.go | cmp - build/gosmall.tok
-  echo "PASS golex ($(($(stat -c %s build/gosmall.tok) / 8)) tokens)"
+  echo "PASS golex ($(($(stat -c %s build/gosmall.tok) / 5)) tokens)"
 else echo "SKIP golex: no go toolchain"; fi
 echo "--- big inputs: the three compilers agree"
 for f in big8 many; do
