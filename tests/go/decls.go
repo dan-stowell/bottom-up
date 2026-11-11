@@ -55,3 +55,13 @@ var (
 	bu int; bv, bw string
 )
 const bx, by, bz = 1, 2, 3
+func noBody(x int) int
+func noBodyStruct() struct{ a int }
+func resultStruct() struct{ a int } { return struct{ a int }{1} }
+func resultIface() interface{ m() } { return nil }
+func resultArr() [2]struct{} { var z [2]struct{}; return z }
+var lit = func() struct{} { return struct{}{} }
+var lit2, lit3 = func() {}, func() int { return 1 }
+type fn func() struct{}
+func (r struct{ a int }) odd() {}
+func lastOne() { x := map[string]struct{}{"a": {}}; _ = x }

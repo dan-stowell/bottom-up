@@ -61,7 +61,8 @@ func normal(name string, parse bool) ([]byte, *ast.File) {
 
 // decls: the package-level declarations of the files in LIST that parse, as the offsets of their names in
 // the concatenation `pcorpus` writes (dwords), then one byte each: 1 func, 2 method, 3 var, 4 const, 5 type,
-// 6 the path of an import, 7 the name in a package clause (so: where each file starts, and what it needs)
+// 6 the path of an import, 7 the name in a package clause (so: where each file starts, and what it needs),
+// 8 and 9 the braces around the body of a function or method (so: the pieces that can be compiled apart)
 func decls(list []byte, timeOnly bool) {
 	var offs []uint32
 	var kinds []byte
@@ -91,6 +92,10 @@ func decls(list []byte, timeOnly bool) {
 					at(d.Name, 2)
 				} else {
 					at(d.Name, 1)
+				}
+				if d.Body != nil {
+					offs = append(offs, uint32(base+fset.Position(d.Body.Lbrace).Offset), uint32(base+fset.Position(d.Body.Rbrace).Offset))
+					kinds = append(kinds, 8, 9)
 				}
 			case *ast.GenDecl:
 				for _, s := range d.Specs {

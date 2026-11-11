@@ -88,10 +88,12 @@ Nothing in it is specific to Go beyond the tables and the two lines.
 
 `examples/godecl.strand` is the lexer and three more lines. It writes, for every name
 declared at package level (functions, methods, variables, constants, types), the offset of
-the name and what it is; and for every file, the name in its package clause and the path
-of every import. The first is what a compiler's parser has to find before anything can be
-resolved, and what `ctags` or an editor's symbol list is. The second is the edges of the
-build graph: what `go list` reads sources for.
+the name and what it is; for every file, the name in its package clause and the path of
+every import; and for every function and method, where its body opens and closes. The
+first is what a compiler's parser has to find before anything can be resolved, and what
+`ctags` or an editor's symbol list is. The second is the edges of the build graph: what
+`go list` reads sources for. The third cuts a package into the pieces that can be parsed
+and compiled apart from each other.
 
 1. **Nesting**: +1 for every `(` `[` `{`, -1 for every closer, and a running sum over the
    tokens. On all cores, like any prefix sum.
@@ -104,12 +106,16 @@ build graph: what `go list` reads sources for.
    statement" visible without a grammar.
 3. **A second automaton** remembers which of `func`, `var`, `const`, `type`, `import` was
    last seen outside all brackets. A string while that is `import` is an import path; an
-   identifier right after `package` is a file's package name.
+   identifier right after `package` is a file's package name. Its two spare states follow a
+   function into its body and out again: the body opens at the first `{` outside all
+   brackets that does not follow `struct` or `interface` (a result type may have braces
+   of its own, and a function may have no body at all).
 
 On the 8,041 files of the standard library that `go/parser` accepts (92.4 MB, 17.0 million
-tokens) the output is byte-identical to a walk over `go/parser`'s declarations: **372,762
+tokens) the output is byte-identical to a walk over `go/parser`'s declarations: **555,414
 entries** (65,966 functions, 31,359 methods, 16,130 variables, 204,660 constants, 17,627
-types, 28,979 imports, 8,041 package clauses), on one core and on eight. `tests/go/decls.go` holds the shapes the library does not
+types, 28,979 imports, 8,041 package clauses, and both braces of 91,326 function bodies),
+on one core, on eight, and on eight with the pool's guesses spoiled (RUNTIME.md). `tests/go/decls.go` holds the shapes the library does not
 dwell on (grouped and generic declarations, receivers of every form, declarations inside
 function bodies that must not be listed), and `test.sh` runs both.
 
