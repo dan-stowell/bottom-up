@@ -1,6 +1,6 @@
 // golex: the reference. Tokenise a Go source file with go/scanner and write the token stream as
 // all byte offsets (little-endian dwords) followed by all token kinds (bytes), or time the scan.
-//   golex dump FILE > tokens      golex time FILE [reps]
+//   golex dump FILE > tokens      golex time FILE [reps]      golex lines FILE OKFILE > tokens
 package main
 
 import (
@@ -60,6 +60,30 @@ func main() {
 	src, err := os.ReadFile(os.Args[2])
 	if err != nil {
 		panic(err)
+	}
+	if os.Args[1] == "lines" { // golex lines FILE OKFILE > tokens : every line is a source of its own; those that scan
+		// without error are written to OKFILE, and stdout gets the token dump of OKFILE (for fuzzing)
+		var ok []byte
+		var offs []uint32
+		var kinds []byte
+		for _, line := range bytes.Split(bytes.TrimSuffix(src, []byte("\n")), []byte("\n")) {
+			one := append(append([]byte{}, line...), '\n')
+			if _, errs := scan(one, nil); errs > 0 {
+				continue
+			}
+			base := len(ok)
+			scan(one, func(off int, tok token.Token) {
+				offs = append(offs, uint32(base+off))
+				kinds = append(kinds, byte(tok))
+			})
+			ok = append(ok, one...)
+		}
+		os.WriteFile(os.Args[3], ok, 0o644)
+		w := bufio.NewWriterSize(os.Stdout, 1<<20)
+		binary.Write(w, binary.LittleEndian, offs)
+		binary.Write(w, binary.LittleEndian, kinds)
+		w.Flush()
+		return
 	}
 	switch os.Args[1] {
 	case "dump": // every token's offset as a little-endian dword, then every token's kind as a byte

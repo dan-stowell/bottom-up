@@ -14,10 +14,19 @@ On the Go standard library — the 8,084 `.go` files under `GOROOT/src` that sca
 error, concatenated: 92,537,748 bytes — the two outputs are **byte-identical: 17,047,917
 tokens**, on 1, 2, 3, 4 and 8 CPUs. `test.sh` repeats the comparison on part of the library.
 
-What that does not cover: input `go/scanner` reports errors for (two files were left out),
-files with carriage returns or a byte-order mark, and anything not in this corpus. Identifier
+A corpus of programs that compile says little about token boundaries nobody writes. The
+fifth audit found three (`x.0`, `0a`, `...0`; REVIEWS.md, review 8), all in numbers. The word
+automaton is now a transcription of go/scanner's `scanNumber`, and `tests/golex_fuzz.py`
+compares the two lexers on random lines built from digits, dots, exponent and prefix letters,
+operators, quotes and comments, keeping the lines go/scanner accepts without error: 1.3
+million of them agree, on one core and on all.
+
+What that does not cover: input `go/scanner` reports errors for (two files were left out; the
+lexer does not diagnose anything), a leading byte-order mark, NUL bytes. Identifier
 characters above 0x7F are taken to be letters, which `go/scanner` checks properly; the corpus
 has 50,582 such bytes and no disagreement, but an input with a non-letter there would differ.
+Carriage returns were excluded from the corpus out of caution; the audit found no mismatch
+with them.
 
 ## How fast?
 
@@ -27,7 +36,8 @@ Whole process (start, map the file, lex, write 136 MB of output to /dev/null), m
 
 | | time | |
 |---|---|---|
-| `go/scanner`, scan only | 604-608 ms | 153 MB/s, 35 ns per token |
+| `go/scanner`, scan only | 549-608 ms | 153-168 MB/s |
+| the Go compiler's own scanner (`cmd/compile/internal/syntax`), scan only | 497-513 ms | measured by the fifth audit's harness |
 | the same in a process that reads the file and writes the tokens | 1,142 ms | |
 | Strand, 1 CPU | 447-453 ms | 205 MB/s |
 | Strand, 2 CPUs | 368-382 ms | |
@@ -37,10 +47,12 @@ Whole process (start, map the file, lex, write 136 MB of output to /dev/null), m
 (The same program on one core over the last day: 1,143 ms, 610, 537, 516, 448. Peak memory
 is 294 MB for the 93 MB input.)
 
-So: on one core Strand does the whole job, file to tokens, in three quarters of the time
-`go/scanner` takes for the scan alone, and on eight cores in under a quarter of it. It is
-not the several-fold single-core win that the byte-lane primitives suggest on paper; the
-reasons are below and are the work list.
+So: on one core Strand does the whole job, file to tokens, in about 50 ms less than the Go
+compiler's scanner takes for the scan alone, and on eight cores in about a quarter of it.
+(Not the same work: both Go scanners also build literal strings and check what they read;
+this lexer produces offsets and kinds and diagnoses nothing.) It is not the several-fold
+single-core win that the byte-lane primitives suggest on paper; the reasons are below and
+are the work list.
 
 ## How it works
 
@@ -90,7 +102,9 @@ All added for this, all general (DESIGN.md):
 There is no profiler on this VM, so there are now two small ones: `tools/simdratio.c`
 single-steps a binary and counts instructions by kind, and `tools/sample.c` stops it every
 250 microseconds and records where it was; `tools/whattime.py` maps both back to tokens of
-the source. On one core (1,457 samples):
+the source. Both are rough instruments (the audit measured how rough: the sampler
+under-counts time in the kernel and follows one thread; shares below are shares of samples,
+give or take two points). On one core (1,457 samples):
 
 | share | where |
 |---|---|
@@ -108,7 +122,7 @@ What the profilers found, in the order found:
   masked stores. Now one byte compress of the lane numbers and as many widen-and-store
   steps as there are results (usually one or two), unmasked on the serial path: 516 to
   448 ms. What is left of their 20% is mostly the first touch of the memory they write
-  (two 80 MB vectors): about 85 ms of the 448 is the kernel.
+  (two 80 MB vectors): about 85 ms of the 448 is the kernel, by `time`'s system time.
 - **Comparisons through mask registers were slow**: compare into a mask, then mask into a
   vector. A lexer's flags are chains of them. They are now two or three plain vector
   instructions (xor or saturating subtract, then min with 1).
