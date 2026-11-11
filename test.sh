@@ -15,6 +15,7 @@ for s in stage1 stage2 stage3; do
 done
 echo "--- thread pool at production block sizes, 2..all CPUs, file and pipe"
 python3 tests/pool.py build/stage2
+python3 tests/pool_big.py
 echo "--- all 256 four-state transition functions"
 python3 tests/fsm_all.py build/stage2
 echo "--- a linker written in Strand against the C reference (explore/linkjob.c), both ways of resolving imports"

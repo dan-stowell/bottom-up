@@ -50,6 +50,7 @@ SETUP = """
   mov dword ptr [rbx-708],16
   mov dword ptr [rbx-712],0
   mov dword ptr [rbx-716],0
+  mov dword ptr [rbx-720],0
   xor eax,eax
   vpbroadcastd zmm27,r12d
   vmovdqa32 zmm26,zmm30
@@ -398,6 +399,7 @@ SETUPB = """
   mov dword ptr [rbx-708],64
   mov dword ptr [rbx-712],0
   mov dword ptr [rbx-716],0
+  mov dword ptr [rbx-720],0
   xor eax,eax
 """
 LOOPHEADB = """
@@ -653,7 +655,7 @@ for d in range(3, 9):
   vmovdqu8 [rsi+rdx]{{k2}},zmm24
 3:
   add edx,r10d
-  vpbroadcastd zmm{C},edx""", pre=ALLOC('rsi') + f"\n  lea rcx,[rbx+{DISP}]\n  mov [rcx],rsi\n  mov qword ptr [rcx+8],0\n  vpxord zmm{C},zmm{C},zmm{C}\n  or dword ptr [rbx-712],{1 << m}\n  mov dword ptr [rbx-680],0")
+  vpbroadcastd zmm{C},edx""", pre=ALLOC('rsi') + f"\n  lea rcx,[rbx+{DISP}]\n  mov [rcx],rsi\n  mov qword ptr [rcx+8],0\n  mov [rbx-{1152 - 8 * m}],rcx\n  or dword ptr [rbx-720],{1 << m}\n  vpxord zmm{C},zmm{C},zmm{C}\n  or dword ptr [rbx-712],{1 << m}\n  mov dword ptr [rbx-680],0")
 # ---- 8-state automata: `x \\t`. The same construction with 8-byte functions in qword lanes: register t
 # (zmm8+t, eight of them) gets the functions of bytes 8g+t, one qword per group g, by `vpermi2q` from a
 # 16-qword table; a 7-step chain composes within groups, a Kogge-Stone scan over the 8 group functions
@@ -810,7 +812,7 @@ for d in range(2, 9):    # never at depth 1: a line must not end on a tee
   jnz 8f                            # nothing: the serial tail after a pool block may be such a chunk
   mov [rcx+8],rdx
 8:
-  vpbroadcastd zmm{C},edx""", pre=ALLOC('rsi') + f"\n  lea rcx,[rbx+{DISP}]\n  mov [rcx],rsi\n  mov qword ptr [rcx+8],0\n  vpxord zmm{C},zmm{C},zmm{C}\n  or dword ptr [rbx-712],{1 << r}\n  mov dword ptr [rbx-680],0")
+  vpbroadcastd zmm{C},edx""", pre=ALLOC('rsi') + f"\n  lea rcx,[rbx+{DISP}]\n  mov [rcx],rsi\n  mov qword ptr [rcx+8],0\n  mov [rbx-{1152 - 8 * r}],rcx\n  or dword ptr [rbx-720],{257 << r}\n  vpxord zmm{C},zmm{C},zmm{C}\n  or dword ptr [rbx-712],{1 << r}\n  mov dword ptr [rbx-680],0")
 
 asm = ".intel_syntax noprefix\n.text\n"
 for kind, D in (('S', S), ('Q', PRE)):
