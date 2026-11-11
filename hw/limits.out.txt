@@ -1,0 +1,11 @@
+memcpy_1t_bytes_per_s 9879855114
+memcpy_8t_bytes_per_s 43088568108
+disk_write_bytes_per_s 902304053
+disk_read_cold_bytes_per_s 3112295142
+pagecache_read_1t_bytes_per_s 4994148018
+smallfiles_cold_8t_bytes_per_s 270137385
+smallfiles_cold_8t_files_per_s 25511
+smallfiles_warm_8t_bytes_per_s 2113576889
+smallfiles_warm_8t_files_per_s 199600
+smallfiles_count 7640
+smallfiles_bytes 80900106

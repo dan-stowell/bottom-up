@@ -112,3 +112,21 @@ AUDIT.md, defect 3, found that parts of this file claimed more than `hw/probe.c`
 5. Arrays that spill L1 (32 KiB = 8192 dwords) triple the cost of everything (5.2 vs 1.9
    ticks for add when three 16 KiB arrays were used). A compiler whose working set is
    "one dword per source byte" leaves L1 at 8 KiB of source. Byte lanes would be 4x denser.
+
+## Limits for the build trace (2026-11-11)
+
+`hw/limits.sh` (raw output: `hw/limits.out.txt`) measures what the floors in TRACE.md divide by.
+
+| | |
+|---|---|
+| memcpy, 256 MiB blocks, 1 thread | 9.9 GB/s |
+| memcpy, 8 threads together | 43.1 GB/s |
+| disk, sequential read, cold (2 GiB, `dd`) | 3.1 GB/s |
+| disk, sequential write with `fdatasync` | 0.90 GB/s |
+| page cache to user space, 1 thread | 5.0 GB/s |
+| MinIO's 7,640 source files (81 MB), cold, 8 readers | 0.27 GB/s, 25,500 files/s: **300 ms** |
+| the same, page cache warm | 2.1 GB/s, 200,000 files/s: 38 ms |
+
+Reading a build's sources as thousands of small files costs twelve times what the same bytes cost as
+one sequential read (300 ms against 26 ms). That is 15% of a 2-second budget spent on directory
+entries and inodes, before a byte is lexed.
