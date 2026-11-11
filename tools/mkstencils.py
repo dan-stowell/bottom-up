@@ -859,7 +859,7 @@ rels, rell = len(sten), len(rel)
 sten += rel
 
 stub, ssyms = assemble('stub')
-assert ssyms['_start'] == 8 and len(stub) % 64 == 0
+assert ssyms['_start'] == 8 and (112 + len(stub)) % 64 == 0      # rbx, and so the stub's 64-byte constants, on a cache-line boundary
 ehdr = bytearray(96)
 ehdr[0:16] = b'\x7fELF\x02\x01\x01' + bytes(9)
 import struct

@@ -39,13 +39,13 @@ Whole process (start, map the file, lex, write 136 MB of output to /dev/null), m
 | `go/scanner`, scan only | 549-608 ms | 153-168 MB/s |
 | the Go compiler's own scanner (`cmd/compile/internal/syntax`), scan only | 497-513 ms | measured by the fifth audit's harness |
 | the same in a process that reads the file and writes the tokens | 1,142 ms | |
-| Strand, 1 CPU | 456-460 ms | 200 MB/s |
-| Strand, 2 CPUs | 292-297 ms | (382 before the one-pass pool, below) |
-| Strand, 3 CPUs | 206-210 ms | (319) |
-| Strand, 4 CPUs | 165-177 ms | (204) |
-| Strand, 8 CPUs | 101-121 ms | (131) 760-900 MB/s |
+| Strand, 1 CPU | 454-470 ms | 200 MB/s |
+| Strand, 2 CPUs | 295-306 ms | (382 before the one-pass pool, below) |
+| Strand, 3 CPUs | 213-219 ms | (319) |
+| Strand, 4 CPUs | 171-177 ms | (204) |
+| Strand, 8 CPUs | 116-135 ms | (131) 690-800 MB/s |
 
-Strand's rows are minimum and median of 11 runs, timed around `taskset` and the process.
+Strand's rows are the middle half of 21 runs, timed around `taskset` and the process.
 (The same program on one core over the last day: 1,143 ms, 610, 537, 516, 448; the ten
 milliseconds since are the price of getting numbers right. Peak memory is 294 MB for the
 93 MB input.)
@@ -107,22 +107,52 @@ All added for this, all general (DESIGN.md):
 
 ## Where the time goes, and what is next
 
-There is no profiler on this VM, so there are now two small ones: `tools/simdratio.c`
-single-steps a binary and counts instructions by kind, and `tools/sample.c` stops it every
-250 microseconds and records where it was; `tools/whattime.py` maps both back to tokens of
-the source. Both are rough instruments (the audit measured how rough: the sampler
-under-counts time in the kernel and follows one thread; shares below are shares of samples,
-give or take two points). On one core (1,457 samples):
+The CPU's own counters do work on this VM (through `perf_event_open`, user mode only), so
+there is now a real profiler, `tools/perfprof.c`: cycles, instructions and samples of the
+instruction pointer on every thread; `tools/whattime.py` maps the samples back to tokens of
+the source. (The two tools written before I found that out, `simdratio.c` and `sample.c`,
+are rougher instruments; the fifth audit measured how rough.) On one core the lexer runs
+1,626 million instructions in 1,345 million cycles of user time, and about 100 ms more in
+the kernel:
 
-| share | where |
+| share of samples | where |
 |---|---|
-| 72% | the line over the bytes |
-| 24% | the keyword line over the tokens |
+| 75% | the line over the bytes |
+| 21% | the keyword line over the tokens |
 | 4% | semicolons and output |
 
-and by kind of token: position sinks 20%, the two 8-state automata 19%, the two 4-state
-automata 13%, table lookups 11%, the keyword line's text gathers 8%, tees 4%, pushes 4%,
-literals 4%, packing 3%.
+`bench/primcost.py` measures what each primitive costs, per 64-byte chunk, on this CPU:
+
+| primitive | cycles | instructions |
+|---|---|---|
+| add, min, and, or | 0.2 | 2 |
+| compare with a constant | 1.8 | 4 |
+| table lookup `@t` | 3.9 | 10 |
+| tee and push (`:x ... x`) | 4.2 | 3 |
+| multiply | 5.2 | 9 |
+| 4-state automaton | about 50 | 45 |
+| 8-state automaton | about 70 | 68 |
+| pack `^x`, an eighth of the bytes selected | 24 | 25 |
+| positions `%x`, an eighth selected | 48 | 35 |
+| positions `%x`, nothing selected | 9 | 21 |
+
+The byte line spends about 690 cycles on a chunk. Its four automata are 240 of them, its
+three sinks about 110, its 19 table lookups 75, and the rest is some sixty tees, pushes and
+comparisons. Three things follow that I had wrong:
+
+- **Instruction counts mislead.** A table lookup is ten instructions and four cycles; an
+  automaton is one instruction per cycle because nearly all of it is byte shuffles, and this
+  CPU does about one 512-bit shuffle per cycle. Removing every byte multiply from the line
+  (13% of its instructions) bought 1%, and a 128-entry lookup at half the instructions, tried
+  and removed again, bought 1.5%.
+- **The sinks' cost is the memory they write, not the compress.** `vpcompressb` is five
+  cycles. A store to memory the process has not touched before costs 41 cycles per 32 bytes
+  here, page fault included: 1.4 microseconds per page on this VM. The lexer touches about
+  190 MB of new memory for its token vectors, which is the 100 ms of kernel time. On a
+  machine with ordinary page-fault costs that would be a quarter of it.
+- **The stub's constants were 48 bytes off a cache-line boundary** (the blob starts 112 bytes
+  into a page), so every byte comparison and every automaton loaded across two lines. Fixed:
+  a comparison went from 2.8 cycles to 1.8.
 
 What the profilers found, in the order found:
 
@@ -150,12 +180,17 @@ Still true:
 - **Every vector is as long as the input.** 93 MB of source is 200 MB of fresh pages. A
   streaming form would reuse them.
 - **Every flag is a 64-byte vector.** A lexer written by hand keeps its flags as 64-bit
-  masks in general registers, where `and`, `or` and "shift by one" cost almost nothing. A
-  mask type in the language is the change I expect most from, and have not made.
+  masks in general registers. I expected most from a mask type in the language; the cost
+  table says otherwise: logic on byte vectors is nearly free here (0.2 cycles), and what a
+  mask type would save is the comparisons' second half, perhaps 5% of the line.
 
 A file need not end in a newline: the byte line runs one byte past the input (`bytesz`, added
 for this), so the last token has a byte after it like every other.
 
-Next: cheaper table lookups for small tables, the keyword check only for tokens that can be
-keywords, a line's carry budget, and then the same lexer for a second language to see what
-was Go-specific.
+Next, in the order the numbers above suggest: **not writing what need not be kept** — the
+token positions exist only to be read once by the next line, and a runtime that ran the
+lines block by block (the byte line over a few megabytes, then the token line over what that
+produced, in memory both have already touched) would save most of the kernel time on one
+core and more on eight; a cheaper automaton, if there is one; the keyword check only for
+tokens that can be keywords; and then the same lexer for a second language to see what was
+Go-specific.

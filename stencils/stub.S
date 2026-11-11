@@ -1222,10 +1222,11 @@ f_blk:      .quad 0x4000000000000000   # elements per block: plain lines (everyt
 f_blkscan:  .quad 0x400000             #   lines with scans
 f_blkprobe: .quad 0x10000              #   their first, probing, block
 f_blkout:   .quad 0x400000             #   bytes of output per block
-  .balign 64
-f_a28:    .fill 64,1,0
-f_a29:    .fill 64,1,0
-  .balign 64
+  .balign 64                        # The blob is loaded 112 bytes into a page (after the ELF headers, of which
+  .fill 16,1,0                      # its first 8 bytes are the end): 16 more put everything from here to
+f_a28:    .fill 64,1,0              # `dataend`, and so every 64-byte constant below, on a cache-line
+f_a29:    .fill 64,1,0              # boundary in memory. (They were 48 bytes off, and every load of one
+                                    # straddled two lines: every byte comparison, every automaton.)
   .fill 64,1,0                      # [rbx-1152] per carry register: the slot of the vector whose count it holds
   .byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31   # [rbx-1088] bytes 0..63
   .byte 32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63
