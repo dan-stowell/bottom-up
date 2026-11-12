@@ -13,3 +13,4 @@ explore/omp_*
 .claude/morning-asked
 .claude/settings.local.json
 STOP
+.claude/status-asked
