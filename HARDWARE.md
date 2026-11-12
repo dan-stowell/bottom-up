@@ -130,3 +130,15 @@ AUDIT.md, defect 3, found that parts of this file claimed more than `hw/probe.c`
 Reading a build's sources as thousands of small files costs twelve times what the same bytes cost as
 one sequential read (300 ms against 26 ms). That is 15% of a 2-second budget spent on directory
 entries and inodes, before a byte is lexed.
+
+## Page faults (2026-11-12, measured during a MinIO build)
+
+- A minor fault on fresh anonymous memory costs about 3.6 us here (KVM guest, memory cgroup on): one
+  compile of `minio/cmd` with the collector off takes 413 k faults and 1.45 s of kernel time. Zeroing a
+  4 kB page at the measured memcpy rate would be 0.25-0.4 us.
+- `madvise(MADV_POPULATE_WRITE)` on 4 MB at a time halves that (0.75 s).
+- No transparent huge pages (`CONFIG_TRANSPARENT_HUGEPAGE` is not set), but hugetlbfs is there:
+  `sysctl vm.nr_hugepages=N` reserves 2 MB pages, `mmap(MAP_HUGETLB)` uses them. Same compile: 12 k
+  faults, 0.29 s kernel, and 0.7 s less user time (TLB). Hugetlb pages are not charged to a cgroup's
+  MemoryMax (there is a separate hugetlb controller).
+- Starting the 37 MB compiler binary and compiling nothing: about 9 ms of CPU, 700 faults.
