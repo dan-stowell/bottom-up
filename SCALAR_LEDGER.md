@@ -149,3 +149,16 @@ dependency list, `debug.ReadBuildInfo` returns nothing), because the driver does
 - Toolchain facts (GOROOT, version, tool and release tags) come from `build/sb.facts`, written by
   `sb -mkfacts` when the driver is built: they are properties of the installed toolchain, not of the
   build, in the same way `build/compile-sb` is.
+
+## sbc, the second compiler (2026-11-12)
+
+`driver/sbc` is Go, built inside the patched GOROOT's cmd tree, and nothing in it is Strand:
+
+- its front end is go/parser and go/types over the whole program in one process. Measured on MinIO:
+  parse 0.33-0.51 s, check 0.45-0.65 s of wall clock on 8 cores (JOURNAL iteration 9 has the full
+  numbers). That measurement is the reason for leaving Strand here: the phase fits the budget as it is.
+- its code generator builds `obj.Prog` lists and hands them to cmd/internal/obj, the stock assembler's
+  back half, which encodes the instructions, builds the line tables and writes the object file. That is
+  delegation to the stock toolchain, like `go tool link`. It is also the slow part of sbc's future:
+  about 0.3 µs per byte of machine code, three times the budget a 2-second build has for code
+  generation. A stencil emitter is where Strand would come back in.
