@@ -162,3 +162,18 @@ dependency list, `debug.ReadBuildInfo` returns nothing), because the driver does
   delegation to the stock toolchain, like `go tool link`. It is also the slow part of sbc's future:
   about 0.3 µs per byte of machine code, three times the budget a 2-second build has for code
   generation. A stencil emitter is where Strand would come back in.
+
+## The 2026-11-11 night and the fork-server (2026-11-12)
+
+Last night took the build from 54 s to 12.5 s and almost none of it is Strand. What is where, and why:
+
+| phase | who does it now | why not Strand |
+|---|---|---|
+| lex + package-level declarations for the plan | **Strand** (`examples/godecl.strand`), 0.9 core-s, consumed by the plan | — |
+| token pass over every file (`golex.strand`) | not run (`NOLEX`): nothing consumes it | Lexing + parsing all of MinIO in the stock compiler is 0.45 core-s, 1% of the compiler's work (TRACE.md). Replacing it cannot move the trace. |
+| parse, type check, export IR | stock `cmd/compile` front end, 28.6 core-s | The cost is type checking (~11) and the export-IR round trip (~17), not scanning bytes. The round trip is removed by one address space (F2), not by a faster scan. |
+| lowering and code generation | stock `walk` + the baseline generator (`driver/baseline/sbbaseline.go`, Go, inside cmd/compile) + the stock assembler, 34 core-s | The baseline is a tree walk over the compiler's IR, per function: pointer-chasing, not columns. The data-parallel-shaped piece is instruction encoding and layout (the assembler is the largest single item); a stencil emitter writing bytes directly is where Strand comes back (F3/F4). |
+| link | stock `cmd/link` on the patched runtime, 1.9 core-s, 1.3-1.4 s serial | F4 (LINKING.md): layout by prefix sum and relocation as one pass are Strand-shaped and are the default when that rung starts. |
+| process and memory setup | huge-page heaps (`SB_HUGE`), fork-server (`-zygote`, `runtime.SBFork`) | Kernel and runtime mechanics; nothing to vectorize. |
+
+No new data-parallel-shaped phase was created by the fork-server, so nothing new left Strand.
