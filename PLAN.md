@@ -63,4 +63,4 @@ M4. Within 3x of the floor on MinIO; kube-apiserver passes.
 
 Log (append one line per milestone reached, with the oracle number):
 
-Now: Start M0: compute each phase's floor (HARDWARE.md, hw/), freeze stock objects for MinIO, write FLOOR.md's script and the link oracle.
+Now: M0 finishing: builders are writing link/hlink.c (branch from worktree; merge, then run `link/test.sh`) and link/secdiff (merge, run `link/secdiff.sh /home/exedev/targets/frozen/minio`). Then M1-M3 via `link/try.sh`, `link/stdtest.sh`; regenerate FLOOR.md with `link/bench.sh minio && link/floor.py hlink > FLOOR.md`. kube-apiserver freeze: `FREEZE_GOFLAGS= link/freeze.sh /home/exedev/targets/kubernetes/cmd/kube-apiserver kube-apiserver`.
