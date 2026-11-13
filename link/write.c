@@ -44,11 +44,64 @@ static void createHuge(void) {
 	}
 }
 
+// ---- overwriting the old output in place (the default on an ordinary file system; -fresh: unlink + create)
+// Unlinking a 110 MB output and filling a new one costs a page-cache allocation and a fault per 4 KiB page
+// (31-39 ms on ext4 for MinIO); the pages of the file a rebuild replaces are already there (13 ms to fill). So the
+// old file is reused when that is safe: a regular file (not followed through a symlink) that we own, with no
+// other hard link, and not being executed (opening it for writing then fails with ETXTBSY; and while we hold it
+// open for writing, nobody can exec it). Anything else, or any failure on the way, falls back to unlink + create.
+//
+// What a reader sees: while the link runs, the file has mode 0, so it cannot be newly opened or executed by
+// anyone but root, and its bytes are a mix of the old image, zeros and the new image. A process that had it
+// open or mapped before sees that mix too. When hlink exits 0 the file is exactly the new image (the same
+// bytes a fresh file would get: every byte is zeroed before the write pass, as a new file's would be), with
+// mode 0755 & ~umask. A link that fails removes the output, as before; one that is killed leaves a file of
+// mode 0, which no one can run and which the next link replaces.
+static mode_t outMode;      // the mode the file gets when it is complete
+static bool outReused;      // the old file's pages are reused
+static long long oldOutSize; // (for the -stats note)
+
+static void zeroTask(void *ctx UNUSED, int w UNUSED, long i) {
+	size_t lo = (size_t)i << 21, hi = MIN(lo + (2u << 20), (size_t)outSize);
+	// (populating the chunk's page tables in one call is a little cheaper than a fault per page; the fault is
+	// the cost here, about 2 us per 4 KiB page on ext4, the memset is not; an old kernel says EINVAL: no matter)
+	madvise(out + lo, hi - lo, 23 /* MADV_POPULATE_WRITE */);
+	memset(out + lo, 0, hi - lo);
+}
+
+static bool reuseOutput(void) {
+	int fd = open(flagOut, O_RDWR | O_NOFOLLOW | O_CLOEXEC);
+	if (fd < 0) return false; // (ENOENT, ETXTBSY: being executed, EACCES, ELOOP: a symlink, ...)
+	struct stat st;
+	if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) || st.st_uid != geteuid() || st.st_nlink != 1 || fchmod(fd, 0) < 0) {
+		close(fd);
+		return false;
+	}
+	// (from here on a failure leaves a file of mode 0: unlink it and start again)
+	if (ftruncate(fd, outSize) < 0) goto fail;
+	out = mmap(NULL, (size_t)outSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	if (out == MAP_FAILED) goto fail;
+	outFd = fd;
+	oldOutSize = st.st_size;
+	outReused = true;
+	par((long)(((size_t)outSize + (2u << 20) - 1) >> 21), zeroTask, NULL);
+	return true;
+fail:
+	close(fd);
+	unlink(flagOut);
+	return false;
+}
+
 static void openOutput(void) {
+	mode_t um = umask(0);
+	umask(um);
+	outMode = 0755 & ~um;
 	if (outOnHugetlbfs) {
 		createHuge();
 		return;
 	}
+	if (!flagFresh && reuseOutput()) return;
+	if (!flagFresh) unlink(flagOut); // (-fresh: main removed it before the link)
 	outFd = open(flagOut, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0755);
 	if (outFd < 0) fatalf("open %s: %s", flagOut, strerror(errno));
 	if (ftruncate(outFd, outSize) < 0) fatalf("truncate %s: %s", flagOut, strerror(errno));
@@ -56,9 +109,11 @@ static void openOutput(void) {
 	if (out == MAP_FAILED) fatalf("mmap %s: %s", flagOut, strerror(errno));
 }
 
-// closeOutput gives the file its final size and closes it (writeELF, at the end of finish).
+// closeOutput gives the file its final size (and, when it was reused, its mode) and closes it (writeELF, at the
+// end of finish).
 static void closeOutput(void) {
 	if (ftruncate(outFd, outSize) < 0) fatalf("truncate %s: %s", flagOut, strerror(errno));
+	if (outReused && fchmod(outFd, outMode) < 0) fatalf("chmod %s: %s", flagOut, strerror(errno));
 	close(outFd);
 	outFd = -1;
 }
@@ -76,6 +131,7 @@ static void writeOut(void) {
 	if ((g = lookupC("runtime.unreachableMethod", 1)) != 0) unreachableMethodAddr = addr[g];
 	if ((g = lookupC("runtime.mapinitnoop", 1)) != 0) mapinitnoopAddr = addr[g];
 	if (outOnHugetlbfs) lap("create", "new file on hugetlbfs, %lld huge pages", outSize / hugePage);
+	else if (outReused) lap("create", "overwrote the old output in place (it was %.1f MB), zeroed", (double)oldOutSize / 1e6);
 	else lap("create", "new file");
 	if (*flagDumpMap) {
 		mapFile_ = fopen(flagDumpMap, "w");

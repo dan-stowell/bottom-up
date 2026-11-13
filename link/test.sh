@@ -2,6 +2,8 @@
 # hlink's tests: build it, then
 #   1. every program of link/progs through link/try.sh, without and with inlining (and the crashing runs);
 #   2. identical output for -j 1, 2, 4 and 8 (a program of link/progs and the frozen MinIO link);
+#   2b. overwriting an old output in place (the default) gives the bytes -fresh gives, over files of other sizes;
+#      a symlink, a hard-linked file and a running binary are not written through; a failed link leaves nothing;
 #   3. a short list of standard-library test binaries linked by hlink (link/stdtest.sh);
 #   4. the frozen MinIO link: `--version` prints what the stock binary prints, and the live set (-dumplive)
 #      equals fclink's for the same link;
@@ -52,6 +54,36 @@ else
 fi
 mapfile -t F < "$minio/link.flags"
 (cd "$minio" && jcheck minio -importcfg importcfg.link "${F[@]}" main.a) || fail=1
+
+# ---- 2b. overwriting the old output in place gives the bytes of a new file (-fresh), whatever was there
+ow() {
+  local d=$out/overwrite ok=1; rm -rf "$d"; mkdir -p "$d"; local f=$d/minio
+  L() { (cd "$minio" && timeout 120 prlimit --as=$((16 << 30)) "$hlink" "$@" -importcfg importcfg.link "${F[@]}" main.a); }
+  L -fresh -o "$d/fresh" || { echo "FAIL overwrite: -fresh link failed"; return 1; }
+  for mb in 300 20 0; do # garbage, larger and smaller than the image
+    head -c $((mb << 20)) /dev/zero | tr '\0' '\377' > "$f"; chmod 600 "$f"
+    L -o "$f" || { ok=0; echo "FAIL overwrite: link over $mb MB failed"; }
+    cmp -s "$d/fresh" "$f" || { ok=0; echo "FAIL overwrite: output over a $mb MB file differs from -fresh"; }
+    [ "$(stat -c %a "$f")" = "$(stat -c %a "$d/fresh")" ] || { ok=0; echo "FAIL overwrite: mode $(stat -c %a "$f") after overwriting"; }
+  done
+  "$f" --version > /dev/null || { ok=0; echo "FAIL overwrite: the overwritten binary does not run"; }
+  # not reused: a symlink (replaced by a file, its target untouched), a file with another hard link
+  head -c 1000 /dev/zero > "$d/target"; ln -s "$d/target" "$d/sym"; ln -f "$f" "$d/hard"
+  L -X main.x=1 -o "$d/sym" && L -X main.x=1 -o "$f" || ok=0
+  [ ! -L "$d/sym" ] && [ "$(stat -c %s "$d/target")" = 1000 ] && cmp -s "$d/fresh" "$d/hard" || { ok=0; echo "FAIL overwrite: wrote through a symlink or a hard link"; }
+  # ... nor a binary that is running (it keeps its old inode; the new output is a new file)
+  cp /bin/sleep "$f"; "$f" 60 & local pid=$!; sleep 0.2
+  L -o "$f" || { ok=0; echo "FAIL overwrite: link over a running binary failed"; }
+  kill $pid 2> /dev/null; wait $pid 2> /dev/null
+  cmp -s "$d/fresh" "$f" || { ok=0; echo "FAIL overwrite: link over a running binary gave other bytes"; }
+  # a failed link leaves no output
+  L -X nodot -o "$f" > /dev/null 2>&1
+  [ -e "$f" ] && { ok=0; echo "FAIL overwrite: a failed link left the old output"; }
+  rm -rf "$d"
+  [ $ok = 1 ] && echo "PASS overwrite: in place over 300, 20 and 0 MB of garbage = -fresh; symlink, hard link, running binary, failed link"
+  [ $ok = 1 ]
+}
+ow || fail=1
 
 # ---- 3. standard-library tests
 read -r -a std <<< "${STD:-sort strings strconv fmt reflect crypto/fips140}"

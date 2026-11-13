@@ -191,6 +191,7 @@ static const flagdef flagdefs[] = {
 	{"dumpmap", 0, &flagDumpMap},
 	{"E", 0, &flagEntry},
 	{"hugetlb", 1, &flagHugetlb},
+	{"fresh", 1, &flagFresh},
 	{"X", 3, NULL},
 	// accepted for compatibility with the go command's link line
 	{"buildmode", 0, &ignoredStr},
@@ -205,7 +206,7 @@ static const flagdef flagdefs[] = {
 
 static void usage(void) {
 	fprintf(stderr, "usage: hlink -o out -importcfg importcfg.link [-buildid id] [-X pkg.name=val]... [-stats] [-j N] [-nodce] "
-	                "[-dumplive file] [-dumpmap file] [-E entry] [-hugetlb] main.o\n");
+	                "[-dumplive file] [-dumpmap file] [-E entry] [-hugetlb] [-fresh] main.o\n");
 	_exit(2);
 }
 
@@ -344,7 +345,9 @@ int main(int argc, char **argv) {
 		free(name);
 	}
 
-	removeOutput();
+	// a failed link must not leave an old output behind: today's file goes now, unless its pages are to be
+	// reused (then any error removes it, see removeOutput)
+	if (flagFresh || outOnHugetlbfs) removeOutput();
 	load(flagImportcfg, argv[first]);
 	exitIfErrors();
 	resolve();
