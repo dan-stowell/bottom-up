@@ -74,3 +74,16 @@
   duplicates' canonical ids 15, process 41, the rest outside the batches. A dependent miss on this VM is
   158 ns (4 KiB pages, nested paging), an independent one 9.5 ns; link/prof.sh (perf_event sampling) and
   HLINK_TSC=1 (stage clocks) are how these were found. Not yet where it has to be: see STATUS.md.
+- 2026-11-13T18:13:08Z Merged the output-side builder (IDEAS 1-3 built): hugetlbfs output (2 MiB layout, chosen when -o is on
+  hugetlbfs or with -hugetlb), overwrite of the old output in place (default; -fresh for unlink + create), and
+  detached teardown (default: fork, the parent returns when the child says the output is complete;
+  -teardown madvise|exit, -nodetach). Its interleaved measurements, MinIO, 8 cores, process ms by the caller's
+  clock (hlink as it was this morning: 253): ext4 new file + exit 236, ext4 new + fork 195, ext4 overwrite +
+  fork **182**, tmpfs overwrite + fork **173**, hugetlbfs + fork **174**; the write phase goes 39-52 ms (new
+  file) -> 14-16 (overwrite) or 18-20 (hugetlbfs: the fill is 3.7 ms, the rest is the copy). Parallel
+  MADV_DONTNEED before exit costs 95 ms of kernel CPU: killed. Things learnt about hugetlbfs: every process
+  started from it reserves huge pages for its whole image (MinIO: 67 pages) and dies with SIGSEGV after exec
+  if the pool is short; the file carries its bss (MinIO 147 MB instead of 109). With hlink's own arrays on
+  huge pages too, 256 pages were not enough for link + run: **vm.nr_hugepages is now 1024** (2 GiB).
+  Also today: content-addressed symbols are joined after the flood, only the reached ones (1.29 M of 2.68 M
+  slots; 457 k classes kept): resolve on one core 152 -> 114 ms, the join itself 37 ms inside deadcode.
