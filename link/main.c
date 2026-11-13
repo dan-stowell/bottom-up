@@ -51,17 +51,27 @@ static void refError(const object *o, u32 pkg) {
 }
 
 // ---- the thread pool: nthreads-1 persistent workers; the calling thread is worker 0
+// The pool. A link is a few dozen parallel passes, some of them (the levels of the reachability flood)
+// microseconds long, so a worker waiting for the next job spins for a while before it sleeps: waking a
+// sleeping thread costs tens of microseconds here, a spinning one sees the new job in nanoseconds. It must
+// still sleep eventually: on a busy machine eight spinning threads take the CPU from the one that has work.
 static struct {
 	parfn fn;
 	void *ctx;
 	long n;
-	long next;
 	int nw;
-	unsigned gen;
-	int active;
+	_Alignas(64) long next;
+	_Alignas(64) u32 gen;     // bumped once per job (a futex word)
+	_Alignas(64) u32 done;    // workers that have finished the current job (a futex word)
+	_Alignas(64) u32 sleepers; // workers asleep on gen
+	u32 mainSleeps;
 } job;
-static pthread_mutex_t poolMu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t poolCv = PTHREAD_COND_INITIALIZER, doneCv = PTHREAD_COND_INITIALIZER;
+#include <linux/futex.h>
+#include <sys/syscall.h>
+#include <immintrin.h>
+static inline void futexWait(u32 *addr, u32 val) { syscall(SYS_futex, addr, FUTEX_WAIT_PRIVATE, val, NULL, NULL, 0); }
+static inline void futexWake(u32 *addr, int n) { syscall(SYS_futex, addr, FUTEX_WAKE_PRIVATE, n, NULL, NULL, 0); }
+#define spinRounds 20000 // of _mm_pause: on the order of 100 microseconds
 
 static void runJob(parfn fn, void *ctx, long n, int w) {
 	for (;;) {
@@ -73,20 +83,22 @@ static void runJob(parfn fn, void *ctx, long n, int w) {
 
 static void *poolWorker(void *arg) {
 	int w = (int)(intptr_t)arg;
-	unsigned seen = 0;
+	u32 seen = 0;
 	for (;;) {
-		pthread_mutex_lock(&poolMu);
-		while (job.gen == seen) pthread_cond_wait(&poolCv, &poolMu);
-		seen = job.gen;
-		parfn fn = job.fn;
-		void *ctx = job.ctx;
-		long n = job.n;
-		int nw = job.nw;
-		pthread_mutex_unlock(&poolMu);
-		if (w < nw) runJob(fn, ctx, n, w);
-		pthread_mutex_lock(&poolMu);
-		if (--job.active == 0) pthread_cond_signal(&doneCv);
-		pthread_mutex_unlock(&poolMu);
+		u32 g;
+		for (int spin = 0; (g = __atomic_load_n(&job.gen, __ATOMIC_ACQUIRE)) == seen; spin++) {
+			if (spin < spinRounds) {
+				_mm_pause();
+				continue;
+			}
+			__atomic_fetch_add(&job.sleepers, 1, __ATOMIC_SEQ_CST);
+			if (__atomic_load_n(&job.gen, __ATOMIC_SEQ_CST) == seen) futexWait(&job.gen, seen);
+			__atomic_fetch_sub(&job.sleepers, 1, __ATOMIC_SEQ_CST);
+		}
+		seen = g;
+		if (w < job.nw) runJob(job.fn, job.ctx, job.n, w);
+		__atomic_fetch_add(&job.done, 1, __ATOMIC_SEQ_CST);
+		if (__atomic_load_n(&job.mainSleeps, __ATOMIC_SEQ_CST)) futexWake(&job.done, 1);
 	}
 	return NULL;
 }
@@ -111,20 +123,27 @@ static void par(long n, parfn fn, void *ctx) {
 		for (long i = 0; i < n; i++) fn(ctx, 0, i);
 		return;
 	}
-	pthread_mutex_lock(&poolMu);
 	job.fn = fn;
 	job.ctx = ctx;
 	job.n = n;
-	job.next = 0;
 	job.nw = nw;
-	job.active = nthreads - 1;
-	job.gen++;
-	pthread_cond_broadcast(&poolCv);
-	pthread_mutex_unlock(&poolMu);
+	__atomic_store_n(&job.next, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&job.done, 0, __ATOMIC_RELAXED);
+	__atomic_fetch_add(&job.gen, 1, __ATOMIC_SEQ_CST);
+	if (__atomic_load_n(&job.sleepers, __ATOMIC_SEQ_CST)) futexWake(&job.gen, nthreads);
 	runJob(fn, ctx, n, 0);
-	pthread_mutex_lock(&poolMu);
-	while (job.active != 0) pthread_cond_wait(&doneCv, &poolMu);
-	pthread_mutex_unlock(&poolMu);
+	// every worker passes through every job (those beyond nw only acknowledge it), so that none can still be
+	// reading this job's fields when the next one is set up
+	u32 want = (u32)nthreads - 1, d;
+	for (int spin = 0; (d = __atomic_load_n(&job.done, __ATOMIC_ACQUIRE)) != want; spin++) {
+		if (spin < spinRounds) {
+			_mm_pause();
+			continue;
+		}
+		__atomic_store_n(&job.mainSleeps, 1, __ATOMIC_SEQ_CST);
+		if ((d = __atomic_load_n(&job.done, __ATOMIC_SEQ_CST)) != want) futexWait(&job.done, d);
+		__atomic_store_n(&job.mainSleeps, 0, __ATOMIC_SEQ_CST);
+	}
 }
 
 // ---- the phase table

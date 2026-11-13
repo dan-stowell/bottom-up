@@ -111,6 +111,7 @@ static void errorf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void fatalf(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn));
 static void exitIfErrors(void);
 static void lap(const char *name, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static double nowSeconds(void);
 
 // ---- the thread pool (main.c): fn(ctx, worker, i) for i in [0,n), on all threads, in no defined order
 typedef void (*parfn)(void *ctx, int w, long i);
