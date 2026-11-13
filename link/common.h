@@ -187,6 +187,7 @@ typedef struct unit {
 	// layout: bytes this unit's live symbols need per (bucket, alignment class), then where they go
 	u32 csize[nBuckets][nClasses];
 	u32 cbase[nBuckets][nClasses];
+	u16 clMask[nBuckets]; // the classes that hold a live symbol, zero-sized ones too (bucket: the block's alignment)
 	u32 nfunc[2]; // live functions (ordinary, FIPS), and the index of the first of each
 	u32 funcBase[2];
 	u32 nfuncCl[2][nClasses]; // live functions per alignment class: the function table is in address order

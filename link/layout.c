@@ -204,6 +204,7 @@ static void sizeUnit(void *ctx UNUSED, int w UNUSED, long ui) {
 		state[gid] = st | (u32)b << stBucketShift | cl << stClassShft;
 		if (isTextBucket(b)) u->nfuncCl[b - bText][cl]++;
 		u->csize[b][cl] += occupied(symSiz(s), b, cl);
+		u->clMask[b] |= (u16)(1u << cl);
 	}
 }
 
@@ -254,13 +255,10 @@ static void bucket(int b, u32 minAlign, u32 *start, u32 *end) {
 	for (long ui = 0; ui < nunits; ui++) {
 		unit *u = &units[ui];
 		u32 *cs = u->csize[b];
-		int top = -1;
-		for (int cl = nClasses - 1; cl >= 0; cl--)
-			if (cs[cl] != 0) {
-				top = cl;
-				break;
-			}
-		if (top >= 0) va = rnd(va, MAX(minAlign, 1u << top));
+		// the block starts at the alignment of its most aligned symbol, zero-sized or not (the stock linker
+		// aligns every symbol: data.go assignDsymsToSection); the classes below follow at their alignments,
+		// as each class's bytes are a multiple of its alignment
+		if (u->clMask[b]) va = rnd(va, MAX(minAlign, 1u << (31 - __builtin_clz(u->clMask[b]))));
 		for (int cl = nClasses - 1; cl >= 0; cl--) { // (empty classes too: zero-sized symbols need an address)
 			u->cbase[b][cl] = va;
 			va += cs[cl];

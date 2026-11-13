@@ -6,7 +6,7 @@
 #   4. the frozen MinIO link: `--version` prints what the stock binary prints;
 #   5. the libraries are loaded (so objects numbered) in the stock linker's order, which decides which copy of a
 #      duplicated symbol is kept (`-v=2` of both linkers, for ifaces and MinIO);
-#   6. secdiff (link/secdiff.sh): hello and ifaces with and without inlining, and MinIO, have no differences
+#   6. secdiff (link/secdiff.sh): hello, ifaces and zerosize with and without inlining, and MinIO, have no differences
 #      from the stock linker's output beyond secdiff's rules (it compares symbol sets, which fclink's live
 #      set was compared with before: fclink keeps other copies of duplicated symbols).
 #   link/test.sh          (scratch output under ${HLINK_OUT:-/tmp/hlink-try})
@@ -21,7 +21,7 @@ fail=0
 
 # ---- 1. the programs
 run() { "$here/link/try.sh" "$@" || fail=1; }
-for p in hello gcstress traceback ifaces initorder; do
+for p in hello gcstress traceback ifaces initorder zerosize; do
   for g in "-gcflags=all=-l" " "; do
     GCFLAGS=$g run "$here/link/progs/$p"
   done
@@ -97,7 +97,7 @@ sdcheck() { # name, GCFLAGS, dir
     echo "FAIL secdiff: $1 ($log):"; sed -n '/^Differences/,$p' "$log" | head -20; fail=1
   fi
 }
-for p in hello ifaces; do
+for p in hello ifaces zerosize; do
   sdcheck "$p" " " "$here/link/progs/$p"
   sdcheck "$p-l" "-gcflags=all=-l" "$here/link/progs/$p"
 done
