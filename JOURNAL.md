@@ -99,3 +99,8 @@
   work is 487 ms (load 36, resolve 100, deadcode 135, layout 75, create 32, write 102) and has to come down
   about fourfold; what I am doing about it is in PLAN.md's Now line (layout over live symbols only is next),
   and STATUS.md says plainly that I do not expect this design to reach the exit line on stock objects.
+- 2026-11-13T18:25:33Z kube-apiserver's tests finished after STOP: 17 of 18 packages agree with the stock link; **one differs**:
+  k8s.io/kubernetes/pkg/kubeapiserver/options linked by hlink dies with `fatal error: traceback did not unwind
+  completely` (runtime.(*unwinder).finishInternal) where the stock binary passes. A real linker bug in the
+  pc tables or funcdata of some function (the run's binaries were linked by today's later hlink, lazy join
+  included). Not investigated. Log: /tmp/hlink-try/kubetests.log; binaries under /tmp/hlink-try/kubernetes/.

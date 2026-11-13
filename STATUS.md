@@ -1,7 +1,7 @@
 # STATUS (at most ten lines; updated at every milestone and whenever Dan is needed)
 
 2026-11-13T18:24:13Z (stopped on request). Campaign 1. M0-M3 reached: 5 programs, 259/259 std test binaries, MinIO's 46 test
-packages agree with the stock link (to be rerun on the final linker); kube-apiserver 4 of 18 so far, 0 differ; secdiff
+packages agree with the stock link (to be rerun on the final linker); kube-apiserver 17 of 18: **one differs** (hlink binary dies in the runtime's unwinder: a linker bug, not yet found); secdiff
 (symbolic section diff vs go tool link) exists; a builder's fixes for it are on an unmerged branch.
 Speed, MinIO, 8 cores: floor 9.7 ms (model in FLOOR.md); stock 1,750 ms; fclink 303; hlink 251 this morning, **167-182
 now**, about 5% of floor; kube-apiserver 267. All of today's 8-core numbers were taken on a busy machine (FLOOR.md's
