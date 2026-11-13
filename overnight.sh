@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Start a continuous run on the campaign in PLAN.md. Usage: ./overnight.sh   (run it inside tmux)
-# It runs until a file STOP exists in this directory: `touch STOP`. There is no deadline.
+# Start a continuous run on the campaign in PLAN.md. Usage: ./overnight.sh [LIMIT]   (inside tmux)
+# It runs until a file STOP exists in this directory: `touch STOP`. With LIMIT it creates STOP
+# itself after a duration (`1h`, `90m`) or at a clock time (`"Sat 18:00"`, UTC unless TZ is set);
+# the session then gets one turn to bring STATUS.md up to date. The agent is never told the limit.
 # Sessions run on Fable; set MODEL to use another model (MODEL=opus ./overnight.sh).
 #
 # If claude exits, a fresh session starts on PLAN.md. A watchdog in the tmux pane:
@@ -12,6 +14,14 @@ set -uo pipefail
 cd "$(dirname "$0")"
 model=${MODEL:-claude-fable-5-2}
 rm -f STOP .claude/status-asked
+if [ -n "${1:-}" ]; then
+  if [[ $1 =~ ^[0-9]+[smhd]?$ ]]; then secs=$(( $(date -d "now + $(sed 's/s$/ sec/;s/m$/ min/;s/h$/ hour/;s/d$/ day/' <<<"$1")" +%s) - $(date +%s) ))
+  else secs=$(( $(date -d "$1" +%s) - $(date +%s) )) || exit 1; fi
+  [ "$secs" -gt 0 ] || { echo "overnight.sh: $1 is in the past" >&2; exit 1; }
+  echo "overnight.sh: stopping at $(date -d "@$(( $(date +%s) + secs ))")"
+  ( sleep "$secs"; touch STOP ) &
+  limiter=$!
+fi
 prompt="Continuous run. Read CHARTER.md, PLAN.md and LOOP.md, then work the campaign in PLAN.md, starting from its Now line. There is no deadline; a session ending costs nothing because you commit often. Don't ask the user questions; decide and write down why."
 nudge="Continue the campaign in PLAN.md from its Now line. (Watchdog: the session was idle, usually a usage limit that has now reset.)"
 transcripts="$HOME/.claude/projects/$(pwd | tr '/.' '--')"
@@ -52,7 +62,7 @@ if [ -n "${TMUX_PANE:-}" ]; then
     done
   ) &
   watchdog=$!
-  trap 'kill $watchdog 2>/dev/null' EXIT
+  trap 'kill $watchdog ${limiter:-} 2>/dev/null' EXIT
 else
   echo "overnight.sh: not inside tmux, so no watchdog; a usage limit will leave the session idle" >&2
 fi
