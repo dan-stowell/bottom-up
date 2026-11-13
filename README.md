@@ -1,7 +1,7 @@
 # bottom-up
 
 Bottom-up: a core that runs at hardware speed, grown to take on real workloads, starting
-with Go's front end. CHARTER.md is the goal, PLAN.md the current campaign. The core is Strand,
+with linking, then code emission. CHARTER.md is the goal, PLAN.md the current campaign. The core is Strand,
 carried over with its history from `dan-stowell/simd-lang`:
 
 ## Strand
