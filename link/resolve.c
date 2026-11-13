@@ -207,21 +207,15 @@ static void resolveRecords(void *ctx UNUSED, int w, long ui) {
 	unit *u = &units[ui];
 	resolveWorker *rw = &rws[w];
 	object *o = u->o;
-	u32 h64Lo = o->ndef, hLo = o->ndef + o->nh64, npLo = hLo + o->nh;
+	u32 npLo = o->ndef + o->nh64 + o->nh;
 	for (u32 g = o->base + u->lo, e = o->base + u->hi; g < e; g++) canon[g] = g;
 	const u8 *s = osym(o, MAX(u->lo, o->ndef));
-	const u8 *h64 = o->b + o->off[BlkHash64], *hh = o->b + o->off[BlkHash];
 	const u8 *ri = o->b + o->off[BlkRelocIdx];
 	for (u32 j = MAX(u->lo, o->ndef); j < u->hi; j++, s += SymSize) {
 		u32 gid = o->base + j;
 		if (j < o->nalldef) SF(gid) = sfOf(s, ri + (size_t)j * 4);
-		if (j < hLo) {
-			u64 h = ld64(h64 + (size_t)(j - h64Lo) * 8), k = mix64(h ^ 0x5851F42D4C957F2Dull);
-			recAdd(rw, &rw->hashes[k >> (64 - 9)], (rec){k, h, (u64)symSiz(s) << 32 | (u32)~gid});
-		} else if (j < npLo) {
-			const u8 *h = hh + (size_t)(j - hLo) * HashSize;
-			u64 k1 = ld64(h);
-			recAdd(rw, &rw->hashes[k1 >> (64 - 9)], (rec){k1, ld64(h + 8), (u64)symSiz(s) << 32 | (u32)~gid});
+		if (j < npLo) {
+			// content-addressed: joined after the flood, and only if it was reached (resolveHashed)
 		} else {
 			u32 rk = 0;
 			if (isDwarfKind(symType(s))) {
@@ -272,11 +266,10 @@ static inline void scratchFor(resolveWorker *rw, u64 n, u32 *size) {
 	*size = sz;
 }
 
-// 2. the joins, one partition at a time. A partition of names leaves its table for the lookups to come;
-// a partition of content hashes tells its records' slots their winners right away.
+// 2. the join by name, one partition at a time. A partition leaves its table for the lookups to come.
 static void resolveJoin(void *ctx UNUSED, int w, long task) {
 	resolveWorker *rw = &rws[w];
-	if (task < nParts) {
+	{
 		int p = (int)task;
 		u64 n = 0;
 		for (int t = 0; t < nthreads; t++)
@@ -322,7 +315,41 @@ static void resolveJoin(void *ctx UNUSED, int w, long task) {
 		rw->nrec[0] += (long)n;
 		return;
 	}
-	int p = (int)task - nParts;
+}
+
+// ---- content-addressed symbols: joined after the flood, and only those it reached
+//
+// A content-addressed symbol (a string, a pc-value table, a stack map: half of all slots) can only be referred
+// to from its own object, and two with one hash have the same bytes. So nothing before the flood needs to know
+// which copy is canonical: the flood treats every copy as itself, and what it reached, about half of them, is
+// joined here. The winner of a class is the largest copy (short hashes cover up to 8 bytes of content, and a
+// 4-byte symbol may share its hash with an 8-byte one), then the lowest id, among the reached copies; it
+// inherits the flags of all of them. Which copies were reached does not depend on thread timing (every
+// reached copy that has relocations is flooded, not only the first seen), so neither does the winner.
+#define hashedFlags (stLive | stPC | stFuncdata | stNameNeeded)
+#define valShort (1ull << 63) // a record of a short (64-bit) hash: never equal to one of a long hash
+static void hashedRecords(void *ctx UNUSED, int w, long ui) {
+	unit *u = &units[ui];
+	resolveWorker *rw = &rws[w];
+	object *o = u->o;
+	u32 h64Lo = o->ndef, hLo = o->ndef + o->nh64, npLo = hLo + o->nh;
+	const u8 *h64 = o->b + o->off[BlkHash64], *hh = o->b + o->off[BlkHash];
+	for (u32 j = MAX(u->lo, h64Lo); j < MIN(u->hi, npLo); j++) {
+		u32 gid = o->base + j;
+		if ((FL(gid) & hashedFlags) == 0) continue;
+		u64 size = symSiz(osym(o, j));
+		if (j < hLo) {
+			u64 h = ld64(h64 + (size_t)(j - h64Lo) * 8), k = mix64(h ^ 0x5851F42D4C957F2Dull);
+			recAdd(rw, &rw->hashes[k >> (64 - 9)], (rec){k, h, valShort | size << 32 | (u32)~gid});
+		} else {
+			const u8 *h = hh + (size_t)(j - hLo) * HashSize;
+			u64 k1 = ld64(h);
+			recAdd(rw, &rw->hashes[k1 >> (64 - 9)], (rec){k1, ld64(h + 8), size << 32 | (u32)~gid});
+		}
+	}
+}
+static void hashedJoin(void *ctx UNUSED, int w, long p) {
+	resolveWorker *rw = &rws[w];
 	u64 n = 0;
 	for (int t = 0; t < nthreads; t++)
 		for (chunk *c = rws[t].hashes[p].head; c; c = c->next) n += c->n;
@@ -344,7 +371,7 @@ static void resolveJoin(void *ctx UNUSED, int w, long task) {
 						r->k2 = nd - 1; // (the record remembers its group for the second pass)
 						break;
 					}
-					if (ent[e - 1].k1 == r->k1 && ent[e - 1].k2 == r->k2) {
+					if (ent[e - 1].k1 == r->k1 && ent[e - 1].k2 == r->k2 && (ent[e - 1].val ^ r->val) >> 63 == 0) {
 						if (r->val > ent[e - 1].val) ent[e - 1].val = r->val;
 						r->k2 = e - 1;
 						break;
@@ -359,9 +386,20 @@ static void resolveJoin(void *ctx UNUSED, int w, long task) {
 				if (win != gid) {
 					canon[gid] = win;
 					SF(gid) |= sfRedir;
+					FL(win) |= FL(gid) & hashedFlags; // (a class is in one partition: no other thread writes these)
 				}
 			}
 	rw->nrec[1] += (long)n;
+	rw->nrec[2] += (long)nd;
+}
+static long nHashedReached, nHashedClasses;
+static void resolveHashed(void) {
+	par(nunits, hashedRecords, NULL);
+	par(nHashParts, hashedJoin, NULL);
+	for (int t = 0; t < nthreads; t++) {
+		nHashedReached += rws[t].nrec[1];
+		nHashedClasses += rws[t].nrec[2];
+	}
 }
 
 // 3. definitions by package index: themselves, unless something may refer to their name
@@ -453,7 +491,7 @@ static void resolve(void) {
 	double t0 = nowSeconds();
 	par(nunits, resolveRecords, NULL);
 	double t1 = nowSeconds();
-	par(nParts + nHashParts, resolveJoin, NULL);
+	par(nParts, resolveJoin, NULL);
 	double t2 = nowSeconds();
 	par(nunits, resolvePkgDefs, NULL);
 	double t3 = nowSeconds();
@@ -470,6 +508,6 @@ static void resolve(void) {
 		nrec[1] += rws[t].nrec[1];
 		npkg += rws[t].npkgjoin;
 	}
-	lap("resolve", "%u slots; joined: %ld by name (and %ld definitions by package index), %ld by content hash; ms: records %.1f, joins %.1f, pkgdefs %.1f, names %.1f",
-		nslots, nrec[0], npkg, nrec[1], (t1 - t0) * 1e3, (t2 - t1) * 1e3, (t3 - t2) * 1e3, (t4 - t3) * 1e3);
+	lap("resolve", "%u slots; joined: %ld by name (and %ld definitions by package index); ms: records %.1f, joins %.1f, pkgdefs %.1f, names %.1f",
+		nslots, nrec[0], npkg, (t1 - t0) * 1e3, (t2 - t1) * 1e3, (t3 - t2) * 1e3, (t4 - t3) * 1e3);
 }

@@ -276,17 +276,15 @@ static inline const u8 *fiInlNode(bytes fi, u32 inlOff, u32 k) { return fi.p + i
 
 // process floods symbol c. tg[i] is the canonical target of its relocation i and atg[i] that of its aux record i
 // (functions only): floodTask has worked them out, so that their flags are in the cache by now.
-static void process(floodWorker *w, u32 c, const u32 *tg, const u32 *atg) {
+static void process(floodWorker *w, u32 c, bool uii, const u32 *tg, const u32 *atg) {
 	u32 j;
 	object *o = objOf(c, &j);
 	const u8 *s = osym(o, j);
 	u8 sfc = SF(c);
 	if (sfc & sfReflect) w->reflect = true;
-	bool isType = sfc & sfGoType, uii = false;
-	if (isType && (atomicLoad8(&FL(c)) & stUsedInIface) != 0) {
-		uii = true;
-		if (atomicOr8(&FL(c), stIfaceDone) & stIfaceDone) return;
-	}
+	// (uii was read when the batch's references were decoded. If the type is converted to an interface after
+	// that, whoever sets the flag queues the type again: setIface.)
+	if (uii && (atomicOr8(&FL(c), stIfaceDone) & stIfaceDone)) return;
 	u32 nr;
 	relocp rs = oRelocs(o, j, &nr);
 	w->tmp.n = 0;
@@ -508,11 +506,13 @@ typedef struct fbatch {
 		u32 j, nr, na, t0, a0;
 		relocp rs;
 		auxp as;
+		bool uii; // it is a type converted to an interface (as seen when its references were decoded)
 	} it[floodBatch];
 	u32 nt, nat;
 	vecu32 tg, atg; // the canonical targets of the batch's relocations and aux records
 } fbatch;
-static u64 tscStage[64][8];
+static u64 tscStage[256][8]; // (per worker, capped: see tscW)
+#define tscW(w) ((w) & 255)
 
 static inline void bIndex(fbatch *b) {
 	for (size_t k = 0; k < b->n; k++) {
@@ -541,21 +541,37 @@ static inline void bRelocs(fbatch *b) {
 	VRESERVE(b->tg, nt + 1);
 	VRESERVE(b->atg, nat + 1);
 }
-// the references, decoded; the flags of what they name
+// The references the flood will follow, decoded, and the flags of what they name asked for. What it will not
+// follow is left 0 and never decoded (a reference into a package that is not in the importcfg must not fail
+// the link unless something uses it): weak relocations, R_USETYPE and R_INITORDER, the methods of a type that
+// is not converted to an interface (they are followed when something can call them: methodTask), and the aux
+// records that are debug information.
 static inline void bDecode(fbatch *b) {
 	for (size_t k = 0; k < b->n; k++) {
 		object *o = b->it[k].o;
-		u32 *t = b->tg.a + b->it[k].t0;
+		u32 *t = b->tg.a + b->it[k].t0, c = b->f[k];
+		bool uii = (SF(c) & sfGoType) && (atomicLoad8(&FL(c)) & stUsedInIface);
+		b->it[k].uii = uii;
 		for (u32 r = 0; r < b->it[k].nr; r++) {
-			u32 g = RREF(o, RELOC(b->it[k].rs, r));
+			relocp rl = RELOC(b->it[k].rs, r);
+			u16 ty = rType(rl);
+			u32 g = 0;
+			if (!((ty & R_WEAK) || ty == R_USETYPE || ty == R_INITORDER || (ty == R_METHODOFF && !uii))) {
+				g = RREF(o, rl);
+				__builtin_prefetch(&FL(g));
+			}
 			t[r] = g;
-			__builtin_prefetch(&FL(g));
 		}
 		t = b->atg.a + b->it[k].a0;
 		for (u32 a = 0; a < b->it[k].na; a++) {
-			u32 g = AREF(o, AUX(b->it[k].as, a));
+			auxp ax = AUX(b->it[k].as, a);
+			u8 ty = aType(ax);
+			u32 g = 0;
+			if (ty == AuxFuncInfo || ty == AuxFuncdata || (ty >= AuxPcsp && ty <= AuxPcdata)) {
+				g = AREF(o, ax);
+				__builtin_prefetch(&FL(g));
+			}
 			t[a] = g;
-			__builtin_prefetch(&FL(g));
 		}
 	}
 }
@@ -568,7 +584,7 @@ static inline void bDups(fbatch *b, int w) {
 	for (u32 x = 0; x < nat; x++)
 		if (SF(atg[x]) & sfRedir) __builtin_prefetch(&canon[atg[x]]);
 	u64 t1 = __rdtsc();
-	tscStage[w][3] += t1 - t0;
+	tscStage[tscW(w)][3] += t1 - t0;
 	for (u32 x = 0; x < nt; x++)
 		if (SF(tg[x]) & sfRedir) {
 			tg[x] = canon[tg[x]];
@@ -579,7 +595,7 @@ static inline void bDups(fbatch *b, int w) {
 			atg[x] = canon[atg[x]];
 			__builtin_prefetch(&FL(atg[x]));
 		}
-	tscStage[w][4] += __rdtsc() - t1;
+	tscStage[tscW(w)][4] += __rdtsc() - t1;
 }
 // a function's FuncInfo: where it is, then its bytes
 static inline void bFuncInfo(fbatch *b) {
@@ -615,7 +631,7 @@ static void floodTask(void *ctx UNUSED, int w, long i) {
 	floodWorker *fw = &fws[w];
 	fbatch *cur = &fw->batch[0], *next = &fw->batch[1];
 	u64 t0 = __rdtsc(), t1;
-#define STAGE(k) (t1 = __rdtsc(), tscStage[w][k] += t1 - t0, t0 = t1)
+#define STAGE(k) (t1 = __rdtsc(), tscStage[tscW(w)][k] += t1 - t0, t0 = t1)
 	cur->f = frontier.a + lo;
 	cur->n = MIN((size_t)floodBatch, hi - lo);
 	bIndex(cur);
@@ -636,9 +652,9 @@ static void floodTask(void *ctx UNUSED, int w, long i) {
 		t0 = __rdtsc();
 		bFuncInfo(cur);
 		STAGE(5);
-		for (size_t k = 0; k < cur->n; k++) process(fw, cur->f[k], cur->tg.a + cur->it[k].t0, cur->atg.a + cur->it[k].a0);
+		for (size_t k = 0; k < cur->n; k++) process(fw, cur->f[k], cur->it[k].uii, cur->tg.a + cur->it[k].t0, cur->atg.a + cur->it[k].a0);
 		STAGE(6);
-		tscStage[w][7] += cur->n;
+		tscStage[tscW(w)][7] += cur->n;
 		at = nx;
 		fbatch *t = cur;
 		cur = next;
@@ -749,11 +765,14 @@ static void deadcode(void) {
 		for (int i = 0; i < nthreads; i++) more = more || fws[i].next.n != 0;
 		if (!more) break;
 	}
-	// the flood is over: state learns what it found
+	// the content-addressed symbols it reached are joined now (resolve.c), then state learns what it found
+	double th = nowSeconds();
+	resolveHashed();
+	th = nowSeconds() - th;
 	double tp = nowSeconds();
 	par(nunits, publishTask, NULL);
 	tp = nowSeconds() - tp;
-	if (getenv("HLINK_TSC")) fprintf(stderr, "deadcode wall ms: floods %.1f (levels of 4096+ symbols: %.1f for %ld symbols), methods %.1f, publish %.1f, since start %.1f\n", tFlood * 1e3, tBig * 1e3, nBig, tMeth * 1e3, tp * 1e3, (nowSeconds() - tStart) * 1e3);
+	if (getenv("HLINK_TSC")) fprintf(stderr, "deadcode wall ms: floods %.1f (levels of 4096+ symbols: %.1f for %ld symbols), methods %.1f, hashed join %.1f, publish %.1f, since start %.1f\n", tFlood * 1e3, tBig * 1e3, nBig, tMeth * 1e3, th * 1e3, tp * 1e3, (nowSeconds() - tStart) * 1e3);
 	long nlive = 0;
 	VEC(str) dump = {0};
 	if (flagStats || *flagDumpLive) {
@@ -784,6 +803,6 @@ static void deadcode(void) {
 		fprintf(stderr, "flood, core-ms: index %.1f, relocs+aux %.1f, decode %.1f, dup ids %.1f, dup flags %.1f, funcinfo %.1f, process %.1f; %llu symbols flooded\n",
 		        t[0] / 3.095e6, t[1] / 3.095e6, t[2] / 3.095e6, t[3] / 3.095e6, t[4] / 3.095e6, t[5] / 3.095e6, t[6] / 3.095e6, (unsigned long long)t[7]);
 	}
-	lap("deadcode", "%ld symbols live, %d levels in %d rounds, %zu methods pruned, reflection %s", nlive, levels, rounds,
-	    markable.n, reflectSeen ? "true" : "false");
+	lap("deadcode", "%ld symbols live, %d levels in %d rounds, %zu methods pruned, reflection %s; content-addressed: %ld reached, %ld kept",
+	    nlive, levels, rounds, markable.n, reflectSeen ? "true" : "false", nHashedReached, nHashedClasses);
 }

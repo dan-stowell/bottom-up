@@ -4,13 +4,17 @@
 # in the package's directory, and compare: same exit status and the same set of tests that did not pass.
 #   link/stdtest.sh [packages...]     (default: the list below)    results under $HLINK_OUT/std
 # Environment: TIMEOUT per test binary in seconds (default 600), CPUS (default 0-3) for taskset.
+# The same for any module's packages: MODULE=<module root> link/stdtest.sh <import paths...> (results under
+# $HLINK_OUT/<the root's name>; MODFLAGS, default -mod=mod, is added to GOFLAGS). That is how MinIO's and
+# kube-apiserver's own tests are run against binaries linked by hlink.
 here=$(cd "$(dirname "$0")/.." && pwd)
-out=${HLINK_OUT:-/tmp/hlink-try}/std; mkdir -p "$out"
+root=${MODULE:-}; out=${HLINK_OUT:-/tmp/hlink-try}/$([ -n "$root" ] && basename "$root" || echo std); mkdir -p "$out"
 pkgs=("$@"); [ ${#pkgs[@]} -gt 0 ] || pkgs=(sort strings strconv fmt reflect runtime sync encoding/json net/http go/types)
 export CGO_ENABLED=0 GOFLAGS=-buildvcs=false GOTOOLCHAIN=local
 goroot=$(go env GOROOT); pass=0; fail=0
+if [ -n "$root" ]; then export GOFLAGS="$GOFLAGS ${MODFLAGS--mod=mod}"; else root=$goroot/src; fi
 for p in "${pkgs[@]}"; do
-  n=${p//\//__}; d=$goroot/src/$p
+  n=${p//\//__}; d=$(cd "$root" && go list -f '{{.Dir}}' "$p" 2>/dev/null); [ -d "$d" ] || { echo "SKIP $p: no such package"; continue; }
   rm -f "$out/$n.stock" "$out/$n.new"
   if ! (cd "$d" && go test -c -ldflags='-s -w' -o "$out/$n.stock" . ) > "$out/$n.build.log" 2>&1; then
     echo "SKIP $p: stock build failed: $(tail -1 "$out/$n.build.log")"; continue
