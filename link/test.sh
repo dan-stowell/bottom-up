@@ -2,9 +2,16 @@
 # hlink's tests: build it, then
 #   1. every program of link/progs through link/try.sh, without and with inlining (and the crashing runs);
 #   2. identical output for -j 1, 2, 4 and 8 (a program of link/progs and the frozen MinIO link);
+#   2b. overwriting an old output in place (the default) gives the bytes -fresh gives, over files of other sizes;
+#      a symlink, a hard-linked file and a running binary are not written through; a failed link leaves nothing;
+#   2c. -teardown fork (the default), madvise and exit: the output runs as soon as the link returns, a failed
+#      link's status and stderr are the same, -stats ends with the parent's row, a killed parent stops the child;
 #   3. a short list of standard-library test binaries linked by hlink (link/stdtest.sh);
 #   4. the frozen MinIO link: `--version` prints what the stock binary prints, and the live set (-dumplive)
-#      equals fclink's for the same link.
+#      equals fclink's for the same link;
+#   5. output on hugetlbfs (skipped unless HUGETLB_DIR, default /dev/hugepages, is a writable hugetlbfs mount with
+#      128 free huge pages): the programs run from there, -j 1/2/4/8 agree, MinIO's --version (also for the same
+#      layout, -hugetlb, on an ordinary file system), and std tests (HSTD) run from hugetlbfs.
 #   link/test.sh          (scratch output under ${HLINK_OUT:-/tmp/hlink-try})
 # Environment: FCLINK (default: simd-lang's build/fclink), STD (the std list; default: sort strings strconv fmt reflect).
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -50,6 +57,67 @@ fi
 mapfile -t F < "$minio/link.flags"
 (cd "$minio" && jcheck minio -importcfg importcfg.link "${F[@]}" main.a) || fail=1
 
+# ---- 2b. overwriting the old output in place gives the bytes of a new file (-fresh), whatever was there
+ow() {
+  local d=$out/overwrite ok=1; rm -rf "$d"; mkdir -p "$d"; local f=$d/minio
+  L() { (cd "$minio" && timeout 120 prlimit --as=$((16 << 30)) "$hlink" "$@" -importcfg importcfg.link "${F[@]}" main.a); }
+  L -fresh -o "$d/fresh" || { echo "FAIL overwrite: -fresh link failed"; return 1; }
+  for mb in 300 20 0; do # garbage, larger and smaller than the image
+    head -c $((mb << 20)) /dev/zero | tr '\0' '\377' > "$f"; chmod 600 "$f"
+    L -o "$f" || { ok=0; echo "FAIL overwrite: link over $mb MB failed"; }
+    cmp -s "$d/fresh" "$f" || { ok=0; echo "FAIL overwrite: output over a $mb MB file differs from -fresh"; }
+    [ "$(stat -c %a "$f")" = "$(stat -c %a "$d/fresh")" ] || { ok=0; echo "FAIL overwrite: mode $(stat -c %a "$f") after overwriting"; }
+  done
+  "$f" --version > /dev/null || { ok=0; echo "FAIL overwrite: the overwritten binary does not run"; }
+  # not reused: a symlink (replaced by a file, its target untouched), a file with another hard link
+  head -c 1000 /dev/zero > "$d/target"; ln -s "$d/target" "$d/sym"; ln -f "$f" "$d/hard"
+  L -X main.x=1 -o "$d/sym" && L -X main.x=1 -o "$f" || ok=0
+  [ ! -L "$d/sym" ] && [ "$(stat -c %s "$d/target")" = 1000 ] && cmp -s "$d/fresh" "$d/hard" || { ok=0; echo "FAIL overwrite: wrote through a symlink or a hard link"; }
+  # ... nor a binary that is running (it keeps its old inode; the new output is a new file)
+  cp /bin/sleep "$f"; "$f" 60 & local pid=$!; sleep 0.2
+  L -o "$f" || { ok=0; echo "FAIL overwrite: link over a running binary failed"; }
+  kill $pid 2> /dev/null; wait $pid 2> /dev/null
+  cmp -s "$d/fresh" "$f" || { ok=0; echo "FAIL overwrite: link over a running binary gave other bytes"; }
+  # a failed link leaves no output
+  L -X nodot -o "$f" > /dev/null 2>&1
+  [ -e "$f" ] && { ok=0; echo "FAIL overwrite: a failed link left the old output"; }
+  rm -rf "$d"
+  [ $ok = 1 ] && echo "PASS overwrite: in place over 300, 20 and 0 MB of garbage = -fresh; symlink, hard link, running binary, failed link"
+  [ $ok = 1 ]
+}
+ow || fail=1
+
+# ---- 2c. the end of the process (-teardown fork, the default; madvise; exit = -nodetach)
+td() {
+  local d=$out/teardown ok=1; rm -rf "$d"; mkdir -p "$d"
+  L() { (cd "$minio" && timeout 120 prlimit --as=$((16 << 30)) "$hlink" "$@" -importcfg importcfg.link "${F[@]}" main.a); }
+  for t in fork madvise exit; do
+    # the output runs as soon as the linker returns (a detached child that still mapped it: ETXTBSY)
+    for r in 1 2; do
+      L -teardown=$t -o "$d/stock" > /dev/null && "$d/stock" --version > /dev/null || { ok=0; echo "FAIL teardown $t: the output did not run right after the link"; }
+    done
+    # a failed link: the same status and stderr whichever way it ends
+    L -teardown=$t -X nodot -o "$d/bad" > /dev/null 2> "$d/err.$t"; echo "exit $?" >> "$d/err.$t"
+    [ -e "$d/bad" ] && { ok=0; echo "FAIL teardown $t: a failed link left an output"; }
+  done
+  cmp -s "$d/err.fork" "$d/err.exit" && cmp -s "$d/err.madvise" "$d/err.exit" && grep -q "^exit 2$" "$d/err.exit" ||
+    { ok=0; echo "FAIL teardown: a failed link's status or stderr differs between fork, madvise and exit"; cat "$d"/err.*; }
+  # -stats: the child's table, then the parent's row for the moment the output was complete
+  L -stats -o "$d/stock" > "$d/stats" && tail -1 "$d/stats" | grep -q "^complete .*as the parent sees it" ||
+    { ok=0; echo "FAIL teardown fork: -stats does not end with the parent's complete row"; tail -3 "$d/stats"; }
+  HLINK_NODETACH=1 L -stats -o "$d/stock" | grep -q "^complete .*one process" || { ok=0; echo "FAIL teardown: HLINK_NODETACH=1 did not keep one process"; }
+  cmp -s <("$d/stock" --version 2>&1) <("$minio/stock" --version 2>&1) || { ok=0; echo "FAIL teardown: --version differs"; }
+  # the parent killed: the child stops too (it does not go on and write the output)
+  (cd "$minio" && exec "$hlink" -fresh -o "$d/killed" -importcfg importcfg.link "${F[@]}" main.a) & local pid=$!
+  sleep 0.05; kill -9 $pid; wait $pid 2> /dev/null; sleep 0.5
+  pgrep -f -- "-o $d/killed" > /dev/null && { ok=0; echo "FAIL teardown: the child outlived its killed parent"; pkill -9 -f -- "-o $d/killed"; }
+  [ -e "$d/killed" ] && [ "$(stat -c %a "$d/killed")" != 0 ] && { ok=0; echo "FAIL teardown: a killed link left an executable output"; }
+  rm -rf "$d"
+  [ $ok = 1 ] && echo "PASS teardown: fork, madvise and exit: outputs run at once, failures alike, -stats complete row, HLINK_NODETACH, killed parent"
+  [ $ok = 1 ]
+}
+td || fail=1
+
 # ---- 3. standard-library tests
 read -r -a std <<< "${STD:-sort strings strconv fmt reflect crypto/fips140}"
 "$here/link/stdtest.sh" "${std[@]}" || fail=1
@@ -76,6 +144,56 @@ else
   echo "FAIL minio: hlink failed"; fail=1
 fi
 rm -f "$out/frozen-minio/fclink"
+
+# ---- 5. output on hugetlbfs (the image laid out on 2 MiB boundaries, bss in the file), and -hugetlb elsewhere
+hdir=${HUGETLB_DIR:-/dev/hugepages}
+hfree=$(awk '/HugePages_Free/{f=$2} /HugePages_Rsvd/{r=$2} END{print f-r}' /proc/meminfo)
+if [ ! -w "$hdir" ] || [ "$(stat -f -c %T "$hdir" 2>/dev/null)" != hugetlbfs ] || [ "${hfree:-0}" -lt 128 ]; then
+  echo "SKIP hugetlbfs: $hdir is not a writable hugetlbfs mount with at least 128 free huge pages ($hfree free; sysctl vm.nr_hugepages)"
+else
+  for p in hello gcstress traceback ifaces initorder; do
+    for g in "-gcflags=all=-l" " "; do
+      GCFLAGS=$g OUTDIR=$hdir run "$here/link/progs/$p"
+    done
+  done
+  OUTDIR=$hdir run "$here/link/progs/gcstress" boom
+  GCFLAGS=" " OUTDIR=$hdir run "$here/link/progs/traceback" crash
+  HLINK_FLAGS=-hugetlb GCFLAGS=" " run "$here/link/progs/ifaces" # the same layout on an ordinary file system
+  # the same output for every -j (one file on hugetlbfs at a time: each holds its pages)
+  hj() { # name, then the link's arguments after -o
+    local name=$1; shift; local ok=1 sums=() f=$hdir/hlink-test.$name.$$
+    for j in 1 2 4 8; do
+      if timeout 120 prlimit --as=$((16 << 30)) "$hlink" -j $j -o "$f" "$@" > /dev/null; then sums+=("$(md5sum < "$f")"); else ok=0; echo "FAIL hugetlbfs -j $j: $name: link failed"; fi
+      rm -f "$f"
+    done
+    for s in "${sums[@]}"; do [ "$s" = "${sums[0]}" ] || { ok=0; echo "FAIL hugetlbfs -j: $name: outputs differ"; }; done
+    [ $ok = 1 ] && echo "PASS hugetlbfs -j: $name: identical output for -j 1, 2, 4, 8"
+    [ $ok = 1 ] || { fail=1; return 1; }
+  }
+  if KEEP_WORK=1 GCFLAGS=" " "$here/link/try.sh" "$here/link/progs/ifaces" > /dev/null; then
+    read -r -a cmd < "$out/ifaces/link.cmd"
+    hj ifaces "${cmd[@]:3}"
+    rm -rf "$(cat "$out/ifaces/work")"
+  else
+    echo "FAIL hugetlbfs -j: ifaces did not build"; fail=1
+  fi
+  (cd "$minio" && hj minio -importcfg importcfg.link "${F[@]}" main.a) || fail=1
+  # MinIO from hugetlbfs, and the same image with -hugetlb on an ordinary file system
+  # (named stock, as the stock binary is: --version prints the program's name)
+  mkdir -p "$hdir/hlink-test.$$" "$out/frozen-minio/hugetlb"
+  for o in "$hdir/hlink-test.$$/stock" "$out/frozen-minio/hugetlb/stock"; do
+    if (cd "$minio" && timeout 120 prlimit --as=$((16 << 30)) "$hlink" -hugetlb -o "$o" -importcfg importcfg.link "${F[@]}" main.a) &&
+      cmp -s <("$o" --version 2>&1) <("$minio/stock" --version 2>&1); then
+      echo "PASS minio --version from $(stat -f -c %T "$o"): $(stat -c %s "$o") bytes"
+    else
+      echo "FAIL minio -hugetlb to $o: link failed or --version differs"; fail=1
+    fi
+    rm -f "$o"
+  done
+  read -r -a hstd <<< "${HSTD:-sort fmt reflect runtime}"
+  HLINK_HUGETLB=1 HUGETLB_DIR=$hdir "$here/link/stdtest.sh" "${hstd[@]}" || fail=1
+  rm -rf "$hdir/hlink-test.$$" "$hdir"/hlink-test.*.$$ # (try.sh, toolexec.sh and stdtest.sh remove their own)
+fi
 
 [ $fail = 0 ] && echo "ALL PASS" || echo "SOME FAILED"
 exit $fail

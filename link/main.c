@@ -209,6 +209,10 @@ static const flagdef flagdefs[] = {
 	{"dumplive", 0, &flagDumpLive},
 	{"dumpmap", 0, &flagDumpMap},
 	{"E", 0, &flagEntry},
+	{"hugetlb", 1, &flagHugetlb},
+	{"fresh", 1, &flagFresh},
+	{"nodetach", 1, &flagNoDetach},
+	{"teardown", 0, &flagTeardown},
 	{"X", 3, NULL},
 	// accepted for compatibility with the go command's link line
 	{"buildmode", 0, &ignoredStr},
@@ -223,7 +227,7 @@ static const flagdef flagdefs[] = {
 
 static void usage(void) {
 	fprintf(stderr, "usage: hlink -o out -importcfg importcfg.link [-buildid id] [-X pkg.name=val]... [-stats] [-j N] [-nodce] "
-	                "[-dumplive file] [-dumpmap file] [-E entry] main.o\n");
+	                "[-dumplive file] [-dumpmap file] [-E entry] [-hugetlb] [-fresh] [-nodetach] [-teardown fork|madvise|exit] main.o\n");
 	_exit(2);
 }
 
@@ -311,6 +315,91 @@ static char *buildVersion(void) {
 	return s;
 }
 
+// onHugetlbfs says whether a new file at path would be on hugetlbfs (statfs of its directory).
+static bool onHugetlbfs(const char *path) {
+	char *dir = strdup(path), *slash = strrchr(dir, '/');
+	if (!slash) strcpy(dir, ".");
+	else if (slash == dir) dir[1] = 0;
+	else *slash = 0;
+	struct statfs sf;
+	bool huge = statfs(dir, &sf) == 0 && (unsigned long)sf.f_type == HUGETLBFS_MAGIC_;
+	free(dir);
+	return huge;
+}
+
+// ---- the end of the process (-teardown): what the caller waits for after the output is complete
+// Exiting a process that mapped 260 MB of inputs and a 110 MB output costs the kernel tens of ms of page-table
+// and page-reference teardown, on one thread, before the caller's wait returns. Three ways to end:
+//   fork     (detach) fork at the start; the child links, and the parent waits on a pipe and exits as soon as
+//            the child says the output is complete (or, if the child dies first, as the child did; the child's
+//            stderr is the parent's): the caller does not wait for the child's address space to go.
+//   madvise  one process; before exit, the output and input mappings are emptied with MADV_DONTNEED from all
+//            threads (it takes the mmap lock shared; munmap and exit take it exclusively, on one thread).
+//   exit     one process; plain exit.
+// -nodetach or HLINK_NODETACH=1 turn fork into exit.
+enum { tdFork, tdMadvise, tdExit };
+static int teardown = tdFork;
+static int detachFd = -1; // the child's end of the pipe to the parent
+static void unmapOutput(void);
+static void releaseInputs(void);
+
+static void printCompleteRow(const char *note) {
+	printf("%-10s %8.1f %8s  from the start to the output complete, %s\n", "complete", (nowSeconds() - linkT0) * 1000, "", note);
+}
+
+// detach forks. The parent never returns from it: it waits for the child's word that the output is complete
+// (one byte on a pipe), prints the -stats row for that moment and exits 0; if the pipe closes without that byte,
+// it exits as the child did. The child returns and links. It runs before any thread starts and before anything
+// is mapped, so the fork is cheap and so is the parent's own exit.
+static void detach(void) {
+	int p[2];
+	if (pipe2(p, O_CLOEXEC) < 0) return; // (no pipe, no fork: link in this process)
+	fflush(stdout);
+	fflush(stderr);
+	pid_t parent = getpid(), pid = fork();
+	if (pid < 0) {
+		close(p[0]);
+		close(p[1]);
+		return;
+	}
+	if (pid == 0) {
+		close(p[0]);
+		detachFd = p[1];
+		prctl(PR_SET_PDEATHSIG, 9 /* SIGKILL */); // the parent killed (^C, a timeout): the link stops too
+		if (getppid() != parent) _exit(2);
+		return;
+	}
+	close(p[1]);
+	char c;
+	ssize_t n;
+	while ((n = read(p[0], &c, 1)) < 0 && errno == EINTR) {}
+	if (n == 1) {
+		if (flagStats) printCompleteRow("as the parent sees it (a child tears the link's address space down)");
+		fflush(stdout);
+		_exit(0);
+	}
+	int st;
+	while (waitpid(pid, &st, 0) < 0)
+		if (errno != EINTR) _exit(2);
+	if (WIFEXITED(st)) _exit(WEXITSTATUS(st));
+	if (WIFSIGNALED(st)) {
+		kill(getpid(), WTERMSIG(st));
+		_exit(128 + WTERMSIG(st));
+	}
+	_exit(2);
+}
+
+// detachDone tells the parent that the output is complete and lets go of the caller's stdin, stdout and stderr,
+// so that a caller reading them through pipes sees them close when the parent exits, not after the teardown.
+static void detachDone(void) {
+	prctl(PR_SET_PDEATHSIG, 0);
+	char c = 'K';
+	while (write(detachFd, &c, 1) < 0 && errno == EINTR) {}
+	close(detachFd);
+	int nul = open("/dev/null", O_RDWR);
+	for (int fd = 0; fd < 3 && nul >= 0; fd++) dup2(nul, fd);
+}
+
 static void load(const char *cfgFile, const char *mainFile);
 static void resolve(void);
 static void inittasks(void);
@@ -327,6 +416,15 @@ int main(int argc, char **argv) {
 	phaseC0 = linkCPU0;
 	int first = parseFlags(argc, argv);
 	if (argc - first != 1 || !*flagImportcfg) fatalf("usage: hlink -o out -importcfg importcfg.link [-buildid id] [-stats] main.o");
+	outOnHugetlbfs = onHugetlbfs(flagOut);
+	outHuge = flagHugetlb || outOnHugetlbfs;
+	if (outHuge) segAlign = hugePage;
+	if (strcmp(flagTeardown, "madvise") == 0) teardown = tdMadvise;
+	else if (strcmp(flagTeardown, "exit") == 0) teardown = tdExit;
+	else if (*flagTeardown && strcmp(flagTeardown, "fork") != 0) fatalf("-teardown must be fork, madvise or exit");
+	const char *nd = getenv("HLINK_NODETACH");
+	if (teardown == tdFork && (flagNoDetach || (nd && *nd && strcmp(nd, "0") != 0))) teardown = tdExit;
+	if (teardown == tdFork) detach();
 	nthreads = flagJ;
 	if (nthreads <= 0) {
 		cpu_set_t cs;
@@ -347,7 +445,9 @@ int main(int argc, char **argv) {
 		free(name);
 	}
 
-	removeOutput();
+	// a failed link must not leave an old output behind: today's file goes now, unless its pages are to be
+	// reused (then any error removes it, see removeOutput)
+	if (flagFresh || outOnHugetlbfs) removeOutput();
 	load(flagImportcfg, argv[first]);
 	exitIfErrors();
 	resolve();
@@ -362,6 +462,11 @@ int main(int argc, char **argv) {
 	finish();
 	exitIfErrors();
 	if (*flagDumpMap) dumpMap();
+	if (teardown != tdExit) {
+		unmapOutput(); // (a detached child must: see detach)
+		if (teardown == tdMadvise) releaseInputs();
+		lap("teardown", "%s", teardown == tdMadvise ? "output and inputs released from all threads" : "output unmapped");
+	}
 
 	if (flagStats) {
 		double c, s;
@@ -371,7 +476,9 @@ int main(int argc, char **argv) {
 		for (size_t i = 0; i < phases.n; i++)
 			printf("%-10s %8.1f %8.1f  %s\n", phases.a[i].name, phases.a[i].wall, phases.a[i].cpu, phases.a[i].note ? phases.a[i].note : "");
 		printf("%-10s %8.1f %8.1f  %d threads, output %.1f MB\n", "total", total, totalCPU, nthreads, (double)outSize / 1e6);
+		if (detachFd < 0) printCompleteRow(teardown == tdExit ? "one process: the kernel tears it down after this" : "one process");
 	}
 	fflush(stdout);
+	if (detachFd >= 0) detachDone();
 	_exit(0); // the workers never return
 }

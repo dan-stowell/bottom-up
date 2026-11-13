@@ -15,9 +15,14 @@
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/vfs.h>
 #include <time.h>
 #include <unistd.h>
 #include <wctype.h>
+// (not <sys/wait.h>: it brings in <signal.h>, whose sigset() dead.c's type would clash with; stdlib.h has the W* macros)
+extern pid_t waitpid(pid_t pid, int *status, int options);
+extern int kill(pid_t pid, int sig);
+#include <sys/prctl.h>
 
 #define HLINK_BUILTINS
 #define HLINK_RELOCNAMES
@@ -105,6 +110,17 @@ static bool flagStats, flagNoDCE;
 static int flagJ;
 
 static int nthreads;
+
+// ---- the output file (main.c decides, layout.c and write.c follow)
+// outHuge: the image is laid out so that it execs from hugetlbfs: every segment starts on a 2 MiB boundary in
+// file and memory, the data segment holds bss and noptrbss in the file (filesz = memsz), the file is a multiple of
+// 2 MiB and nothing lies past the last segment. Chosen when the output is on hugetlbfs, or by -hugetlb.
+#define HUGETLBFS_MAGIC_ 0x958458f6
+#define hugePage (2u << 20)
+static bool flagHugetlb, flagFresh, flagNoDetach;
+static const char *flagTeardown = ""; // fork, madvise or exit (main.c)
+static bool outHuge, outOnHugetlbfs;
+static u32 segAlign = 4096; // alignment of a segment's start (hugePage when outHuge)
 
 // ---- errors (main.c)
 static void errorf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));

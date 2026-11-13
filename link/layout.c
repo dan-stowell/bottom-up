@@ -16,6 +16,10 @@
 //	noptrdata       build info, moduledata, init task lists; pointer-free data; FIPS
 //	data            data with pointers; FIPS
 //	bss, noptrbss   (not in the file)
+//
+// The three segments (text; rodata to types; noptrdata to the end) start on 4 KiB boundaries, or on 2 MiB ones
+// for an image that is to exec from hugetlbfs (outHuge: there bss and noptrbss are in the file too, and the
+// rodata boundary is 2 MiB as well).
 
 static struct {
 	u32 text, etext;
@@ -373,7 +377,7 @@ static void layout(void) {
 	bucket(bTextFIPS, funcAlign, &lay.textFIPS, &lay.etextFIPS);
 	lay.etext = va;
 
-	va = rnd(va + 1, 4096);
+	va = rnd(va + 1, segAlign);
 	bucket(bRodata, 8, &lay.rodata, NULL);
 	bucket(bRodataFIPS, 32, &lay.rodataFIPS, &lay.erodataFIPS);
 	place(roSpecials.a, roSpecials.n);
@@ -460,7 +464,7 @@ static void layout(void) {
 	bucket(bItab, 8, &lay.itabs, &lay.eitabs);
 	lay.etypes = va;
 
-	va = rnd(va, 4096);
+	va = rnd(va, segAlign);
 	lay.noptrdata = va;
 	place(dataSpecials.a, dataSpecials.n);
 	bucket(bNoptrdata, 8, NULL, NULL);

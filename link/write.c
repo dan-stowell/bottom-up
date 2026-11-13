@@ -11,14 +11,166 @@ static u32 deferreturnAddr, unreachableMethodAddr, mapinitnoopAddr;
 static FILE *mapFile_; // -dumpmap
 static void writeUnitTask(void *ctx, int w, long ui);
 
-static void writeOut(void) {
-	long long fileEnd = (long long)(lay.edata - imageBase);
-	outSize = fileEnd + shdrRoom;
-	outFd = open(flagOut, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0755);
+// hugeFree: the huge pages free for a new reservation, from /proc/meminfo (for the error message).
+static long hugeFree(void) {
+	FILE *f = fopen("/proc/meminfo", "r");
+	if (!f) return -1;
+	char line[256];
+	long fr = -1, rsvd = 0;
+	while (fgets(line, sizeof line, f)) {
+		sscanf(line, "HugePages_Free: %ld", &fr);
+		sscanf(line, "HugePages_Rsvd: %ld", &rsvd);
+	}
+	fclose(f);
+	return fr < 0 ? -1 : fr - rsvd;
+}
+
+// createHuge makes the output on hugetlbfs: a new file (write() does not work there; ftruncate + a shared
+// mapping does). The shared mapping is made without MAP_NORESERVE, so the kernel reserves every huge page of it
+// now or fails the mmap with ENOMEM: a page the write pass touches later is always there (touching an unreserved
+// one would be SIGBUS). The pages come zeroed, which is what bss and noptrbss must read as.
+static void createHuge(void) {
+	outFd = open(flagOut, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0); // (mode 0 until it is complete)
+	if (outFd < 0) fatalf("open %s: %s", flagOut, strerror(errno));
+	if (ftruncate(outFd, outSize) < 0) fatalf("truncate %s: %s", flagOut, strerror(errno));
+	out = mmap(NULL, (size_t)outSize, PROT_READ | PROT_WRITE, MAP_SHARED, outFd, 0);
+	if (out == MAP_FAILED) {
+		int e = errno;
+		long need = (long)(outSize / hugePage), fr = hugeFree();
+		if (e == ENOMEM)
+			fatalf("%s is on hugetlbfs and needs %ld free 2 MiB huge pages; %ld are free (raise sysctl vm.nr_hugepages, or "
+			       "remove files from the mount: they hold their pages)", flagOut, need, fr);
+		fatalf("mmap %s: %s", flagOut, strerror(e));
+	}
+}
+
+// ---- overwriting the old output in place (the default on an ordinary file system; -fresh: unlink + create)
+// Unlinking a 110 MB output and filling a new one costs a page-cache allocation and a fault per 4 KiB page
+// (31-39 ms on ext4 for MinIO); the pages of the file a rebuild replaces are already there (13 ms to fill). So the
+// old file is reused when that is safe: a regular file (not followed through a symlink) that we own, with no
+// other hard link, and not being executed (opening it for writing then fails with ETXTBSY; and while we hold it
+// open for writing, nobody can exec it). Anything else, or any failure on the way, falls back to unlink + create.
+//
+// What a reader sees: while the link runs, the output (reused or new) has mode 0, so it cannot be newly opened
+// or executed by anyone but root; a reused file's bytes are a mix of the old image, zeros and the new image, and
+// a process that had it open or mapped before sees that mix too. When hlink exits 0 (with -teardown=fork: when
+// the parent does) the file is exactly the new image (the bytes a new file would get: every byte is zeroed before
+// the write pass, as a new file's would be), at its final size, with mode 0755 & ~umask. A link that fails
+// removes the output, as before; one that is killed leaves a file of mode 0, which no one can run and which the
+// next link replaces.
+static mode_t outMode;      // the mode the file gets when it is complete
+static bool outReused;      // the old file's pages are reused
+static long long oldOutSize; // (for the -stats note)
+
+static void zeroTask(void *ctx UNUSED, int w UNUSED, long i) {
+	size_t lo = (size_t)i << 21, hi = MIN(lo + (2u << 20), (size_t)outSize);
+	// (populating the chunk's page tables in one call is a little cheaper than a fault per page; the fault is
+	// the cost here, about 2 us per 4 KiB page on ext4, the memset is not; an old kernel says EINVAL: no matter)
+	madvise(out + lo, hi - lo, 23 /* MADV_POPULATE_WRITE */);
+	memset(out + lo, 0, hi - lo);
+}
+
+static bool reuseOutput(void) {
+	int fd = open(flagOut, O_RDWR | O_NOFOLLOW | O_CLOEXEC);
+	if (fd < 0) return false; // (ENOENT, ETXTBSY: being executed, EACCES, ELOOP: a symlink, ...)
+	struct stat st;
+	if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) || st.st_uid != geteuid() || st.st_nlink != 1 || fchmod(fd, 0) < 0) {
+		close(fd);
+		return false;
+	}
+	// (from here on a failure leaves a file of mode 0: unlink it and start again)
+	if (ftruncate(fd, outSize) < 0) goto fail;
+	out = mmap(NULL, (size_t)outSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	if (out == MAP_FAILED) goto fail;
+	outFd = fd;
+	oldOutSize = st.st_size;
+	outReused = true;
+	par((long)(((size_t)outSize + (2u << 20) - 1) >> 21), zeroTask, NULL);
+	return true;
+fail:
+	close(fd);
+	unlink(flagOut);
+	return false;
+}
+
+static void openOutput(void) {
+	mode_t um = umask(0);
+	umask(um);
+	outMode = 0755 & ~um;
+	if (outOnHugetlbfs) {
+		createHuge();
+		return;
+	}
+	if (!flagFresh && reuseOutput()) return;
+	if (!flagFresh) unlink(flagOut); // (-fresh: main removed it before the link)
+	outFd = open(flagOut, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0); // (mode 0 until it is complete)
 	if (outFd < 0) fatalf("open %s: %s", flagOut, strerror(errno));
 	if (ftruncate(outFd, outSize) < 0) fatalf("truncate %s: %s", flagOut, strerror(errno));
 	out = mmap(NULL, (size_t)outSize, PROT_READ | PROT_WRITE, MAP_SHARED, outFd, 0);
 	if (out == MAP_FAILED) fatalf("mmap %s: %s", flagOut, strerror(errno));
+}
+
+// closeOutput gives the file its final size and mode and closes it (writeELF, at the end of finish).
+static void closeOutput(void) {
+	if (ftruncate(outFd, outSize) < 0) fatalf("truncate %s: %s", flagOut, strerror(errno));
+	if (fchmod(outFd, outMode) < 0) fatalf("chmod %s: %s", flagOut, strerror(errno));
+	close(outFd);
+	outFd = -1;
+}
+
+// ---- the end (main.c's -teardown)
+// unmapOutput empties the output mapping from all threads (MADV_DONTNEED takes the mmap lock shared; the pages
+// stay in the file) and then unmaps the empty range. A detached child must do this before it says the output is
+// complete: a shared writable mapping holds the file open for writing, and exec of it fails with ETXTBSY until
+// the last such mapping is gone.
+static void dontneedTask(void *ctx UNUSED, int w UNUSED, long i) {
+	size_t lo = (size_t)i << 21, hi = MIN(lo + (2u << 20), outMapped);
+	madvise(out + lo, hi - lo, MADV_DONTNEED);
+}
+static void unmapOutput(void) {
+	if (!out || out == MAP_FAILED) return;
+	// (MinIO: 4.2 ms on ext4 and 1.0 on tmpfs, against 5.4 and 4.5 for the munmap alone)
+	par((long)((outMapped + (2u << 20) - 1) >> 21), dontneedTask, NULL);
+	munmap(out, outMapped);
+	out = NULL;
+}
+
+// releaseInputs empties the inputs' mappings from all threads (-teardown madvise). They are found in
+// /proc/self/maps rather than in load.c's tables: every private read-only file mapping that is not a shared
+// library or hlink itself.
+typedef struct {
+	u8 *p;
+	size_t n;
+} span;
+static VEC(span) inputSpans;
+static void releaseTask(void *ctx UNUSED, int w UNUSED, long i) { madvise(inputSpans.a[i].p, inputSpans.a[i].n, MADV_DONTNEED); }
+static void releaseInputs(void) {
+	char exe[4096];
+	ssize_t en = readlink("/proc/self/exe", exe, sizeof exe - 1);
+	exe[en > 0 ? en : 0] = 0;
+	FILE *f = fopen("/proc/self/maps", "r");
+	if (!f) return;
+	char line[4400];
+	while (fgets(line, sizeof line, f)) {
+		unsigned long lo, hi, ino;
+		char perm[8];
+		int pathAt = 0;
+		if (sscanf(line, "%lx-%lx %7s %*s %*s %lu %n", &lo, &hi, perm, &ino, &pathAt) < 4 || ino == 0 || strcmp(perm, "r--p") != 0) continue;
+		char *path = line + pathAt;
+		path[strcspn(path, "\n")] = 0;
+		if (strcmp(path, exe) == 0 || strstr(path, ".so")) continue;
+		span s = {(u8 *)lo, hi - lo};
+		VPUSH(inputSpans, s);
+	}
+	fclose(f);
+	par((long)inputSpans.n, releaseTask, NULL);
+}
+
+static void writeOut(void) {
+	long long fileEnd = (long long)(lay.edata - imageBase);
+	// (an image for hugetlbfs has bss in the file, and the section table, if any, in a segment's slack)
+	outSize = outHuge ? (long long)rnd(lay.end - imageBase, hugePage) : fileEnd + shdrRoom;
+	openOutput();
 	outMapped = (size_t)outSize;
 	gcDataBit = bigalloc((lay.edata - lay.data) / 64 + 8);
 	gcBssBit = bigalloc((lay.ebss - lay.bss) / 64 + 8);
@@ -26,7 +178,9 @@ static void writeOut(void) {
 	if ((g = lookupC("runtime.deferreturn", 1)) != 0) deferreturnAddr = addr[g];
 	if ((g = lookupC("runtime.unreachableMethod", 1)) != 0) unreachableMethodAddr = addr[g];
 	if ((g = lookupC("runtime.mapinitnoop", 1)) != 0) mapinitnoopAddr = addr[g];
-	lap("create", "%s", "");
+	if (outOnHugetlbfs) lap("create", "new file on hugetlbfs, %lld huge pages", outSize / hugePage);
+	else if (outReused) lap("create", "overwrote the old output in place (it was %.1f MB), zeroed", (double)oldOutSize / 1e6);
+	else lap("create", "new file");
 	if (*flagDumpMap) {
 		mapFile_ = fopen(flagDumpMap, "w");
 		if (!mapFile_) fatalf("create %s: %s", flagDumpMap, strerror(errno));

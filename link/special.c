@@ -551,6 +551,20 @@ static void writeELF(void) {
 		{PT_LOAD, PF_R | PF_W, lay.noptrdata - imageBase, lay.noptrdata, lay.edata - lay.noptrdata, lay.end - lay.noptrdata, 4096},
 		{PT_GNU_STACK, PF_R | PF_W, 0, 0, 0, 0, 8},
 	};
+	if (outHuge) {
+		// every segment runs to the next one's 2 MiB boundary, the last to the end of the file, and is all in the
+		// file: the kernel maps a hugetlbfs file only in whole huge pages, and an ELF segment whose memsz exceeds
+		// its filesz would have its bss tail zeroed by hand and the rest mapped anonymously, which a huge-page
+		// file mapping cannot share a page with. bss and noptrbss are zero because hugetlbfs pages come zeroed
+		// (or, on another file system, because the write pass never touches them).
+		u64 bounds[4] = {imageBase, lay.rodata, lay.noptrdata, imageBase + (u64)outSize};
+		for (int i = 0; i < 3; i++) {
+			segs[i].off = bounds[i] - imageBase;
+			segs[i].vaddr = bounds[i];
+			segs[i].filesz = segs[i].memsz = bounds[i + 1] - bounds[i];
+			segs[i].algn = hugePage;
+		}
+	}
 	int nsegs = 4;
 	u64 noteOff = 64 + 56 * (u64)(nsegs + 1);
 	if (note.n) {
@@ -596,6 +610,18 @@ static void writeELF(void) {
 	VEC(u8) strtab = {0};
 	VPUSH(strtab, 0);
 	u64 shoff = rnd(lay.edata - imageBase, 8);
+	if (outHuge) {
+		// nothing may follow the last segment: the table goes into the slack at the end of a segment (the text's
+		// first: it is mapped read-only), or is left out (the runtime does not need it)
+		u64 need = 64 * (u64)nsects + 256;
+		u64 slack[3][2] = {{lay.etext, lay.rodata}, {lay.etypes, lay.noptrdata}, {lay.end, imageBase + (u64)outSize}};
+		shoff = 0;
+		for (int i = 0; i < 3 && shoff == 0; i++) {
+			u64 lo = rnd((u32)(slack[i][0] - imageBase), 8);
+			if (lo + need <= slack[i][1] - imageBase) shoff = lo;
+		}
+		if (shoff == 0) nsects = 0;
+	}
 	u64 stroff = shoff + 64 * (u64)nsects;
 	if (stroff + 256 > outMapped) fatalf("section table does not fit");
 	u8 *sh = out + shoff;
@@ -617,8 +643,8 @@ static void writeELF(void) {
 			st64(e + 32, strtab.n);
 		}
 	}
-	memcpy(out + stroff, strtab.a, strtab.n);
-	outSize = (long long)(stroff + strtab.n);
+	if (nsects != 0) memcpy(out + stroff, strtab.a, strtab.n);
+	if (!outHuge) outSize = (long long)(stroff + strtab.n); // (a huge-page image is its segments, nothing more)
 	if ((size_t)outSize > outMapped) fatalf("section table does not fit");
 
 	u8 *hd = out;
@@ -634,7 +660,7 @@ static void writeELF(void) {
 	st16(hd + 56, (u16)nsegs);
 	st16(hd + 58, 64);
 	st16(hd + 60, (u16)nsects);
-	st16(hd + 62, (u16)(nsects - 1));
+	st16(hd + 62, (u16)(nsects ? nsects - 1 : 0));
 	for (int i = 0; i < nsegs; i++) {
 		u8 *p = out + 64 + 56 * i;
 		st32(p + 0, segs[i].typ);
@@ -646,8 +672,7 @@ static void writeELF(void) {
 		st64(p + 40, segs[i].memsz);
 		st64(p + 48, segs[i].algn);
 	}
-	if (ftruncate(outFd, outSize) < 0) fatalf("truncate %s: %s", flagOut, strerror(errno));
-	close(outFd);
+	closeOutput();
 }
 
 // -dumpmap: the symbols the linker made or placed itself (the objects' symbols and the relocations were written
