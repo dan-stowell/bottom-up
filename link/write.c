@@ -30,9 +30,9 @@ static long hugeFree(void) {
 // now or fails the mmap with ENOMEM: a page the write pass touches later is always there (touching an unreserved
 // one would be SIGBUS). The pages come zeroed, which is what bss and noptrbss must read as.
 static void createHuge(void) {
-	outFd = open(flagOut, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0); // (mode 0 until it is complete)
-	if (outFd < 0) fatalf("open %s: %s", flagOut, strerror(errno));
-	if (ftruncate(outFd, outSize) < 0) fatalf("truncate %s: %s", flagOut, strerror(errno));
+	outFd = open(outTmp, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0); // (mode 0 until it is complete)
+	if (outFd < 0) fatalf("create %s: %s", outTmp, strerror(errno));
+	if (ftruncate(outFd, outSize) < 0) fatalf("truncate %s: %s", outTmp, strerror(errno));
 	out = mmap(NULL, (size_t)outSize, PROT_READ | PROT_WRITE, MAP_SHARED, outFd, 0);
 	if (out == MAP_FAILED) {
 		int e = errno;
@@ -44,23 +44,110 @@ static void createHuge(void) {
 	}
 }
 
-// ---- overwriting the old output in place (the default on an ordinary file system; -fresh: unlink + create)
-// Unlinking a 110 MB output and filling a new one costs a page-cache allocation and a fault per 4 KiB page
-// (31-39 ms on ext4 for MinIO); the pages of the file a rebuild replaces are already there (13 ms to fill). So the
-// old file is reused when that is safe: a regular file (not followed through a symlink) that we own, with no
-// other hard link, and not being executed (opening it for writing then fails with ETXTBSY; and while we hold it
-// open for writing, nobody can exec it). Anything else, or any failure on the way, falls back to unlink + create.
+// ---- the output path: claimed at the start, written under a temporary name, renamed into place when complete
+// (mold's protocol). claimOutput, the first thing a link does (main, before the inputs are loaded), renames
+// whatever is at the output path to a name of its own in the same directory, .<name>.hlink-<pid>-<random>.
+// rename is atomic, so of several links to one path exactly one gets the old file; the others find nothing there
+// and write new files. From then on the path does not exist until commitOutput renames the complete image there:
+// the link's last step, after the file has its final size and mode and is no longer mapped (-teardown exit: it
+// is still mapped until the process exits, so an exec of the path in that moment can fail with ETXTBSY; the
+// caller's wait returns after it is unmapped).
 //
-// What a reader sees: while the link runs, the output (reused or new) has mode 0, so it cannot be newly opened
-// or executed by anyone but root; a reused file's bytes are a mix of the old image, zeros and the new image, and
-// a process that had it open or mapped before sees that mix too. When hlink exits 0 (with -teardown=fork: when
-// the parent does) the file is exactly the new image (the bytes a new file would get: every byte is zeroed before
-// the write pass, as a new file's would be), at its final size, with mode 0755 & ~umask. A link that fails
-// removes the output, as before; one that is killed leaves a file of mode 0, which no one can run and which the
-// next link replaces.
-static mode_t outMode;      // the mode the file gets when it is complete
-static bool outReused;      // the old file's pages are reused
+// Reusing the old file's pages (the default on an ordinary file system; never with -fresh, nor on hugetlbfs, where
+// a new file's huge pages must be reserved). Unlinking a 110 MB output and filling a new one costs a page-cache
+// allocation and a fault per 4 KiB page (31-39 ms on ext4 for MinIO); the pages of the file a rebuild replaces are
+// already there (13 ms to fill). So the claimed file is rewritten in place when it is a regular file (the claim
+// renames a symlink itself, not its target), ours, with no other hard link, and not being executed (opening it for
+// writing fails with ETXTBSY; while we hold it open for writing, nobody can exec it). The claim opens it and sets
+// its mode to 0; its hard-link count is checked again on the open file right before the first write (reuseOutput).
+// A claimed file that is not reused is unlinked at once, held by an O_PATH descriptor so that freeing its pages
+// (15-25 ms for MinIO) happens when the process ends: with -teardown fork, after the caller's wait has returned
+// (on hugetlbfs it is not held: the new file needs its huge pages).
+//
+// What others see:
+//   - The output path: absent from the claim until the link is complete, then exactly the new image (the bytes a
+//     new file would get: a reused file is zeroed before the write pass), at its final size, with mode
+//     0755 & ~umask. Once a link has started, the path never again shows the old executable or a partial image,
+//     whether the link succeeds, fails or is killed. Of concurrent links to one path the last to finish wins;
+//     each wrote a file of its own.
+//   - A failed link, or one ended by SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGPIPE, SIGBUS or SIGSEGV, removes its
+//     temporary (with -teardown fork the parent passes SIGINT, SIGTERM, SIGHUP and SIGQUIT on to the linking child
+//     and exits as it does). A link killed by SIGKILL leaves its temporary behind (mode 0 if it is the reused old
+//     file): the next link that finds nothing at the output path removes the temporaries of dead links (kill(pid,
+//     0) says ESRCH) to the same name that are ours, after its own output is complete (with -teardown fork, after
+//     the caller's wait). A leftover survives while every later link finds an output there, which is the case
+//     only if another link completed after the killed one had claimed. (A pid seen from another pid namespace
+//     sharing the directory looks dead: do not link to one path from two pid namespaces at once.)
+//   - What page reuse leaves exposed, the old inode being rewritten in place (-fresh leaves none of it: the old
+//     inode is never written):
+//       * a process that opened or mapped the old output before the claim keeps the old inode and sees it change:
+//         zeros, then the new image, and a new size (its mapping beyond the new size gets SIGBUS). A running
+//         executable is never reused, so no running program sees this, but a reader that has the file open does;
+//       * a hard link to the temporary made after the last count check, just before the first write. The file
+//         has mode 0 by then, so with fs.protected_hardlinks=1 (the default) only its owner or root can make one;
+//         with 0, anyone who can write a directory on that file system;
+//       * a process that opens the temporary by name between the rename and the chmod to 0 (a few microseconds;
+//         it must find the dot name by reading the directory).
+static mode_t outMode;       // the mode the file gets when it is complete
+static bool outReused;       // the old file's pages are reused
 static long long oldOutSize; // (for the -stats note)
+static int claimFd = -1;     // the claimed old output, open for writing, mode 0: to be reused
+static mode_t claimMode;     // its mode before the claim (restored if it turns out to have another link)
+static int heldFd = -1;      // a claimed old output that is not reused: unlinked, freed when the process ends
+static bool claimFoundNothing; // nothing was at the output path: sweep dead links' temporaries at the end
+
+// outDirBase splits flagOut into its directory (with the slash; "" for none) and its last element.
+static void outDirBase(char *dir, size_t dn, const char **base) {
+	const char *slash = strrchr(flagOut, '/');
+	size_t n = slash ? (size_t)(slash - flagOut) + 1 : 0;
+	if (n >= dn) n = 0;
+	memcpy(dir, flagOut, n);
+	dir[n] = 0;
+	*base = flagOut + n;
+}
+
+// letGo closes fd (if any) and unlinks the claimed file at outTmp, which an O_PATH descriptor keeps until exit.
+// (Not fd itself: a descriptor open for writing would make an exec of another hard link fail with ETXTBSY.)
+static void letGo(int fd) {
+	if (fd >= 0) close(fd);
+	if (heldFd < 0 && !outOnHugetlbfs) heldFd = open(outTmp, O_PATH | O_NOFOLLOW | O_CLOEXEC);
+	unlink(outTmp);
+}
+
+static void claimOutput(void) {
+	char dir[4096];
+	const char *base;
+	outDirBase(dir, sizeof dir, &base);
+	u32 r;
+	if (getrandom(&r, sizeof r, GRND_NONBLOCK) != sizeof r) r = (u32)(nowSeconds() * 1e9);
+	int n = snprintf(outTmp, sizeof outTmp, "%s.%s.hlink-%d-%08x", dir, base, (int)getpid(), r);
+	if (n < 0 || n >= (int)sizeof outTmp) fatalf("output path too long: %s", flagOut);
+	outTmpLive = 1; // (from before the rename: a signal between the two removes nothing that is not ours)
+	if (rename(flagOut, outTmp) < 0) {
+		// (ENOENT: nothing there; anything else, e.g. EACCES, and creating the temporary fails with the reason)
+		claimFoundNothing = errno == ENOENT;
+		return;
+	}
+	struct stat st;
+	int fd = -1;
+	if (!flagFresh && !outOnHugetlbfs) {
+		fd = open(outTmp, O_RDWR | O_NOFOLLOW | O_CLOEXEC); // (fails: ETXTBSY being executed, ELOOP a symlink, EISDIR, ...)
+		if (fd >= 0 && fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == geteuid() && st.st_nlink == 1 &&
+		    fchmod(fd, 0) == 0) {
+			claimFd = fd;
+			claimMode = st.st_mode & 07777;
+			oldOutSize = st.st_size;
+			return;
+		}
+	}
+	if (lstat(outTmp, &st) == 0 && S_ISDIR(st.st_mode)) { // (a directory is not ours to replace: put it back)
+		if (fd >= 0) close(fd);
+		rename(outTmp, flagOut);
+		outTmpLive = 0;
+		fatalf("%s is a directory", flagOut);
+	}
+	letGo(fd);
+}
 
 static void zeroTask(void *ctx UNUSED, int w UNUSED, long i) {
 	size_t lo = (size_t)i << 21, hi = MIN(lo + (2u << 20), (size_t)outSize);
@@ -70,26 +157,27 @@ static void zeroTask(void *ctx UNUSED, int w UNUSED, long i) {
 	memset(out + lo, 0, hi - lo);
 }
 
+// reuseOutput rewrites the claimed file in place (see above), or lets it go and says false.
 static bool reuseOutput(void) {
-	int fd = open(flagOut, O_RDWR | O_NOFOLLOW | O_CLOEXEC);
-	if (fd < 0) return false; // (ENOENT, ETXTBSY: being executed, EACCES, ELOOP: a symlink, ...)
+	int fd = claimFd;
+	claimFd = -1;
 	struct stat st;
-	if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) || st.st_uid != geteuid() || st.st_nlink != 1 || fchmod(fd, 0) < 0) {
-		close(fd);
+	// the last check before the first write: a hard link made since the claim (then the file is not ours alone:
+	// give it its mode back and let go of our name for it)
+	if (fstat(fd, &st) < 0 || st.st_nlink != 1) {
+		fchmod(fd, claimMode);
+		letGo(fd);
 		return false;
 	}
-	// (from here on a failure leaves a file of mode 0: unlink it and start again)
 	if (ftruncate(fd, outSize) < 0) goto fail;
 	out = mmap(NULL, (size_t)outSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 	if (out == MAP_FAILED) goto fail;
 	outFd = fd;
-	oldOutSize = st.st_size;
 	outReused = true;
 	par((long)(((size_t)outSize + (2u << 20) - 1) >> 21), zeroTask, NULL);
 	return true;
 fail:
-	close(fd);
-	unlink(flagOut);
+	letGo(fd);
 	return false;
 }
 
@@ -101,21 +189,50 @@ static void openOutput(void) {
 		createHuge();
 		return;
 	}
-	if (!flagFresh && reuseOutput()) return;
-	if (!flagFresh) unlink(flagOut); // (-fresh: main removed it before the link)
-	outFd = open(flagOut, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0); // (mode 0 until it is complete)
-	if (outFd < 0) fatalf("open %s: %s", flagOut, strerror(errno));
-	if (ftruncate(outFd, outSize) < 0) fatalf("truncate %s: %s", flagOut, strerror(errno));
+	if (claimFd >= 0 && reuseOutput()) return;
+	outFd = open(outTmp, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0); // (mode 0 until it is complete)
+	if (outFd < 0) fatalf("create %s: %s", outTmp, strerror(errno));
+	if (ftruncate(outFd, outSize) < 0) fatalf("truncate %s: %s", outTmp, strerror(errno));
 	out = mmap(NULL, (size_t)outSize, PROT_READ | PROT_WRITE, MAP_SHARED, outFd, 0);
-	if (out == MAP_FAILED) fatalf("mmap %s: %s", flagOut, strerror(errno));
+	if (out == MAP_FAILED) fatalf("mmap %s: %s", outTmp, strerror(errno));
 }
 
 // closeOutput gives the file its final size and mode and closes it (writeELF, at the end of finish).
 static void closeOutput(void) {
-	if (ftruncate(outFd, outSize) < 0) fatalf("truncate %s: %s", flagOut, strerror(errno));
-	if (fchmod(outFd, outMode) < 0) fatalf("chmod %s: %s", flagOut, strerror(errno));
+	if (ftruncate(outFd, outSize) < 0) fatalf("truncate %s: %s", outTmp, strerror(errno));
+	if (fchmod(outFd, outMode) < 0) fatalf("chmod %s: %s", outTmp, strerror(errno));
 	close(outFd);
 	outFd = -1;
+}
+
+// commitOutput renames the complete output into place (main: after closeOutput and the unmap).
+static void commitOutput(void) {
+	if (rename(outTmp, flagOut) < 0) fatalf("rename %s to %s: %s", outTmp, flagOut, strerror(errno));
+	outTmpLive = 0;
+}
+
+// sweepStale removes temporaries that dead links to the same output name left (see above). Run after the output
+// is complete, and only when the claim found nothing at the path (what a killed link leaves): one directory read.
+static void sweepStale(void) {
+	if (!claimFoundNothing) return;
+	char dir[4096], prefix[4096];
+	const char *base;
+	outDirBase(dir, sizeof dir, &base);
+	int pn = snprintf(prefix, sizeof prefix, ".%s.hlink-", base);
+	if (pn < 0 || pn >= (int)sizeof prefix) return;
+	DIR *d = opendir(*dir ? dir : ".");
+	if (!d) return;
+	struct dirent *e;
+	while ((e = readdir(d)) != NULL) {
+		if (strncmp(e->d_name, prefix, (size_t)pn) != 0) continue;
+		char *end;
+		long pid = strtol(e->d_name + pn, &end, 10);
+		if (end == e->d_name + pn || *end != '-' || pid <= 0 || pid == getpid()) continue;
+		if (kill((pid_t)pid, 0) == 0 || errno != ESRCH) continue;
+		struct stat st;
+		if (fstatat(dirfd(d), e->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0 && st.st_uid == geteuid()) unlinkat(dirfd(d), e->d_name, 0);
+	}
+	closedir(d);
 }
 
 // ---- the end (main.c's -teardown)

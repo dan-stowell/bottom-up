@@ -18,8 +18,10 @@ static void errorf(const char *fmt, ...) {
 	pthread_mutex_unlock(&errMu);
 }
 
+// removeOutput removes the output's temporary (the output path itself has not existed since the claim; see
+// write.c's claimOutput).
 static void removeOutput(void) {
-	if (flagOut && *flagOut) unlink(flagOut);
+	if (outTmpLive) unlink(outTmp);
 }
 
 static void exitIfErrors(void) {
@@ -227,7 +229,11 @@ static const flagdef flagdefs[] = {
 
 static void usage(void) {
 	fprintf(stderr, "usage: hlink -o out -importcfg importcfg.link [-buildid id] [-X pkg.name=val]... [-stats] [-j N] [-nodce] "
-	                "[-dumplive file] [-dumpmap file] [-E entry] [-hugetlb] [-fresh] [-nodetach] [-teardown fork|madvise|exit] main.o\n");
+	                "[-dumplive file] [-dumpmap file] [-E entry] [-hugetlb] [-fresh] [-nodetach] [-teardown fork|madvise|exit] main.o\n"
+	                "The output is written under a temporary name and renamed to out when complete; out does not exist while the\n"
+	                "link runs. By default the old out is rewritten in place to reuse its page-cache pages when it is a regular\n"
+	                "file of ours with no other hard link and not running: a process that opened it before the link, or a hard link\n"
+	                "made to its temporary during the link, sees it rewritten. -fresh never writes the old file.\n");
 	_exit(2);
 }
 
@@ -342,34 +348,74 @@ static int teardown = tdFork;
 static int detachFd = -1; // the child's end of the pipe to the parent
 static void unmapOutput(void);
 static void releaseInputs(void);
+static void claimOutput(void);
+static void commitOutput(void);
+static void sweepStale(void);
 
 static void printCompleteRow(const char *note) {
 	printf("%-10s %8.1f %8s  from the start to the output complete, %s\n", "complete", (nowSeconds() - linkT0) * 1000, "", note);
 }
 
+// ---- fatal signals: a link they end removes its temporary (write.c's claimOutput). A signal the caller had
+// ignored stays ignored (nohup, a background job's SIGINT, SIGPIPE ignored so that a write says EPIPE).
+static const int cleanupSigs[] = {SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGPIPE, SIGBUS, SIGSEGV};
+static const int forwardSigs[] = {SIGINT, SIGTERM, SIGHUP, SIGQUIT}; // (the ones sent from outside)
+#define NSIGS(a) (int)(sizeof a / sizeof a[0])
+static volatile pid_t forwardTo; // -teardown fork, in the parent: the linking child
+
+static void onFatalSignal(int sig) {
+	if (outTmpLive) unlink(outTmp);
+	raise(sig); // (SA_RESETHAND: the default action, as soon as this handler returns and sig is unblocked)
+}
+static void onForwardSignal(int sig) {
+	if (forwardTo > 0) kill(forwardTo, sig);
+}
+static void setHandlers(const int *sigs, int n, void (*fn)(int), int flags) {
+	struct sigaction sa, old;
+	memset(&sa, 0, sizeof sa);
+	sa.sa_handler = fn;
+	sa.sa_flags = flags;
+	sigemptyset(&sa.sa_mask);
+	for (int i = 0; i < n; i++)
+		if (sigaction(sigs[i], NULL, &old) == 0 && old.sa_handler != SIG_IGN) sigaction(sigs[i], &sa, NULL);
+}
+static void catchFatalSignals(void) { setHandlers(cleanupSigs, NSIGS(cleanupSigs), onFatalSignal, SA_RESETHAND); }
+
 // detach forks. The parent never returns from it: it waits for the child's word that the output is complete
 // (one byte on a pipe), prints the -stats row for that moment and exits 0; if the pipe closes without that byte,
-// it exits as the child did. The child returns and links. It runs before any thread starts and before anything
-// is mapped, so the fork is cheap and so is the parent's own exit.
+// it exits as the child did. Meanwhile it passes SIGINT, SIGTERM, SIGHUP and SIGQUIT on to the child, so that the
+// child removes its temporary before either goes (the parent's death would SIGKILL the child: PR_SET_PDEATHSIG).
+// The child returns and links. It runs before any thread starts and before anything is mapped, so the fork is
+// cheap and so is the parent's own exit.
 static void detach(void) {
 	int p[2];
 	if (pipe2(p, O_CLOEXEC) < 0) return; // (no pipe, no fork: link in this process)
 	fflush(stdout);
 	fflush(stderr);
+	sigset_t block, old; // (forwarded signals wait until each side has its handlers)
+	sigemptyset(&block);
+	for (int i = 0; i < NSIGS(forwardSigs); i++) sigaddset(&block, forwardSigs[i]);
+	sigprocmask(SIG_BLOCK, &block, &old);
 	pid_t parent = getpid(), pid = fork();
 	if (pid < 0) {
 		close(p[0]);
 		close(p[1]);
+		sigprocmask(SIG_SETMASK, &old, NULL);
 		return;
 	}
 	if (pid == 0) {
 		close(p[0]);
 		detachFd = p[1];
-		prctl(PR_SET_PDEATHSIG, 9 /* SIGKILL */); // the parent killed (^C, a timeout): the link stops too
+		prctl(PR_SET_PDEATHSIG, 9 /* SIGKILL */); // the parent killed (kill -9): the link stops too
 		if (getppid() != parent) _exit(2);
+		catchFatalSignals();
+		sigprocmask(SIG_SETMASK, &old, NULL);
 		return;
 	}
 	close(p[1]);
+	forwardTo = pid;
+	setHandlers(forwardSigs, NSIGS(forwardSigs), onForwardSignal, SA_RESTART);
+	sigprocmask(SIG_SETMASK, &old, NULL);
 	char c;
 	ssize_t n;
 	while ((n = read(p[0], &c, 1)) < 0 && errno == EINTR) {}
@@ -383,21 +429,34 @@ static void detach(void) {
 		if (errno != EINTR) _exit(2);
 	if (WIFEXITED(st)) _exit(WEXITSTATUS(st));
 	if (WIFSIGNALED(st)) {
-		kill(getpid(), WTERMSIG(st));
-		_exit(128 + WTERMSIG(st));
+		int sig = WTERMSIG(st);
+		struct sigaction sa;
+		memset(&sa, 0, sizeof sa);
+		sa.sa_handler = SIG_DFL;
+		sigaction(sig, &sa, NULL);
+		kill(getpid(), sig);
+		_exit(128 + sig);
 	}
 	_exit(2);
 }
 
-// detachDone tells the parent that the output is complete and lets go of the caller's stdin, stdout and stderr,
-// so that a caller reading them through pipes sees them close when the parent exits, not after the teardown.
+// detachDone lets go of the caller's stdin, stdout and stderr and then tells the parent that the output is
+// complete. In that order: once the parent has the byte it exits, and a caller reading our stdout and stderr
+// through pipes until EOF must then see EOF, whether or not this process has run on (it may be descheduled or
+// stopped right after the write; HLINK_DEBUG_STOP_AFTER_DONE=1 stops it there, for link/test.sh).
 static void detachDone(void) {
 	prctl(PR_SET_PDEATHSIG, 0);
+	fflush(stdout);
+	fflush(stderr);
+	int nul = open("/dev/null", O_RDWR);
+	for (int fd = 0; fd < 3; fd++)
+		if (nul < 0 || dup2(nul, fd) < 0) close(fd);
+	if (nul > 2) close(nul);
 	char c = 'K';
 	while (write(detachFd, &c, 1) < 0 && errno == EINTR) {}
 	close(detachFd);
-	int nul = open("/dev/null", O_RDWR);
-	for (int fd = 0; fd < 3 && nul >= 0; fd++) dup2(nul, fd);
+	const char *stop = getenv("HLINK_DEBUG_STOP_AFTER_DONE");
+	if (stop && strcmp(stop, "1") == 0) raise(SIGSTOP);
 }
 
 static void load(const char *cfgFile, const char *mainFile);
@@ -425,6 +484,10 @@ int main(int argc, char **argv) {
 	const char *nd = getenv("HLINK_NODETACH");
 	if (teardown == tdFork && (flagNoDetach || (nd && *nd && strcmp(nd, "0") != 0))) teardown = tdExit;
 	if (teardown == tdFork) detach();
+	if (detachFd < 0) catchFatalSignals(); // (a detached child has: see detach)
+	// the old output is renamed away now (one syscall): from here on the path does not exist until the output is
+	// complete, and of concurrent links exactly one gets the old file (write.c)
+	claimOutput();
 	nthreads = flagJ;
 	if (nthreads <= 0) {
 		cpu_set_t cs;
@@ -445,9 +508,6 @@ int main(int argc, char **argv) {
 		free(name);
 	}
 
-	// a failed link must not leave an old output behind: today's file goes now, unless its pages are to be
-	// reused (then any error removes it, see removeOutput)
-	if (flagFresh || outOnHugetlbfs) removeOutput();
 	load(flagImportcfg, argv[first]);
 	exitIfErrors();
 	resolve();
@@ -462,10 +522,15 @@ int main(int argc, char **argv) {
 	finish();
 	exitIfErrors();
 	if (*flagDumpMap) dumpMap();
+	// the output goes into place once nothing maps it for writing (an exec of it would fail with ETXTBSY);
+	// -teardown exit keeps the mapping until the process exits
 	if (teardown != tdExit) {
 		unmapOutput(); // (a detached child must: see detach)
+		commitOutput();
 		if (teardown == tdMadvise) releaseInputs();
-		lap("teardown", "%s", teardown == tdMadvise ? "output and inputs released from all threads" : "output unmapped");
+		lap("teardown", "%s", teardown == tdMadvise ? "output and inputs released from all threads" : "output unmapped, renamed into place");
+	} else {
+		commitOutput();
 	}
 
 	if (flagStats) {
@@ -480,5 +545,6 @@ int main(int argc, char **argv) {
 	}
 	fflush(stdout);
 	if (detachFd >= 0) detachDone();
+	sweepStale(); // (after the output is complete: off the caller's clock with -teardown fork)
 	_exit(0); // the workers never return
 }

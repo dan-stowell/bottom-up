@@ -3,9 +3,12 @@
 #   1. every program of link/progs through link/try.sh, without and with inlining (and the crashing runs);
 #   2. identical output for -j 1, 2, 4 and 8 (a program of link/progs and the frozen MinIO link);
 #   2b. overwriting an old output in place (the default) gives the bytes -fresh gives, over files of other sizes;
-#      a symlink, a hard-linked file and a running binary are not written through; a failed link leaves nothing;
+#      a symlink, a hard-linked file, a running binary and a directory are not written through; a failed link
+#      leaves nothing; concurrent links of two programs to one path leave one of them whole and no temporaries;
 #   2c. -teardown fork (the default), madvise and exit: the output runs as soon as the link returns, a failed
 #      link's status and stderr are the same, -stats ends with the parent's row, a killed parent stops the child;
+#      a link killed (SIGKILL, SIGTERM) at random moments leaves no output or the new one, never the old one; a
+#      caller reading the linker's output until EOF returns even if the child stops right after completion;
 #   3. a short list of standard-library test binaries linked by hlink (link/stdtest.sh);
 #   4. the frozen MinIO link: `--version` prints what the stock binary prints, and the live set (-dumplive)
 #      equals fclink's for the same link;
@@ -57,6 +60,12 @@ fi
 mapfile -t F < "$minio/link.flags"
 (cd "$minio" && jcheck minio -importcfg importcfg.link "${F[@]}" main.a) || fail=1
 
+# gone <output>: wait (up to 10 s) until no hlink with that -o runs (a detached child tears down after its parent)
+gone() { for _ in $(seq 200); do pgrep -f -- "-o $1 " > /dev/null || return 0; sleep 0.05; done; return 1; }
+# temps <dir>: how many link temporaries dir holds
+temps() { find "$1" -maxdepth 1 -name '.*.hlink-*' | wc -l; }
+rnd() { printf "0.%03d" $((RANDOM % ${1:-250})); } # a random sleep of up to $1 ms
+
 # ---- 2b. overwriting the old output in place gives the bytes of a new file (-fresh), whatever was there
 ow() {
   local d=$out/overwrite ok=1; rm -rf "$d"; mkdir -p "$d"; local f=$d/minio
@@ -81,8 +90,27 @@ ow() {
   # a failed link leaves no output
   L -X nodot -o "$f" > /dev/null 2>&1
   [ -e "$f" ] && { ok=0; echo "FAIL overwrite: a failed link left the old output"; }
+  # a directory at the output path is not replaced
+  mkdir "$d/dir"; L -o "$d/dir" > /dev/null 2>&1 && { ok=0; echo "FAIL overwrite: linked over a directory"; }
+  [ -d "$d/dir" ] || { ok=0; echo "FAIL overwrite: the directory at the output path is gone"; }
+  # two links of different programs (MinIO, MinIO -nodce: 109 and 172 MB) to one path, started together (one of
+  # them, at random, after a random delay, so either may claim the old file and either may finish last), over what
+  # the previous round left: both succeed, the path holds one of the two whole, and no temporaries remain
+  L -nodce -fresh -o "$d/nodce" || ok=0
+  local won1=0 won2=0 rounds=${ROUNDS:-50} p1 p2 s1 s2
+  for _ in $(seq "$rounds"); do
+    if [ $((RANDOM % 2)) = 0 ]; then s1=$(rnd 250) s2=0; else s1=0 s2=$(rnd 150); fi
+    (sleep "$s1"; L -o "$f") & p1=$!
+    (sleep "$s2"; L -nodce -o "$f") & p2=$!
+    wait $p1 || { ok=0; echo "FAIL overwrite: concurrent link of MinIO failed ($?)"; }
+    wait $p2 || { ok=0; echo "FAIL overwrite: concurrent link of MinIO -nodce failed ($?)"; }
+    gone "$f"
+    if cmp -s "$f" "$d/fresh"; then won1=$((won1 + 1)); elif cmp -s "$f" "$d/nodce"; then won2=$((won2 + 1)); else ok=0; echo "FAIL overwrite: concurrent links left neither output whole"; fi
+  done
+  [ "$(temps "$d")" = 0 ] || { ok=0; echo "FAIL overwrite: concurrent links left temporaries"; ls -a "$d"; }
+  echo "(overwrite: $rounds concurrent rounds: MinIO won $won1, MinIO -nodce won $won2)"
   rm -rf "$d"
-  [ $ok = 1 ] && echo "PASS overwrite: in place over 300, 20 and 0 MB of garbage = -fresh; symlink, hard link, running binary, failed link"
+  [ $ok = 1 ] && echo "PASS overwrite: in place over 300, 20 and 0 MB of garbage = -fresh; symlink, hard link, running binary, directory, failed link; $rounds concurrent rounds whole"
   [ $ok = 1 ]
 }
 ow || fail=1
@@ -111,9 +139,43 @@ td() {
   (cd "$minio" && exec "$hlink" -fresh -o "$d/killed" -importcfg importcfg.link "${F[@]}" main.a) & local pid=$!
   sleep 0.05; kill -9 $pid; wait $pid 2> /dev/null; sleep 0.5
   pgrep -f -- "-o $d/killed" > /dev/null && { ok=0; echo "FAIL teardown: the child outlived its killed parent"; pkill -9 -f -- "-o $d/killed"; }
-  [ -e "$d/killed" ] && [ "$(stat -c %a "$d/killed")" != 0 ] && { ok=0; echo "FAIL teardown: a killed link left an executable output"; }
+  [ -e "$d/killed" ] && { ok=0; echo "FAIL teardown: a killed link left an output"; }
+  # killed at random moments of a link over an old executable (MinIO -nodce; the new one is MinIO), with and
+  # without the fork, by SIGKILL (to the parent: the child dies with it) and SIGTERM: afterwards the path is
+  # absent or the complete new image, never the old one or a part; SIGTERM leaves no temporary
+  L -nodce -fresh -o "$d/old" > /dev/null && L -fresh -o "$d/new" > /dev/null || ok=0
+  local f=$d/k absent=0 new=0 n=0
+  for sig in TERM KILL; do # (TERM first: what KILL leaves behind stays until the sweep below)
+    for t in fork exit; do
+      for _ in $(seq ${KILLROUNDS:-20}); do
+        cp "$d/old" "$f"
+        (cd "$minio" && exec "$hlink" -teardown=$t -o "$f" -importcfg importcfg.link "${F[@]}" main.a > /dev/null) & pid=$!
+        sleep "$(rnd 300)"; kill -$sig $pid 2> /dev/null; wait $pid 2> /dev/null
+        gone "$f" || { ok=0; echo "FAIL teardown: a killed link's child is still running"; pkill -9 -f -- "-o $f "; }
+        n=$((n + 1))
+        if [ ! -e "$f" ]; then absent=$((absent + 1)); elif cmp -s "$f" "$d/new"; then new=$((new + 1)); else
+          ok=0; cmp -s "$f" "$d/old" && echo "FAIL teardown: SIG$sig ($t) left the old output" || echo "FAIL teardown: SIG$sig ($t) left a partial output"
+        fi
+        [ $sig = TERM ] && [ "$(temps "$d")" != 0 ] && { ok=0; echo "FAIL teardown: SIGTERM ($t) left a temporary"; ls -a "$d"; find "$d" -maxdepth 1 -name '.*.hlink-*' -delete; }
+      done
+    done
+  done
+  # what SIGKILL left behind goes with the next link that finds no output there
+  local left; left=$(temps "$d"); rm -f "$f"
+  L -o "$f" > /dev/null && gone "$f" && [ "$(temps "$d")" = 0 ] || { ok=0; echo "FAIL teardown: the next link did not remove dead links' temporaries"; ls -a "$d"; }
+  echo "(teardown: $n killed links: $absent left no output, $new the new one; SIGKILL left $left temporaries, removed by the next link)"
+  # a caller that reads stdout and stderr through a pipe until EOF returns as soon as the output is complete, even
+  # when the child stops right after saying so (HLINK_DEBUG_STOP_AFTER_DONE=1 stops it with SIGSTOP there)
+  (cd "$minio" && HLINK_DEBUG_STOP_AFTER_DONE=1 "$hlink" -stats -o "$d/stopped" -importcfg importcfg.link "${F[@]}" main.a 2>&1 | cat > "$d/piped") & pid=$!
+  local w=0; while kill -0 $pid 2> /dev/null && [ $w -lt 200 ]; do sleep 0.05; w=$((w + 1)); done
+  kill -0 $pid 2> /dev/null && { ok=0; echo "FAIL teardown: a caller reading the linker's output did not see EOF while the child was stopped"; }
+  local child; child=$(pgrep -f -- "-o $d/stopped ")
+  [ -n "$child" ] && [[ "$(ps -o stat= -p "$child")" == T* ]] || { ok=0; echo "FAIL teardown: HLINK_DEBUG_STOP_AFTER_DONE did not stop the child"; }
+  pkill -9 -f -- "-o $d/stopped "; wait $pid
+  grep -q "^complete .*as the parent sees it" "$d/piped" && "$d/stopped" --version > /dev/null ||
+    { ok=0; echo "FAIL teardown: a stopped child's link is not complete"; tail -2 "$d/piped"; }
   rm -rf "$d"
-  [ $ok = 1 ] && echo "PASS teardown: fork, madvise and exit: outputs run at once, failures alike, -stats complete row, HLINK_NODETACH, killed parent"
+  [ $ok = 1 ] && echo "PASS teardown: fork, madvise and exit: outputs run at once, failures alike, -stats complete row, HLINK_NODETACH, killed parent; $n links killed at random never left the old output; EOF with a stopped child"
   [ $ok = 1 ]
 }
 td || fail=1
@@ -194,6 +256,17 @@ else
     fi
     rm -f "$o"
   done
+  # overwriting on hugetlbfs: the same claim and final rename; the old file is unlinked at the claim, and its huge
+  # pages are free again once the links are gone
+  o=$hdir/hlink-test.$$/stock; f0=$(awk '/HugePages_Free/{print $2}' /proc/meminfo); hok=1
+  for _ in 1 2 3; do
+    (cd "$minio" && timeout 120 prlimit --as=$((16 << 30)) "$hlink" -o "$o" -importcfg importcfg.link "${F[@]}" main.a) &&
+      cmp -s <("$o" --version 2>&1) <("$minio/stock" --version 2>&1) || { hok=0; echo "FAIL hugetlbfs overwrite: link over the old output failed or --version differs"; }
+  done
+  gone "$o"; [ "$(temps "$hdir/hlink-test.$$")" = 0 ] || { hok=0; echo "FAIL hugetlbfs overwrite: temporaries left"; }
+  rm -f "$o"; f1=$(awk '/HugePages_Free/{print $2}' /proc/meminfo)
+  [ "$f1" -ge "$f0" ] || { hok=0; echo "FAIL hugetlbfs overwrite: $f0 huge pages free before, $f1 after"; }
+  [ $hok = 1 ] && echo "PASS hugetlbfs overwrite: 3 links over the old output, no temporaries, huge pages freed ($f0 free before, $f1 after)" || fail=1
   read -r -a hstd <<< "${HSTD:-sort fmt reflect runtime}"
   HLINK_HUGETLB=1 HUGETLB_DIR=$hdir "$here/link/stdtest.sh" "${hstd[@]}" || fail=1
   rm -rf "$hdir/hlink-test.$$" "$hdir"/hlink-test.*.$$ # (try.sh, toolexec.sh and stdtest.sh remove their own)

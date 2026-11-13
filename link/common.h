@@ -23,6 +23,12 @@
 extern pid_t waitpid(pid_t pid, int *status, int options);
 extern int kill(pid_t pid, int sig);
 #include <sys/prctl.h>
+// (<signal.h> for sigaction, with its sigset() renamed out of the way of dead.c's type)
+#define sigset libc_sigset_
+#include <signal.h>
+#undef sigset
+#include <dirent.h>
+#include <sys/random.h>
 
 #define HLINK_BUILTINS
 #define HLINK_RELOCNAMES
@@ -120,6 +126,10 @@ static int nthreads;
 static bool flagHugetlb, flagFresh, flagNoDetach;
 static const char *flagTeardown = ""; // fork, madvise or exit (main.c)
 static bool outHuge, outOnHugetlbfs;
+// The temporary name the output is written under (write.c's claimOutput .. commitOutput); while outTmpLive, a
+// failure (removeOutput) or a fatal signal (main.c) removes it.
+static char outTmp[4096];
+static volatile sig_atomic_t outTmpLive;
 static u32 segAlign = 4096; // alignment of a segment's start (hugePage when outHuge)
 
 // ---- errors (main.c)
