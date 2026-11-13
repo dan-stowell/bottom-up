@@ -14,9 +14,15 @@
 //	then the one in the earlier object, at the lower index.
 //
 // A name nothing defines resolves to its first reference: that slot stands for the undefined symbol.
-// Names are compared by a 128-bit hash and never by their bytes (comparing means a cache miss in some other
+// Names are compared by a 112-bit hash and never by their bytes (comparing means a cache miss in some other
 // object's string table per record; two different names with one hash would be linked as one symbol, at odds
-// of about 1 in 10^26 per link, which is what content-addressed symbols already accept).
+// of about 1 in 10^21 per link, which is what content-addressed symbols already accept).
+//
+// Alignment: the stock loader gives a symbol the largest alignment field of all its copies, losers included
+// (loader preloadSyms; ld symalign derives one from the size only if no copy has one). The low 16 bits of a
+// record's k2 hold its copy's alignment field instead of key bits (keys compare with them masked), the
+// grouping ORs them, and a winner whose own alignment is not the group's largest is marked stAlignRaised
+// with the group's in a small side table (alignOf, layout.c): no extra memory access per symbol.
 // Definitions referenced by package index take part in the join by name only if some object refers to their
 // name (or the linker itself looks it up): after the by-name tables are built, one pass over those
 // definitions probes them, with a Bloom filter of the tables' keys in front.
@@ -33,6 +39,24 @@
 typedef struct {
 	u64 k1, k2;
 } key128;
+#define recAlign 0xFFFFull // (the low bits of a record's k2: its copy's alignment field; see above)
+#define bloomBit1(k2) (((k2) >> 16) % bloomBits)
+#define bloomBit2(k2) (((k2) >> 40) % bloomBits)
+static inline u64 recAlignOf(const u8 *s) { return symAlignField(s) & recAlign; }
+
+// raised alignments: per worker, pairs (winner id, alignment); then sorted, for alignOf
+static vecu32 *alignRaised;
+static u32 *raisedTab;
+static size_t nraised;
+static inline u32 highBit(u64 m) { return m ? 1u << (63 - __builtin_clzll(m)) : 0; }
+// a group's winner whose own alignment field (own) is not the group's largest (all: the OR of its copies')
+static inline void noteAlign(int w, u32 win, u64 all, u64 own) {
+	u32 a = highBit(all & recAlign);
+	if (a == 0 || a == (u32)(own & recAlign)) return;
+	atomicOr32(&state[win], stAlignRaised);
+	VPUSH(alignRaised[w], win);
+	VPUSH(alignRaised[w], a);
+}
 
 // nameKey128: 16 bytes a step. Reads up to 15 bytes past the name, so the name must have that much mapped
 // memory after it: true of every name in an object (the string block is never last); names of the linker's
@@ -55,7 +79,7 @@ static inline key128 nameKey128(const u8 *p, size_t n, u16 abi) {
 	}
 	a = mum(x ^ a, y ^ 0x589965CC75374CC3ull);
 	b = mum(x ^ 0x1D8E4E27C47D124Full, y ^ b);
-	key128 k = {mum(a, b ^ 0xEB44ACCAB455D165ull), mum(a ^ 0x4F1BBCDCBFA53E0Aull, b)};
+	key128 k = {mum(a, b ^ 0xEB44ACCAB455D165ull), mum(a ^ 0x4F1BBCDCBFA53E0Aull, b) & ~recAlign};
 	if (k.k1 == 0) k.k1 = 1; // 0 marks an empty table entry
 	return k;
 }
@@ -145,7 +169,7 @@ static inline tent *nameFind(key128 k) {
 	u32 mask = nameTab[p].mask;
 	for (u32 h = (u32)(k.k1 >> 8) & mask;; h = (h + 1) & mask) {
 		if (te[h].k1 == 0) return NULL;
-		if (te[h].k1 == k.k1 && te[h].k2 == k.k2) return &te[h];
+		if (te[h].k1 == k.k1 && ((te[h].k2 ^ k.k2) & ~recAlign) == 0) return &te[h];
 	}
 }
 
@@ -207,22 +231,24 @@ static void resolveRecords(void *ctx UNUSED, int w, long ui) {
 	for (u32 j = MAX(u->lo, o->ndef); j < u->hi; j++, s += SymSize) {
 		u32 gid = o->base + j;
 		if (j < hLo) {
-			u64 h = ld64(h64 + (size_t)(j - h64Lo) * 8), k = mix64(h ^ 0x5851F42D4C957F2Dull);
-			recAdd(rw, &rw->hashes[k >> (64 - 9)], (rec){k, h, (u64)symSiz(s) << 32 | (u32)~gid});
+			u64 h = ld64(h64 + (size_t)(j - h64Lo) * 8), k = mix64(h ^ 0x5851F42D4C957F2Dull); // (k: all of h)
+			recAdd(rw, &rw->hashes[k >> (64 - 9)], (rec){k, (h & ~recAlign) | recAlignOf(s), (u64)symSiz(s) << 32 | (u32)~gid});
 		} else if (j < npLo) {
 			const u8 *h = hh + (size_t)(j - hLo) * HashSize;
 			u64 k1 = ld64(h);
-			recAdd(rw, &rw->hashes[k1 >> (64 - 9)], (rec){k1, ld64(h + 8), (u64)symSiz(s) << 32 | (u32)~gid});
+			recAdd(rw, &rw->hashes[k1 >> (64 - 9)], (rec){k1, (ld64(h + 8) & ~recAlign) | recAlignOf(s), (u64)symSiz(s) << 32 | (u32)~gid});
 		} else {
 			u32 rk = 0;
+			u64 al = 0;
 			if (j < o->nalldef) {
 				if (symABI(s) == SymABIstatic || symNameLen(s) == 0) continue; // file-local, or an unnamed auxiliary symbol
 				rk = rankOf(o, j, s);
+				al = recAlignOf(s);
 			} else if (symUsedInIface(s)) {
 				rk = rankIface;
 			}
 			key128 k = nameKey128(o->b + ld32(s + 4), symNameLen(s), symABI(s));
-			recAdd(rw, &rw->names[k.k1 >> 56], (rec){k.k1, k.k2, (u64)rk << 32 | (u32)~gid});
+			recAdd(rw, &rw->names[k.k1 >> 56], (rec){k.k1, k.k2 | al, (u64)rk << 32 | (u32)~gid});
 		}
 	}
 }
@@ -278,8 +304,9 @@ static void resolveJoin(void *ctx UNUSED, int w, long task) {
 							ent[nd - 1] = (tent){r->k1, r->k2, r->val};
 							break;
 						}
-						if (ent[e - 1].k1 == r->k1 && ent[e - 1].k2 == r->k2) {
+						if (ent[e - 1].k1 == r->k1 && ((ent[e - 1].k2 ^ r->k2) & ~recAlign) == 0) {
 							ent[e - 1].val = better(ent[e - 1].val, r->val);
+							ent[e - 1].k2 |= r->k2 & recAlign;
 							break;
 						}
 					}
@@ -294,7 +321,7 @@ static void resolveJoin(void *ctx UNUSED, int w, long task) {
 					te[h] = ent[i];
 					break;
 				}
-			u64 b1 = ent[i].k2 % bloomBits, b2 = (ent[i].k2 >> 32) % bloomBits;
+			u64 b1 = bloomBit1(ent[i].k2), b2 = bloomBit2(ent[i].k2);
 			__atomic_fetch_or(&bloom[b1 >> 6], 1ull << (b1 & 63), __ATOMIC_RELAXED);
 			__atomic_fetch_or(&bloom[b2 >> 6], 1ull << (b2 & 63), __ATOMIC_RELAXED);
 		}
@@ -322,12 +349,13 @@ static void resolveJoin(void *ctx UNUSED, int w, long task) {
 					if (!e) {
 						idx[h] = ++nd;
 						ent[nd - 1] = (tent){r->k1, r->k2, r->val};
-						r->k2 = nd - 1; // (the record remembers its group for the second pass)
+						r->k2 = (u64)(nd - 1) << 16 | (r->k2 & recAlign); // (the record remembers its group for the second pass)
 						break;
 					}
-					if (ent[e - 1].k1 == r->k1 && ent[e - 1].k2 == r->k2) {
+					if (ent[e - 1].k1 == r->k1 && ((ent[e - 1].k2 ^ r->k2) & ~recAlign) == 0) {
 						if (r->val > ent[e - 1].val) ent[e - 1].val = r->val;
-						r->k2 = e - 1;
+						ent[e - 1].k2 |= r->k2 & recAlign;
+						r->k2 = (u64)(e - 1) << 16 | (r->k2 & recAlign);
 						break;
 					}
 				}
@@ -336,8 +364,10 @@ static void resolveJoin(void *ctx UNUSED, int w, long task) {
 		for (chunk *c = rws[t].hashes[p].head; c; c = c->next)
 			for (u32 i = 0; i < c->n; i++) {
 				rec *r = &c->r[i];
-				u32 gid = ~(u32)r->val, win = ~(u32)ent[r->k2].val;
+				tent *g = &ent[r->k2 >> 16];
+				u32 gid = ~(u32)r->val, win = ~(u32)g->val;
 				if (win != gid) canon[gid] = win;
+				else noteAlign(w, win, g->k2, r->k2);
 			}
 	rw->nrec[1] += (long)n;
 }
@@ -353,13 +383,14 @@ static void resolvePkgDefs(void *ctx UNUSED, int w, long ui) {
 		u32 gid = o->base + j;
 		if (symABI(s) != SymABIstatic && symNameLen(s) != 0) {
 			key128 k = nameKey128(o->b + ld32(s + 4), symNameLen(s), symABI(s));
-			u64 b1 = k.k2 % bloomBits, b2 = (k.k2 >> 32) % bloomBits;
+			u64 b1 = bloomBit1(k.k2), b2 = bloomBit2(k.k2);
 			tent *e;
 			if ((bloom[b1 >> 6] >> (b1 & 63) & 1) && (bloom[b2 >> 6] >> (b2 & 63) & 1) && (e = nameFind(k)) != NULL) {
 				u64 val = (u64)rankOf(o, j, s) << 32 | (u32)~gid, old = __atomic_load_n(&e->val, __ATOMIC_RELAXED);
 				while (!__atomic_compare_exchange_n(&e->val, &old, better(old, val), true, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
+				__atomic_fetch_or(&e->k2, recAlignOf(s), __ATOMIC_RELAXED);
 				// its record joins the others of its name, so that step 4 tells the slot if it lost
-				recAdd(rw, &rw->names[k.k1 >> 56], (rec){k.k1, k.k2, val});
+				recAdd(rw, &rw->names[k.k1 >> 56], (rec){k.k1, k.k2 | recAlignOf(s), val});
 				rw->npkgjoin++;
 				continue;
 			}
@@ -369,15 +400,17 @@ static void resolvePkgDefs(void *ctx UNUSED, int w, long ui) {
 }
 
 // 4. every record by name tells its slot the winner; the winners get their flags
-static void resolveNames(void *ctx UNUSED, int w UNUSED, long p) {
+static void resolveNames(void *ctx UNUSED, int w, long p) {
 	for (int t = 0; t < nthreads; t++)
 		for (chunk *c = rws[t].names[p].head; c; c = c->next)
 			for (u32 i = 0; i < c->n; i++) {
 				rec *r = &c->r[i];
 				u32 gid = ~(u32)r->val;
 				if (gid == ~0u) continue; // a name the linker wants: not a slot
-				u32 win = ~(u32)nameFind((key128){r->k1, r->k2})->val;
+				tent *e = nameFind((key128){r->k1, r->k2});
+				u32 win = ~(u32)e->val;
 				if (win != gid) canon[gid] = win;
+				else noteAlign(w, win, e->k2, r->k2);
 			}
 	tent *te = nameTab[p].e;
 	if (!te) return;
@@ -403,6 +436,11 @@ static void resolveRefFlags(void *ctx UNUSED, int w UNUSED, long i) {
 	}
 }
 
+static int cmpU32(const void *a, const void *b) { // (the first u32 of each element)
+	u32 x = *(const u32 *)a, y = *(const u32 *)b;
+	return x < y ? -1 : x > y;
+}
+
 static void resolve(void) {
 	idCap = nslots + 1 + 65536;
 	nids = nslots + 1;
@@ -413,6 +451,7 @@ static void resolve(void) {
 	synthNames = calloc(65536, sizeof(str));
 	bloom = hugealloc(bloomBits / 8);
 	rws = calloc((size_t)nthreads, sizeof(resolveWorker));
+	alignRaised = calloc((size_t)nthreads, sizeof(vecu32));
 
 	for (int i = 0; i < NBUILTIN; i++) wantName(cstr(builtinNames[i].name), (u16)builtinNames[i].abi);
 	for (size_t i = 0; i < sizeof linkerNames / sizeof linkerNames[0]; i++) {
@@ -436,12 +475,17 @@ static void resolve(void) {
 		if (isDef(g)) builtins[i] = g;
 	}
 	par(nobjs, resolveRefFlags, NULL);
+	for (int t = 0; t < nthreads; t++) nraised += alignRaised[t].n / 2;
+	raisedTab = malloc(MAX(nraised, 1) * 8);
+	for (int t = 0, k = 0; t < nthreads; t++)
+		for (size_t i = 0; i < alignRaised[t].n; i++) raisedTab[k++] = alignRaised[t].a[i];
+	qsort(raisedTab, nraised, 8, cmpU32);
 	long nrec[3] = {0, 0, 0}, npkg = 0;
 	for (int t = 0; t < nthreads; t++) {
 		nrec[0] += rws[t].nrec[0];
 		nrec[1] += rws[t].nrec[1];
 		npkg += rws[t].npkgjoin;
 	}
-	lap("resolve", "%u slots; joined: %ld by name (and %ld definitions by package index), %ld by content hash; ms: records %.1f, joins %.1f, pkgdefs %.1f, names %.1f",
-		nslots, nrec[0], npkg, nrec[1], (t1 - t0) * 1e3, (t2 - t1) * 1e3, (t3 - t2) * 1e3, (t4 - t3) * 1e3);
+	lap("resolve", "%u slots; joined: %ld by name (and %ld definitions by package index), %ld by content hash; %zu alignments raised; ms: records %.1f, joins %.1f, pkgdefs %.1f, names %.1f",
+		nslots, nrec[0], npkg, nrec[1], nraised, (t1 - t0) * 1e3, (t2 - t1) * 1e3, (t3 - t2) * 1e3, (t4 - t3) * 1e3);
 }

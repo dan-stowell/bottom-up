@@ -353,6 +353,7 @@ enum {
 	stOverride = 1 << 6,    // the linker writes this symbol's content itself
 	stUndef = 1 << 7,       // a reference that stands for a symbol no object defines
 	stBucketShift = 8,      // bits 8..12: the bucket; bits 13..16: the alignment class
+	stAlignRaised = 1 << 17, // another copy has a larger alignment: it is in raisedTab (resolve.c, alignOf)
 };
 
 static inline u32 atomicOr32(u32 *p, u32 v) { return __atomic_fetch_or(p, v, __ATOMIC_RELAXED); }

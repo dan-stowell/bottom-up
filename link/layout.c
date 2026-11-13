@@ -59,6 +59,19 @@ static u32 symAlign(const u8 *s) {
 	return a;
 }
 
+// alignOf: the alignment of canonical symbol gid (record s, state st): its own, or the largest of all its
+// copies' when that differs (resolve.c: the stock loader's preloadSyms rule)
+static u32 alignOf(u32 gid, const u8 *s, u32 st) {
+	if (!(st & stAlignRaised)) return symAlign(s);
+	size_t lo = 0, hi = nraised;
+	while (lo < hi) {
+		size_t m = (lo + hi) / 2;
+		if (raisedTab[2 * m] < gid) lo = m + 1;
+		else hi = m;
+	}
+	return raisedTab[2 * lo + 1];
+}
+
 // funcShape reads what a function's pclntab entry needs to know: its FuncInfo, and how many pcdata and
 // funcdata slots it has (an inlined-into function has at least the inline-tree ones).
 static bytes funcShape(const object *o, u32 j, u32 *npc, u32 *nfd, u32 *ninl) {
@@ -179,7 +192,7 @@ static void sizeUnit(void *ctx UNUSED, int w UNUSED, long ui) {
 			state[gid] = st | (u32)bTypelink << stBucketShift;
 			continue;
 		}
-		u32 a = symAlign(s);
+		u32 a = alignOf(gid, s, st);
 		if (isTextBucket(b)) a = MAX(a, funcAlign);
 		if (b == bItab) a = 8; // the runtime walks the itabs: no gaps
 		u32 cl = (u32)__builtin_ctz(a);
@@ -451,7 +464,7 @@ static void layout(void) {
 		u32 j;
 		object *o = objOf(tls[i].gid, &j);
 		const u8 *s = osym(o, j);
-		va = rnd(va, MAX(8, symAlign(s)));
+		va = rnd(va, MAX(8, alignOf(tls[i].gid, s, state[tls[i].gid])));
 		addr[tls[i].gid] = va;
 		va += symSiz(s);
 	}
