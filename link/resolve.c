@@ -325,6 +325,9 @@ static void resolveJoin(void *ctx UNUSED, int w, long task) {
 // 4-byte symbol may share its hash with an 8-byte one), then the lowest id, among the reached copies; it
 // inherits the flags of all of them. Which copies were reached does not depend on thread timing (every
 // reached copy that has relocations is flooded, not only the first seen), so neither does the winner.
+// A copy that was not reached but is named by a relocation the flood does not follow (a weak one, a method
+// entry: flRef) takes part too, so that the relocation finds the class's winner if the class is live; such a
+// copy never wins and gives the winner no flags.
 #define hashedFlags (stLive | stPC | stFuncdata | stNameNeeded)
 // A record of this join is 16 bytes, four to a cache line: 96 bits of the hash and the id. (For a short hash,
 // k1 is the whole 8 bytes of content and k2 the symbol's size: the largest copy wins.) They are collected in
@@ -333,6 +336,7 @@ typedef struct {
 	u64 k1;
 	u32 k2, gid;
 } hrec;
+#define refOnly (1u << 31) // in hrec.gid: the copy was not reached, only named by a relocation the flood skips
 #define hchunkRecs 126
 typedef struct hchunk {
 	struct hchunk *next;
@@ -369,14 +373,16 @@ static void hashedRecords(void *ctx UNUSED, int w, long ui) {
 	const u8 *h64 = o->b + o->off[BlkHash64], *hh = o->b + o->off[BlkHash];
 	for (u32 j = MAX(u->lo, h64Lo); j < MIN(u->hi, npLo); j++) {
 		u32 gid = o->base + j;
-		if ((FL(gid) & hashedFlags) == 0) continue;
+		u8 f = FL(gid);
+		if ((f & (hashedFlags | flRef)) == 0) continue;
+		u32 id = gid | ((f & hashedFlags) ? 0 : refOnly);
 		if (j < hLo) {
 			u64 h = ld64(h64 + (size_t)(j - h64Lo) * 8);
-			hrecAdd(rw, &hw->shorts[mix64(h) >> (64 - 4)], (hrec){h, symSiz(osym(o, j)), gid});
+			hrecAdd(rw, &hw->shorts[mix64(h) >> (64 - 4)], (hrec){h, symSiz(osym(o, j)), id});
 		} else {
 			const u8 *h = hh + (size_t)(j - hLo) * HashSize;
 			u64 k1 = ld64(h);
-			hrecAdd(rw, &hw->longs[k1 >> (64 - 9)], (hrec){k1, ld32(h + 8), gid});
+			hrecAdd(rw, &hw->longs[k1 >> (64 - 9)], (hrec){k1, ld32(h + 8), id});
 		}
 	}
 }
@@ -407,8 +413,10 @@ static void hashedJoin(void *ctx UNUSED, int w, long task) {
 					}
 					hrec *g = &ent[e - 1];
 					if (g->k1 != r->k1) continue;
+					// (ids compare as unsigned: a copy that is only referred to has the top bit, and loses)
 					if (isShort) {
-						if (r->k2 > g->k2 || (r->k2 == g->k2 && r->gid < g->gid)) *g = *r;
+						bool rr = r->gid & refOnly, gr = g->gid & refOnly;
+						if (rr != gr ? gr : (r->k2 > g->k2 || (r->k2 == g->k2 && r->gid < g->gid))) *g = *r;
 						break;
 					}
 					if (g->k2 == r->k2) {
@@ -423,19 +431,20 @@ static void hashedJoin(void *ctx UNUSED, int w, long task) {
 			for (u32 i = 0; i < c->n; i++) {
 				hrec *r = &c->r[i];
 				u64 k = isShort ? mix64(r->k1) : r->k1;
-				u32 win;
+				hrec *g;
 				for (u32 h = (u32)k & mask;; h = (h + 1) & mask) {
-					hrec *g = &ent[idx[h] - 1];
-					if (g->k1 == r->k1 && (isShort || g->k2 == r->k2)) {
-						win = g->gid;
-						break;
-					}
+					g = &ent[idx[h] - 1];
+					if (g->k1 == r->k1 && (isShort || g->k2 == r->k2)) break;
 				}
-				if (win != r->gid) {
-					canon[r->gid] = win;
-					SF(r->gid) |= sfRedir;
-					FL(win) |= FL(r->gid) & hashedFlags; // (a class is in one partition: no other thread writes these)
-				}
+				u32 win = g->gid, gid = r->gid & ~refOnly;
+				if (win & refOnly) continue; // nothing reached this class: it is not in the output
+				if (win == gid) continue;
+				// (a short hash stands for up to 8 bytes: a reference to a copy longer than the winner is
+				// left unresolved rather than pointed at fewer bytes than it names)
+				if (isShort && (r->gid & refOnly) && r->k2 > g->k2) continue;
+				canon[gid] = win;
+				SF(gid) |= sfRedir;
+				FL(win) |= FL(gid) & hashedFlags; // (a class is in one partition: no other thread writes these)
 			}
 #undef HLIST
 	rw->nrec[1] += (long)n;

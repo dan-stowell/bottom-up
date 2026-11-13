@@ -87,3 +87,15 @@
   huge pages too, 256 pages were not enough for link + run: **vm.nr_hugepages is now 1024** (2 GiB).
   Also today: content-addressed symbols are joined after the flood, only the reached ones (1.29 M of 2.68 M
   slots; 457 k classes kept): resolve on one core 152 -> 114 ms, the join itself 37 ms inside deadcode.
+- 2026-11-13T18:19:53Z **M3.** MinIO's own tests, each test binary linked twice from the same objects (stock linker, hlink through
+  -toolexec), run with -test.short, failing sets compared: 46 of 46 packages agree (`cmd`: 710 tests pass
+  and TestTrackingResponseWriter fails with both linkers). The run overlapped my rebuilds of build/hlink, so
+  the binaries were linked by several versions of today's linker: it is to be repeated on the final one before
+  M4 is claimed. Review of the day's merges (codex): the lazy join mishandled relocations the flood skips
+  (fixed: flRef), and the in-place overwrite is not safe against a concurrent link or a kill before the write
+  phase (a builder is replacing it with claim-by-rename). *What did the oracle number do since the last
+  milestone?* 259 std test binaries -> + 46 MinIO test binaries, in about an hour, while the link went
+  251 -> 173-182 ms. Not stalled. The blocker for M4 is speed: 4-5% of floor against a required 33%; single-core
+  work is 487 ms (load 36, resolve 100, deadcode 135, layout 75, create 32, write 102) and has to come down
+  about fourfold; what I am doing about it is in PLAN.md's Now line (layout over live symbols only is next),
+  and STATUS.md says plainly that I do not expect this design to reach the exit line on stock objects.

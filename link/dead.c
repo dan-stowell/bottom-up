@@ -562,6 +562,14 @@ static inline void bDecode(fbatch *b) {
 				__builtin_prefetch(&FL(g));
 			}
 			t[r] = g;
+			// A weak relocation or a method entry is written whether or not the flood follows it: with its
+			// target's address if the target is live, with a placeholder if not. When the target is a
+			// content-addressed copy, another copy of it may be the live one; the copy named here is flagged
+			// so that the join after the flood (resolveHashed) includes it and it learns its class's winner.
+			if (((ty & R_WEAK) || ty == R_METHODOFF) && rSiz(rl) != 0 && (rPkg(rl) == PkgIdxHashed || rPkg(rl) == PkgIdxHashed64)) {
+				u32 h = RREF(o, rl);
+				if (!(atomicLoad8(&FL(h)) & flRef)) atomicOr8(&FL(h), flRef);
+			}
 		}
 		t = b->atg.a + b->it[k].a0;
 		for (u32 a = 0; a < b->it[k].na; a++) {
@@ -690,7 +698,7 @@ static void publishTask(void *ctx UNUSED, int w UNUSED, long ui) {
 	unit *u = &units[ui];
 	u32 lo = u->o->base + u->lo, hi = u->o->base + u->hi;
 	for (u32 g = lo; g < hi; g++) {
-		u8 f = FL(g) & (u8)~stUndef; // (stUndef stays in fl; bit 7 of state is not used for it any more)
+		u8 f = FL(g) & (u8)~(stUndef | flRef); // (those two are fl's own: in state, bit 6 is stOverride)
 		if (f) state[g] |= f;
 	}
 }

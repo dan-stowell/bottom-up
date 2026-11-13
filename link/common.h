@@ -380,6 +380,7 @@ static inline u32 atomicLoad32(const u32 *p) { return __atomic_load_n(p, __ATOMI
 //           the flood is over (deadcode), after which state is the truth for those bits too, except stUndef,
 //           which is only ever in fl;
 //   SF(id)  what the flood needs to know about a symbol without reading its record: set once, in resolve.
+#define flRef (1 << 6) // (fl only) a content-addressed copy named by a relocation the flood does not follow
 static u8 *flsf; // fl and sf interleaved: one cache line serves both
 #define FL(id) flsf[2 * (size_t)(id)]
 #define SF(id) flsf[2 * (size_t)(id) + 1]

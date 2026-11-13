@@ -58,14 +58,13 @@ static object *newObject(str pkg, const char *file, bytes body) {
 	o->npkg = (o->off[BlkPkgIdx + 1] - o->off[BlkPkgIdx]) / 8;
 	o->nalldef = o->ndef + o->nh64 + o->nh + o->nnonpkg;
 	o->total = o->nalldef + o->nref;
-	// Put the object's pages in the page table now, in bulk: its strings, symbol records, hashes, index
-	// tables, relocations and aux records (everything up to the data block). Left to first touch, each page
-	// (or each 16, with the kernel's fault-around) is a fault taken in the middle of a pass, and, worse, a
-	// prefetch of a page that is not mapped yet does nothing, so the flood's cache misses would queue up
-	// behind one another instead of overlapping. The data block is left to the write pass, which reads the
-	// live symbols' bytes in order.
+	// Put the pages the flood will read at random in the page table now, in bulk: the index tables, the
+	// relocations and the aux records. A prefetch of a page that is not mapped yet does nothing, so without
+	// this the flood's cache misses queue up behind page faults instead of overlapping. What is read in order
+	// (symbol records, hashes, names: resolve; the data block: the write pass) is left to first touch, which
+	// costs less per page with the kernel's fault-around than it does here.
 	if (!getenv("HLINK_NOPOPULATE")) {
-		uintptr_t lo = (uintptr_t)b.p & ~(uintptr_t)4095, hi = ((uintptr_t)b.p + o->off[BlkData] + 4095) & ~(uintptr_t)4095;
+		uintptr_t lo = ((uintptr_t)b.p + o->off[BlkRelocIdx]) & ~(uintptr_t)4095, hi = ((uintptr_t)b.p + o->off[BlkData] + 4095) & ~(uintptr_t)4095;
 		madvise((void *)lo, hi - lo, 22 /* MADV_POPULATE_READ */);
 	}
 	return o;
