@@ -1,12 +1,12 @@
 # STATUS (at most ten lines; updated at every milestone and whenever Dan is needed)
 
-2026-11-13T18:13:33Z. Campaign 1. M0-M2 reached; M3 nearly (45 of MinIO's 46 test packages agree with the stock link,
-`cmd` still running). Oracle: 5 programs, 259/259 std test binaries, MinIO --version + 45 packages; secdiff
-(symbolic section diff vs go tool link) exists and is being driven to zero differences by a builder.
-Speed, MinIO, 8 cores: hardware floor 6.9 ms; stock 1,750 ms; fclink 303; hlink 251 this morning, **173-182
-now** (overwrite-in-place or hugetlbfs output, detached teardown); front half rewritten, not yet measured on a
-quiet machine. Honest projection for this design on stock objects: 35-45 ms (15-20% of floor), above the
-kill line (69 ms) and short of the exit line (21 ms).
+2026-11-13T18:24:13Z (stopped on request). Campaign 1. M0-M3 reached: 5 programs, 259/259 std test binaries, MinIO's 46 test
+packages agree with the stock link (to be rerun on the final linker); kube-apiserver 4 of 18 so far, 0 differ; secdiff
+(symbolic section diff vs go tool link) exists; a builder's fixes for it are on an unmerged branch.
+Speed, MinIO, 8 cores: floor 9.7 ms (model in FLOOR.md); stock 1,750 ms; fclink 303; hlink 251 this morning, **167-182
+now**, about 5% of floor; kube-apiserver 267. All of today's 8-core numbers were taken on a busy machine (FLOOR.md's
+243 ms MinIO row is a disturbed run). Projection for this design on stock objects: 35-45 ms: above the kill line,
+short of the exit line. Default in-place overwrite of the output is unsafe against a concurrent link (fix in flight; -fresh avoids it).
 
 ## Decisions for Dan
 
