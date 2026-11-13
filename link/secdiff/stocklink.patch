@@ -1,0 +1,118 @@
+diff -ruN /usr/local/go/src/cmd/link/internal/ld/dumpmap.go link/internal/ld/dumpmap.go
+--- /usr/local/go/src/cmd/link/internal/ld/dumpmap.go	1970-01-01 00:00:00.000000000 +0000
++++ link/internal/ld/dumpmap.go	2026-11-13 17:28:50.963889746 +0000
+@@ -0,0 +1,89 @@
++// Copyright 2026 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++package ld
++
++// -dumpmap FILE: after the output is written, list where everything went, for secdiff (a symbolic diff
++// against another linker's output). One line per section and per placed symbol:
++//
++//	X <vaddr-hex> <length-dec> <section-name>
++//	S <addr-hex> <size-dec> <section-name> <name>
++//	L <addr-hex> <align-dec> <name>        (only when the symbol's alignment is not the size-derived default)
++//
++// The name is the rest of the line. Every symbol with a section is listed (the ones the linker makes,
++// carrier symbols and the symbols they carry); funcdata symbols, which have no section of their own and
++// whose value is an offset in go:func.*, are listed at go:func.*'s address plus that offset, in section
++// ".gopclntab". Nothing here changes the output.
++
++import (
++	"bufio"
++	"flag"
++	"fmt"
++	"os"
++	"strings"
++
++	"cmd/link/internal/loader"
++)
++
++var (
++	flagDumpmap  = flag.String("dumpmap", "", "write a symbol map to `file` (for secdiff)")
++	dumpFuncdata []loader.Sym
++	dumpGofunc   loader.Sym
++)
++
++func (ctxt *Link) dumpmap(file string) {
++	f, err := os.Create(file)
++	if err != nil {
++		Exitf("%v", err)
++	}
++	w := bufio.NewWriterSize(f, 1<<20)
++	ldr := ctxt.loader
++	for _, seg := range Segments {
++		if seg == &Segdwarf {
++			continue
++		}
++		for _, sect := range seg.Sections {
++			fmt.Fprintf(w, "X %x %d %s\n", sect.Vaddr, sect.Length, sect.Name)
++		}
++	}
++	defAlign := func(size int64) int32 {
++		a := int32(thearch.Maxalign)
++		for int64(a) > size && a > int32(thearch.Minalign) {
++			a >>= 1
++		}
++		return a
++	}
++	for s := loader.Sym(1); s < loader.Sym(ldr.NSym()); s++ {
++		sect := ldr.SymSect(s)
++		if sect == nil || sect.Seg == &Segdwarf {
++			continue
++		}
++		name := ldr.SymName(s)
++		if strings.ContainsAny(name, "\n") {
++			name = strings.ReplaceAll(name, "\n", "\\n")
++		}
++		v, size := ldr.SymValue(s), ldr.SymSize(s)
++		fmt.Fprintf(w, "S %x %d %s %s\n", v, size, sect.Name, name)
++		if a := ldr.SymAlign(s); a != 0 && a != defAlign(size) {
++			fmt.Fprintf(w, "L %x %d %s\n", v, a, name)
++		}
++	}
++	if dumpGofunc != 0 {
++		base := ldr.SymValue(dumpGofunc)
++		for _, s := range dumpFuncdata {
++			if ldr.SymSize(s) == 0 {
++				continue
++			}
++			v, size := base+ldr.SymValue(s), ldr.SymSize(s)
++			fmt.Fprintf(w, "S %x %d %s %s\n", v, size, ".gopclntab", ldr.SymName(s))
++			if a := ldr.SymAlign(s); a != 0 && a != defAlign(size) {
++				fmt.Fprintf(w, "L %x %d %s\n", v, a, ldr.SymName(s))
++			}
++		}
++	}
++	if err := w.Flush(); err != nil {
++		Exitf("%v", err)
++	}
++	f.Close()
++}
+diff -ruN /usr/local/go/src/cmd/link/internal/ld/main.go link/internal/ld/main.go
+--- /usr/local/go/src/cmd/link/internal/ld/main.go	2026-11-02 20:36:20.000000000 +0000
++++ link/internal/ld/main.go	2026-11-13 17:28:43.963740304 +0000
+@@ -477,6 +477,10 @@
+ 
+ 	bench.Start("Munmap")
+ 	ctxt.Out.Close() // Close handles Munmapping if necessary.
++	if *flagDumpmap != "" {
++		bench.Start("dumpmap")
++		ctxt.dumpmap(*flagDumpmap)
++	}
+ 
+ 	bench.Start("hostlink")
+ 	ctxt.hostlink()
+diff -ruN /usr/local/go/src/cmd/link/internal/ld/pcln.go link/internal/ld/pcln.go
+--- /usr/local/go/src/cmd/link/internal/ld/pcln.go	2026-11-02 20:36:20.000000000 +0000
++++ link/internal/ld/pcln.go	2026-11-13 17:28:43.963740304 +0000
+@@ -655,6 +655,7 @@
+ 	}
+ 
+ 	state.funcdata = state.addGeneratedSym(ctxt, "go:func.*", size, maxAlign, writeFuncData)
++	dumpFuncdata, dumpGofunc = fdSyms, state.funcdata // -dumpmap
+ 
+ 	// Because the funcdata previously was not in pclntab,
+ 	// we need to keep the visible symbol so that tools can find it.
