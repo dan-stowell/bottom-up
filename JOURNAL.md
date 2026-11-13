@@ -27,3 +27,10 @@
   4.5% of it. The OS limits as first measured add 48 ms (open 1,312 files 4 ms, create a 110 MB file 34 ms,
   fault in and unmap inputs 10 ms): **the kernel, not the memory bus, binds this link**, so the exit test
   (39 ms) needs the file-creation and teardown costs reshaped, not only the phases.
+- 2026-11-13T17:30:31Z Codex review of the floor (REVIEWS.md): the floor was lenient by 2x. A copy at 43-52 GB/s moves each
+  byte twice; measured separately, DRAM reads stream at 92.5 GB/s and non-temporal writes at 56.6 GB/s on 8
+  cores. **MinIO's hardware floor is 6.9 ms, kube-apiserver's 11.7 ms**; fclink is at 2.3% / 2.2%. Kill line
+  (10% of floor) = 69 ms for MinIO; exit line (3x) = 21 ms. kube-apiserver frozen (2,080 files, 1.97 GB of Go
+  object, 13.2 M slots; fclink 532 ms). `explore/linkos/outfile.c`: 110 MB into a new ext4 file through a
+  shared mapping costs 31-39 ms on 8 threads, into an existing cached file 13 ms, into fresh anonymous memory
+  10.7 ms: it is the 4 KiB page fault (about 3 us each here) that costs, not the file system alone.

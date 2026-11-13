@@ -2,6 +2,7 @@
 //   gcc -O2 -march=native -pthread -o build/linklimits hw/linklimits.c && build/linklimits <scratch dir on the disk>
 // Every figure is the best of several runs (the host is noisy: the best run is the least disturbed one).
 //   copy_<level>_<n>t      bytes/s copied by n threads, each inside its own block that fits the level
+//   read_dram_<n>t / write_dram_<n>t   bytes/s of a read-only stream (summed) and of a non-temporal fill
 //   instr_<n>t             instructions/s of a dependency-free scalar loop (the dispatch limit)
 //   rand_<size>_<n>t       independent random 8-byte loads/s from a table of that size (memory-level parallelism)
 //   chase_<size>           dependent loads/s (one pointer chain: the latency of a miss)
@@ -45,7 +46,9 @@ static double par(int n, void (*f)(int, void *), void *arg) {
 static int threads[] = {1, 2, 4, 8};
 
 // ---- copy
+#include <immintrin.h>
 static struct { size_t block; size_t total; char *mem; } cp;
+__m256i rd_sink256[64];   // (not static: the sums must be stored)
 static void copy_work(int id, void *arg) {
   char *a = cp.mem + (size_t)id * 2 * cp.block, *b = a + cp.block;
   for (size_t done = 0; done < cp.total; done += cp.block) { memcpy(b, a, cp.block); __asm__ volatile("" : : "r"(b) : "memory"); }
@@ -59,6 +62,32 @@ static void copy_level(const char *name, size_t block, size_t total) {
     printf("copy_%s_%dt %.0f\n", name, n, (double)total * n / best);
   }
   munmap(cp.mem, 16 * block);
+}
+
+// ---- one-directional streams over DRAM-sized blocks: read (sum) and write (non-temporal fill)
+#include <immintrin.h>
+static void read_work(int id, void *arg) {
+  const char *a = cp.mem + (size_t)id * 2 * cp.block; __m256i s = _mm256_setzero_si256();
+  for (size_t done = 0; done < cp.total; done += cp.block)
+    for (size_t o = 0; o < cp.block; o += 64) { s = _mm256_add_epi64(s, _mm256_load_si256((const __m256i *)(a + o))); s = _mm256_add_epi64(s, _mm256_load_si256((const __m256i *)(a + o + 32))); }
+  rd_sink256[id] = s; __asm__ volatile("" : : "x"(s) : "memory");
+}
+static void write_work(int id, void *arg) {
+  char *a = cp.mem + (size_t)id * 2 * cp.block; __m256i v = _mm256_set1_epi8(5);
+  for (size_t done = 0; done < cp.total; done += cp.block) {
+    for (size_t o = 0; o < cp.block; o += 64) { _mm256_stream_si256((__m256i *)(a + o), v); _mm256_stream_si256((__m256i *)(a + o + 32), v); }
+    _mm_sfence();
+  }
+}
+static void stream_dram(void) {
+  cp.block = 256 << 20; cp.total = 2ull << 30; cp.mem = mmap(0, 16 * cp.block, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  memset(cp.mem, 1, 16 * cp.block);
+  for (int k = 0; k < 4; k++) {
+    int n = threads[k]; double br = 1e300, bw = 1e300;
+    for (int r = 0; r < 7; r++) { double t = par(n, read_work, 0); if (t < br) br = t; t = par(n, write_work, 0); if (t < bw) bw = t; }
+    printf("read_dram_%dt %.0f\nwrite_dram_%dt %.0f\n", n, (double)cp.total * n / br, n, (double)cp.total * n / bw);
+  }
+  munmap(cp.mem, 16 * cp.block);
 }
 
 // ---- instructions
@@ -83,10 +112,10 @@ static void instr_work2(int id, void *arg) {
 // ---- random loads
 static struct { uint64_t *tab; size_t mask; size_t n; uint64_t sink[64]; } rd;
 static void rand_work(int id, void *arg) {
-  uint64_t x = 88172645463325252ull + id * 7919, s = 0;
+  uint64_t s = 0, base = (uint64_t)id * 0x632BE59BD9B4E019ull;
   for (size_t i = 0; i < rd.n; i++) {
-    x ^= x << 13; x ^= x >> 7; x ^= x << 17;       // xorshift: the index does not depend on the loads
-    s += rd.tab[x & rd.mask];
+    uint64_t x = (base + i) * 0x9E3779B97F4A7C15ull;   // a counter through a multiplicative hash: no index depends on another
+    s += rd.tab[(x >> 20) & rd.mask];
   }
   rd.sink[id] = s;
 }
@@ -142,6 +171,7 @@ int main(int argc, char **argv) {
   copy_level("l2", 256 << 10, 4ull << 30);
   copy_level("l3", 1 << 20, 4ull << 30);    // 8 threads x 2 MiB = half of the 32 MiB L3
   copy_level("dram", 256 << 20, 2ull << 30);
+  stream_dram();
 
   for (int k = 0; k < 4; k++) {
     int n = threads[k]; double best = 1e300, best2 = 1e300;
@@ -156,7 +186,11 @@ int main(int argc, char **argv) {
     size_t n = sizes[s] / 8;
     rd.tab = mmap(0, sizes[s], PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     uint64_t x = 1;
-    for (size_t i = 0; i < n; i++) { x ^= x << 13; x ^= x >> 7; x ^= x << 17; rd.tab[i] = x; }
+    for (size_t i = 0; i < n; i++) rd.tab[i] = i;
+    for (size_t i = n - 1; i > 0; i--) {              // Sattolo: a single cycle through every entry
+      x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+      size_t k = x % i; uint64_t t = rd.tab[i]; rd.tab[i] = rd.tab[k]; rd.tab[k] = t;
+    }
     rd.mask = n - 1; rd.n = 20000000;
     for (int k = 0; k < 4; k++) {
       int t = threads[k]; double best = 1e300;

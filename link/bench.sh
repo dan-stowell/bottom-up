@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Time a linker on a frozen workload (link/freeze.sh) on 1, 2, 4 and 8 cores, warm and cold.
 #   link/bench.sh <workload> [linker=build/hlink] [rounds=7]     -> link/results/<workload>.<linker name>.tsv
-# Rows: "<cores> <phase> <ms>" from the linker's -stats table of its fastest run on that many cores (taskset
-# and -j both set), plus phase "process" (the whole process by the caller's clock, start to exit: the minimum
-# over the rounds) and, for 8 cores, "cold" (process time after dropping the page cache; the output directory
+# Rows: "<cores> <phase> <ms>" from the linker's -stats table of the run whose whole process was fastest on that
+# many cores (taskset and -j both set), plus phase "process" (that run's whole process by the caller's clock,
+# start to exit) and, for 8 cores, "cold" (process time after dropping the page cache; the output directory
 # stays). Core counts are interleaved within a round so that drift on this noisy host hits all of them alike.
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -18,13 +18,13 @@ run() { # run <cores> -> prints process ms; stats in $out/stats
   t1=$(date +%s%N)
   echo $(( (t1 - t0) / 1000 ))
 }
-declare -A best beststats
+declare -A best
 for r in $(seq 1 "$rounds"); do
   for j in 8 1 4 2; do
     us=$(run $j)
     tot=$(awk '$1=="total"{print int($2*1000)}' "$out/stats")
-    if [ -z "${best[$j]:-}" ] || [ "$us" -lt "${best[$j]}" ]; then best[$j]=$us; fi
-    if [ -z "${beststats[$j]:-}" ] || [ "$tot" -lt "${beststats[$j]%% *}" ]; then beststats[$j]="$tot $(awk '{printf "%s:%s;", $1, $2}' "$out/stats")"; cp "$out/stats" "$out/stats.$j"; fi
+    # the fastest whole process on this many cores, and the phase table of that same run
+    if [ -z "${best[$j]:-}" ] || [ "$us" -lt "${best[$j]}" ]; then best[$j]=$us; cp "$out/stats" "$out/stats.$j"; fi
   done
 done
 cold=""
