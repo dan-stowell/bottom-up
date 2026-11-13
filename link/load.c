@@ -183,9 +183,21 @@ typedef struct {
 	str pkg;
 	const char *file;
 	VEC(object *) objs;
+	vecu32 imps; // the libraries its objects' Autolib blocks name, in order (loadOrder)
 } lib;
 static lib *libs;
 static long nlibs;
+static strmap libByPkg; // package path -> index in libs
+
+// libImports appends to l->imps the libraries object o imports (its Autolib block), for loadOrder
+#define ImportedPkgSize 16 // goobj.ImportedPkg: a string reference (8 bytes) and a fingerprint (8)
+static void libImports(lib *l, const object *o) {
+	u32 na = (o->off[BlkAutolib + 1] - o->off[BlkAutolib]) / ImportedPkgSize;
+	for (u32 a = 0; a < na; a++) {
+		long *x = smFind(&libByPkg, oStringRef(o, o->off[BlkAutolib] + a * ImportedPkgSize));
+		if (x) VPUSH(l->imps, (u32)*x);
+	}
+}
 
 static const char *fileExt(const char *name, size_t n) {
 	for (size_t i = n; i > 0; i--) {
@@ -200,8 +212,12 @@ static void loadLib(void *ctx UNUSED, int w UNUSED, long i) {
 	bytes b = mapFile(l->file);
 	if (!bhasPrefix(b, "!<arch>\n", 8)) {
 		object *o = newObject(l->pkg, l->file, b);
-		if (o) VPUSH(l->objs, o);
-		else errorf("%s: not a Go object or archive", l->file);
+		if (o) {
+			VPUSH(l->objs, o);
+			libImports(l, o);
+		} else {
+			errorf("%s: not a Go object or archive", l->file);
+		}
 		return;
 	}
 	for (size_t off = 8; off + 60 <= b.n;) {
@@ -236,7 +252,10 @@ static void loadLib(void *ctx UNUSED, int w UNUSED, long i) {
 			if (!(elen == 2 && memcmp(ext, ".o", 2) == 0) && !(elen == 5 && memcmp(ext, ".syso", 5) == 0)) continue;
 		}
 		object *o = newObject(l->pkg, l->file, body);
-		if (o) VPUSH(l->objs, o);
+		if (o) {
+			VPUSH(l->objs, o);
+			libImports(l, o);
+		}
 	}
 }
 
@@ -257,44 +276,32 @@ static void loadPkgBase(void *ctx UNUSED, int w UNUSED, long i) {
 // appends its Autolib block (the packages it imports) to its library's list and addImports adds each of
 // them that is new (addlib), member by member of an archive; when the list is exhausted loadinternal adds
 // runtime if it is not loaded yet, and loading resumes. Libraries of the importcfg nothing imports, which the
-// stock linker never loads, come last, in importcfg order. Serial, but only over the Autolib entries
-// (tens of thousands of lookups); the files were mapped in parallel before.
-#define ImportedPkgSize 16 // goobj.ImportedPkg: a string reference (8 bytes) and a fingerprint (8)
+// stock linker never loads, come last, in importcfg order. The Autolib entries were resolved to libraries
+// while the files were mapped, in parallel (libImports); this walk is serial over small integer arrays.
 static long *loadOrder(long mainLib) {
 	long *order = malloc(MAX(nlibs, 1) * sizeof *order);
 	bool *seen = calloc((size_t)MAX(nlibs, 1), 1);
-	strmap byPkg;
-	smInit(&byPkg, (size_t)nlibs);
-	for (long i = 0; i < nlibs; i++) smPut(&byPkg, libs[i].pkg, i, NULL);
+	long *rt = smFind(&libByPkg, cstr("runtime"));
 	long n = 0;
 	order[n++] = mainLib;
 	seen[mainLib] = true;
 	for (long q = 0; q < n; q++) {
 		lib *l = &libs[order[q]];
-		for (size_t k = 0; k < l->objs.n; k++) {
-			object *o = l->objs.a[k];
-			u32 na = (o->off[BlkAutolib + 1] - o->off[BlkAutolib]) / ImportedPkgSize;
-			for (u32 a = 0; a < na; a++) {
-				long *x = smFind(&byPkg, oStringRef(o, o->off[BlkAutolib] + a * ImportedPkgSize));
-				if (x && !seen[*x]) {
-					seen[*x] = true;
-					order[n++] = *x;
-				}
+		for (size_t k = 0; k < l->imps.n; k++) {
+			u32 x = l->imps.a[k];
+			if (!seen[x]) {
+				seen[x] = true;
+				order[n++] = x;
 			}
 		}
-		if (q + 1 == n) { // loadinternal(ctxt, "runtime")
-			long *x = smFind(&byPkg, cstr("runtime"));
-			if (x && !seen[*x]) {
-				seen[*x] = true;
-				order[n++] = *x;
-			}
+		if (q + 1 == n && rt && !seen[*rt]) { // loadinternal(ctxt, "runtime")
+			seen[*rt] = true;
+			order[n++] = *rt;
 		}
 	}
 	for (long i = 0; i < nlibs; i++)
 		if (!seen[i]) order[n++] = i;
 	free(seen);
-	free(byPkg.keys);
-	free(byPkg.vals);
 	return order;
 }
 
@@ -367,9 +374,13 @@ static void load(const char *cfgFile, const char *mainFile) {
 	}
 	libs = ls.a;
 	nlibs = (long)ls.n;
+	smInit(&libByPkg, (size_t)nlibs);
+	for (long i = 0; i < nlibs; i++) smPut(&libByPkg, libs[i].pkg, i, NULL);
 	par(nlibs, loadLib, NULL);
 	if (nerrs != 0) return;
+	double tOrder = nowSeconds();
 	long *order = loadOrder(mainLib);
+	tOrder = nowSeconds() - tOrder;
 
 	u32 next = 1;
 	u64 nsym[5] = {0};
@@ -426,7 +437,7 @@ static void load(const char *cfgFile, const char *mainFile) {
 	par(nobjs, loadPkgBase, NULL);
 	lap("load",
 	    "%ld files, %d objects, %ld units; slots: %llu by index, %llu+%llu by content hash, %llu defined by name, %llu "
-	    "references by name; %ld of the slots in bare .o files",
+	    "references by name; %ld of the slots in bare .o files; load order %.2f ms",
 	    nlibs, nobjs, nunits, (unsigned long long)nsym[0], (unsigned long long)nsym[1], (unsigned long long)nsym[2],
-	    (unsigned long long)nsym[3], (unsigned long long)nsym[4], bareSlots);
+	    (unsigned long long)nsym[3], (unsigned long long)nsym[4], bareSlots, tOrder * 1e3);
 }
