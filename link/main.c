@@ -190,6 +190,7 @@ static const flagdef flagdefs[] = {
 	{"dumplive", 0, &flagDumpLive},
 	{"dumpmap", 0, &flagDumpMap},
 	{"E", 0, &flagEntry},
+	{"hugetlb", 1, &flagHugetlb},
 	{"X", 3, NULL},
 	// accepted for compatibility with the go command's link line
 	{"buildmode", 0, &ignoredStr},
@@ -204,7 +205,7 @@ static const flagdef flagdefs[] = {
 
 static void usage(void) {
 	fprintf(stderr, "usage: hlink -o out -importcfg importcfg.link [-buildid id] [-X pkg.name=val]... [-stats] [-j N] [-nodce] "
-	                "[-dumplive file] [-dumpmap file] [-E entry] main.o\n");
+	                "[-dumplive file] [-dumpmap file] [-E entry] [-hugetlb] main.o\n");
 	_exit(2);
 }
 
@@ -292,6 +293,18 @@ static char *buildVersion(void) {
 	return s;
 }
 
+// onHugetlbfs says whether a new file at path would be on hugetlbfs (statfs of its directory).
+static bool onHugetlbfs(const char *path) {
+	char *dir = strdup(path), *slash = strrchr(dir, '/');
+	if (!slash) strcpy(dir, ".");
+	else if (slash == dir) dir[1] = 0;
+	else *slash = 0;
+	struct statfs sf;
+	bool huge = statfs(dir, &sf) == 0 && (unsigned long)sf.f_type == HUGETLBFS_MAGIC_;
+	free(dir);
+	return huge;
+}
+
 static void load(const char *cfgFile, const char *mainFile);
 static void resolve(void);
 static void inittasks(void);
@@ -308,6 +321,9 @@ int main(int argc, char **argv) {
 	phaseC0 = linkCPU0;
 	int first = parseFlags(argc, argv);
 	if (argc - first != 1 || !*flagImportcfg) fatalf("usage: hlink -o out -importcfg importcfg.link [-buildid id] [-stats] main.o");
+	outOnHugetlbfs = onHugetlbfs(flagOut);
+	outHuge = flagHugetlb || outOnHugetlbfs;
+	if (outHuge) segAlign = hugePage;
 	nthreads = flagJ;
 	if (nthreads <= 0) {
 		cpu_set_t cs;

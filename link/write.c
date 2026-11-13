@@ -11,14 +11,63 @@ static u32 deferreturnAddr, unreachableMethodAddr, mapinitnoopAddr;
 static FILE *mapFile_; // -dumpmap
 static void writeUnitTask(void *ctx, int w, long ui);
 
-static void writeOut(void) {
-	long long fileEnd = (long long)(lay.edata - imageBase);
-	outSize = fileEnd + shdrRoom;
+// hugeFree: the huge pages free for a new reservation, from /proc/meminfo (for the error message).
+static long hugeFree(void) {
+	FILE *f = fopen("/proc/meminfo", "r");
+	if (!f) return -1;
+	char line[256];
+	long fr = -1, rsvd = 0;
+	while (fgets(line, sizeof line, f)) {
+		sscanf(line, "HugePages_Free: %ld", &fr);
+		sscanf(line, "HugePages_Rsvd: %ld", &rsvd);
+	}
+	fclose(f);
+	return fr < 0 ? -1 : fr - rsvd;
+}
+
+// createHuge makes the output on hugetlbfs: a new file (write() does not work there; ftruncate + a shared
+// mapping does). The shared mapping is made without MAP_NORESERVE, so the kernel reserves every huge page of it
+// now or fails the mmap with ENOMEM: a page the write pass touches later is always there (touching an unreserved
+// one would be SIGBUS). The pages come zeroed, which is what bss and noptrbss must read as.
+static void createHuge(void) {
+	outFd = open(flagOut, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0755);
+	if (outFd < 0) fatalf("open %s: %s", flagOut, strerror(errno));
+	if (ftruncate(outFd, outSize) < 0) fatalf("truncate %s: %s", flagOut, strerror(errno));
+	out = mmap(NULL, (size_t)outSize, PROT_READ | PROT_WRITE, MAP_SHARED, outFd, 0);
+	if (out == MAP_FAILED) {
+		int e = errno;
+		long need = (long)(outSize / hugePage), fr = hugeFree();
+		if (e == ENOMEM)
+			fatalf("%s is on hugetlbfs and needs %ld free 2 MiB huge pages; %ld are free (raise sysctl vm.nr_hugepages, or "
+			       "remove files from the mount: they hold their pages)", flagOut, need, fr);
+		fatalf("mmap %s: %s", flagOut, strerror(e));
+	}
+}
+
+static void openOutput(void) {
+	if (outOnHugetlbfs) {
+		createHuge();
+		return;
+	}
 	outFd = open(flagOut, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0755);
 	if (outFd < 0) fatalf("open %s: %s", flagOut, strerror(errno));
 	if (ftruncate(outFd, outSize) < 0) fatalf("truncate %s: %s", flagOut, strerror(errno));
 	out = mmap(NULL, (size_t)outSize, PROT_READ | PROT_WRITE, MAP_SHARED, outFd, 0);
 	if (out == MAP_FAILED) fatalf("mmap %s: %s", flagOut, strerror(errno));
+}
+
+// closeOutput gives the file its final size and closes it (writeELF, at the end of finish).
+static void closeOutput(void) {
+	if (ftruncate(outFd, outSize) < 0) fatalf("truncate %s: %s", flagOut, strerror(errno));
+	close(outFd);
+	outFd = -1;
+}
+
+static void writeOut(void) {
+	long long fileEnd = (long long)(lay.edata - imageBase);
+	// (an image for hugetlbfs has bss in the file, and the section table, if any, in a segment's slack)
+	outSize = outHuge ? (long long)rnd(lay.end - imageBase, hugePage) : fileEnd + shdrRoom;
+	openOutput();
 	outMapped = (size_t)outSize;
 	gcDataBit = bigalloc((lay.edata - lay.data) / 64 + 8);
 	gcBssBit = bigalloc((lay.ebss - lay.bss) / 64 + 8);
@@ -26,7 +75,8 @@ static void writeOut(void) {
 	if ((g = lookupC("runtime.deferreturn", 1)) != 0) deferreturnAddr = addr[g];
 	if ((g = lookupC("runtime.unreachableMethod", 1)) != 0) unreachableMethodAddr = addr[g];
 	if ((g = lookupC("runtime.mapinitnoop", 1)) != 0) mapinitnoopAddr = addr[g];
-	lap("create", "%s", "");
+	if (outOnHugetlbfs) lap("create", "new file on hugetlbfs, %lld huge pages", outSize / hugePage);
+	else lap("create", "new file");
 	if (*flagDumpMap) {
 		mapFile_ = fopen(flagDumpMap, "w");
 		if (!mapFile_) fatalf("create %s: %s", flagDumpMap, strerror(errno));
