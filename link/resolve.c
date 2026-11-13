@@ -89,7 +89,6 @@ typedef struct {
 
 typedef struct {
 	plist names[nParts];
-	plist hashes[nHashParts];
 	u8 *slab, *slabEnd;
 	u32 *scratch; // a partition's grouping table: indices into ent
 	tent *ent;
@@ -327,75 +326,126 @@ static void resolveJoin(void *ctx UNUSED, int w, long task) {
 // inherits the flags of all of them. Which copies were reached does not depend on thread timing (every
 // reached copy that has relocations is flooded, not only the first seen), so neither does the winner.
 #define hashedFlags (stLive | stPC | stFuncdata | stNameNeeded)
-#define valShort (1ull << 63) // a record of a short (64-bit) hash: never equal to one of a long hash
+// A record of this join is 16 bytes, four to a cache line: 96 bits of the hash and the id. (For a short hash,
+// k1 is the whole 8 bytes of content and k2 the symbol's size: the largest copy wins.) They are collected in
+// chunks like the records by name.
+typedef struct {
+	u64 k1;
+	u32 k2, gid;
+} hrec;
+#define hchunkRecs 126
+typedef struct hchunk {
+	struct hchunk *next;
+	u64 n;
+	hrec r[hchunkRecs];
+} hchunk;
+typedef struct {
+	hchunk *head, *tail;
+} hlist;
+#define nShortParts 16
+typedef struct {
+	hlist longs[nHashParts], shorts[nShortParts];
+	char pad[64];
+} hashWorker;
+static hashWorker *hws;
+static inline void hrecAdd(resolveWorker *w, hlist *l, hrec r) {
+	hchunk *c = l->tail;
+	if (!c || c->n == hchunkRecs) {
+		hchunk *d = slabAlloc(w, sizeof(hchunk));
+		d->next = NULL;
+		d->n = 0;
+		if (c) c->next = d;
+		else l->head = d;
+		l->tail = c = d;
+	}
+	c->r[c->n++] = r;
+}
 static void hashedRecords(void *ctx UNUSED, int w, long ui) {
 	unit *u = &units[ui];
 	resolveWorker *rw = &rws[w];
+	hashWorker *hw = &hws[w];
 	object *o = u->o;
 	u32 h64Lo = o->ndef, hLo = o->ndef + o->nh64, npLo = hLo + o->nh;
 	const u8 *h64 = o->b + o->off[BlkHash64], *hh = o->b + o->off[BlkHash];
 	for (u32 j = MAX(u->lo, h64Lo); j < MIN(u->hi, npLo); j++) {
 		u32 gid = o->base + j;
 		if ((FL(gid) & hashedFlags) == 0) continue;
-		u64 size = symSiz(osym(o, j));
 		if (j < hLo) {
-			u64 h = ld64(h64 + (size_t)(j - h64Lo) * 8), k = mix64(h ^ 0x5851F42D4C957F2Dull);
-			recAdd(rw, &rw->hashes[k >> (64 - 9)], (rec){k, h, valShort | size << 32 | (u32)~gid});
+			u64 h = ld64(h64 + (size_t)(j - h64Lo) * 8);
+			hrecAdd(rw, &hw->shorts[mix64(h) >> (64 - 4)], (hrec){h, symSiz(osym(o, j)), gid});
 		} else {
 			const u8 *h = hh + (size_t)(j - hLo) * HashSize;
 			u64 k1 = ld64(h);
-			recAdd(rw, &rw->hashes[k1 >> (64 - 9)], (rec){k1, ld64(h + 8), size << 32 | (u32)~gid});
+			hrecAdd(rw, &hw->longs[k1 >> (64 - 9)], (hrec){k1, ld32(h + 8), gid});
 		}
 	}
 }
-static void hashedJoin(void *ctx UNUSED, int w, long p) {
+// The winner of a class: of long hashes, the lowest id; of short hashes, the largest copy, then the lowest id.
+static void hashedJoin(void *ctx UNUSED, int w, long task) {
 	resolveWorker *rw = &rws[w];
+	bool isShort = task >= nHashParts;
 	u64 n = 0;
+#define HLIST(t) (isShort ? &hws[t].shorts[task - nHashParts] : &hws[t].longs[task])
 	for (int t = 0; t < nthreads; t++)
-		for (chunk *c = rws[t].hashes[p].head; c; c = c->next) n += c->n;
+		for (hchunk *c = HLIST(t)->head; c; c = c->next) n += c->n;
 	if (n == 0) return;
 	u32 size, nd = 0;
 	scratchFor(rw, n, &size);
 	u32 *idx = rw->scratch, mask = size - 1;
-	tent *ent = rw->ent;
-	// (the low bits of k1 pick the entry: its top 9 picked the partition)
+	hrec *ent = (hrec *)rw->ent; // (a group's key and its winner so far)
 	for (int t = 0; t < nthreads; t++)
-		for (chunk *c = rws[t].hashes[p].head; c; c = c->next)
+		for (hchunk *c = HLIST(t)->head; c; c = c->next)
 			for (u32 i = 0; i < c->n; i++) {
-				rec *r = &c->r[i];
-				for (u32 h = (u32)r->k1 & mask;; h = (h + 1) & mask) {
+				hrec *r = &c->r[i];
+				u64 k = isShort ? mix64(r->k1) : r->k1; // (a long hash's top 9 bits picked the partition)
+				for (u32 h = (u32)k & mask;; h = (h + 1) & mask) {
 					u32 e = idx[h];
 					if (!e) {
 						idx[h] = ++nd;
-						ent[nd - 1] = (tent){r->k1, r->k2, r->val};
-						r->k2 = nd - 1; // (the record remembers its group for the second pass)
+						ent[nd - 1] = *r;
 						break;
 					}
-					if (ent[e - 1].k1 == r->k1 && ent[e - 1].k2 == r->k2 && (ent[e - 1].val ^ r->val) >> 63 == 0) {
-						if (r->val > ent[e - 1].val) ent[e - 1].val = r->val;
-						r->k2 = e - 1;
+					hrec *g = &ent[e - 1];
+					if (g->k1 != r->k1) continue;
+					if (isShort) {
+						if (r->k2 > g->k2 || (r->k2 == g->k2 && r->gid < g->gid)) *g = *r;
+						break;
+					}
+					if (g->k2 == r->k2) {
+						if (r->gid < g->gid) g->gid = r->gid;
 						break;
 					}
 				}
 			}
+	// every copy learns its class's winner (found again by its key: the tables are in this core's cache)
 	for (int t = 0; t < nthreads; t++)
-		for (chunk *c = rws[t].hashes[p].head; c; c = c->next)
+		for (hchunk *c = HLIST(t)->head; c; c = c->next)
 			for (u32 i = 0; i < c->n; i++) {
-				rec *r = &c->r[i];
-				u32 gid = ~(u32)r->val, win = ~(u32)ent[r->k2].val;
-				if (win != gid) {
-					canon[gid] = win;
-					SF(gid) |= sfRedir;
-					FL(win) |= FL(gid) & hashedFlags; // (a class is in one partition: no other thread writes these)
+				hrec *r = &c->r[i];
+				u64 k = isShort ? mix64(r->k1) : r->k1;
+				u32 win;
+				for (u32 h = (u32)k & mask;; h = (h + 1) & mask) {
+					hrec *g = &ent[idx[h] - 1];
+					if (g->k1 == r->k1 && (isShort || g->k2 == r->k2)) {
+						win = g->gid;
+						break;
+					}
+				}
+				if (win != r->gid) {
+					canon[r->gid] = win;
+					SF(r->gid) |= sfRedir;
+					FL(win) |= FL(r->gid) & hashedFlags; // (a class is in one partition: no other thread writes these)
 				}
 			}
+#undef HLIST
 	rw->nrec[1] += (long)n;
 	rw->nrec[2] += (long)nd;
 }
 static long nHashedReached, nHashedClasses;
 static void resolveHashed(void) {
+	hws = calloc((size_t)nthreads, sizeof(hashWorker));
 	par(nunits, hashedRecords, NULL);
-	par(nHashParts, hashedJoin, NULL);
+	par(nHashParts + nShortParts, hashedJoin, NULL);
 	for (int t = 0; t < nthreads; t++) {
 		nHashedReached += rws[t].nrec[1];
 		nHashedClasses += rws[t].nrec[2];
