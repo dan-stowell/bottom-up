@@ -746,6 +746,8 @@ func defineRules() {
 		"cmd/link fips140.go makes them 1-byte STEXTFIPSSTART/END text symbols, so they are in Textp and get a _func (pcln.go makePclntab); they hold no code and nothing calls them; hlink defines them as boundaries")
 	rep.defRule("F2", "hlink's file tables list every file of an object with a live function; the stock ones only the files live functions use",
 		"cmd/link pcln.go generateFilenameTabs walks the pcfile tables of the live functions (walkFilenames) and trims each CU's cutab to its largest used index; the runtime only reaches files through pcfile, which is compared decoded to names; the stock file names must all be in hlink's table")
+	rep.defRule("P1", "the stock pctab is longer by its rounding to 8 bytes",
+		"cmd/link pcln.go addGeneratedSym rounds every pclntab piece's size up to the pointer size; allowed only when both binaries' functions reference exactly the same number of pctab bytes and each side has fewer than 9 unreferenced bytes (offset 0 is reserved in both)")
 	rep.defRule("D1", "a relocation resolves to a different one of several identical duplicates (same name, size and content)",
 		"static symbols with the same name and identical content (e.g. two packages' identical ..stmp_N) are interchangeable; which one a reference picks is not observable")
 }

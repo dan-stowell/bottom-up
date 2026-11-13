@@ -41,6 +41,8 @@ type side struct {
 	nfunc   int
 	funcs   []fn
 	byEntry map[uint64]int
+
+	pctabRefd, pctabUnref uint64
 }
 
 type fn struct {
@@ -285,6 +287,42 @@ func (d *differ) checkPclntab() {
 		if last := sd.funcs[len(sd.funcs)-1]; last.end < last.entry {
 			rep.diff("pclntab", sd.name+": end of the last function before its entry", "%s", last.name)
 		}
+	}
+	// pctab: the bytes the functions reference
+	for _, sd := range sds {
+		ref := map[uint32]int{}
+		for i := range sd.funcs {
+			f := &sd.funcs[i]
+			for _, o := range append([]uint32{f.pcsp, f.pcfile, f.pcln}, f.pcdata...) {
+				if _, ok := ref[o]; !ok && o != 0 {
+					b, _ := sd.pcvalue(o)
+					ref[o] = len(b)
+				}
+			}
+		}
+		offs := make([]uint32, 0, len(ref))
+		for o := range ref {
+			offs = append(offs, o)
+		}
+		sort.Slice(offs, func(i, j int) bool { return offs[i] < offs[j] })
+		covered, end := uint64(0), uint64(0)
+		for _, o := range offs {
+			a, b := uint64(o), uint64(o)+uint64(ref[o])
+			if b > end {
+				covered += b - max(a, end)
+				end = b
+			}
+		}
+		total := sd.md["pctab"][1]
+		sd.pctabUnref = total - covered
+		sd.pctabRefd = covered
+	}
+	if H.pctabRefd == S.pctabRefd && H.pctabUnref < 8+1 && S.pctabUnref < 8+1 {
+		if H.pctabUnref != S.pctabUnref {
+			rep.allow("P1", "pctab: %d bytes referenced in both; unreferenced: hlink %d, stock %d", H.pctabRefd, H.pctabUnref, S.pctabUnref)
+		}
+	} else {
+		rep.diff("pclntab", "pctab: bytes referenced by functions / not referenced differ", "hlink %d / %d, stock %d / %d", H.pctabRefd, H.pctabUnref, S.pctabRefd, S.pctabUnref)
 	}
 	// function by function
 	seen := make([]bool, len(S.funcs))
@@ -644,6 +682,9 @@ func (d *differ) checkModuledata() {
 		st.compared++
 		if hv == sv {
 			st.equal++
+		} else if (hv+7)&^7 == (sv+7)&^7 {
+			st.allowed++
+			rep.allow("P1", "%s: hlink %d bytes, stock %d", f, hv, sv)
 		} else {
 			st.different++
 			rep.diff("moduledata", "table size differs between the binaries", "%s: hlink %d bytes, stock %d", f, hv, sv)
