@@ -1,0 +1,150 @@
+diff -ruN a/dumpmap.go b/dumpmap.go
+--- a/dumpmap.go	1970-01-01 00:00:00.000000000 +0000
++++ b/dumpmap.go	2026-11-13 17:30:44.150452655 +0000
+@@ -0,0 +1,121 @@
++// dumpmap.go (-dumpmap FILE): where everything went, for secdiff (a symbolic diff against the stock
++// linker's output). After the output is complete, one line per symbol placed in the output and one per
++// relocation applied:
++//
++//	S <addr-hex> <size-dec> <bucket-name> <name>
++//	R <site-addr-hex> <siz-dec> <objabi-reloc-type-dec, weak bit cleared> <target-addr-hex> <addend-dec> <target-name>
++//
++// The name is the rest of the line. Buckets: the layout buckets (text, rodata, gofunc, typelink, type, itab,
++// noptrdata, data, bss, noptrbss, ... with "fips" variants), "special" for the symbols whose content the
++// linker writes itself (moduledata, init task lists, string variables, build info, ...), "boundary" for the
++// size-0 symbols that name places in the image (runtime.text, runtime.etypes, go:func.*, ...). The target
++// address is that of the named target in this output, 0 when it is not in the output (a weak reference to
++// an unreachable symbol, which the relocation turned into runtime.unreachableMethod, -1, or left alone).
++package main
++
++import (
++	"bufio"
++	"flag"
++	"os"
++	"sort"
++	"strconv"
++
++	"cmd/internal/objabi"
++)
++
++var (
++	flagDumpmap  = flag.String("dumpmap", "", "write the symbol and relocation map to `file` (for secdiff)")
++	boundaryDefs map[string]uint32
++)
++
++var bucketNames = [nBuckets]string{
++	bNone: "none", bText: "text", bTextFIPS: "textfips", bRodata: "rodata", bRodataFIPS: "rodatafips",
++	bGofunc: "gofunc", bTypelink: "typelink", bType: "type", bItab: "itab", bNoptrdata: "noptrdata",
++	bNoptrdataFIPS: "noptrdatafips", bData: "data", bDataFIPS: "datafips", bBSS: "bss", bNoptrBSS: "noptrbss",
++	bCov: "cov",
++}
++
++func dumpmap(file string) {
++	f, err := os.Create(file)
++	if err != nil {
++		fatalf("%v", err)
++	}
++	w := bufio.NewWriterSize(f, 1<<20)
++	var buf []byte
++	sline := func(a, size uint32, bucket, name string) {
++		buf = append(buf[:0], "S "...)
++		buf = strconv.AppendUint(buf, uint64(a), 16)
++		buf = append(buf, ' ')
++		buf = strconv.AppendUint(buf, uint64(size), 10)
++		buf = append(buf, ' ')
++		buf = append(buf, bucket...)
++		buf = append(buf, ' ')
++		buf = append(buf, name...)
++		buf = append(buf, '\n')
++		w.Write(buf)
++	}
++	for _, list := range [][]*special{roSpecials, dataSpecials} {
++		for _, sp := range list {
++			sline(addr[sp.gid], sp.size, "special", symName(sp.gid))
++		}
++	}
++	var names []string
++	for name := range boundaryDefs {
++		names = append(names, name)
++	}
++	sort.Strings(names)
++	for _, name := range names {
++		sline(boundaryDefs[name], 0, "boundary", name)
++	}
++	for _, u := range units {
++		o, r := u.o, u.o.r
++		for j := u.lo; j < min(u.hi, o.nalldef); j++ {
++			gid := o.base + j
++			st := state[gid]
++			if st&stLive == 0 || st&stOverride != 0 || canon[gid] != gid {
++				continue
++			}
++			b := int(st >> stBucketShift & 31)
++			if b == bNone {
++				continue
++			}
++			s := r.Sym(j)
++			a := addr[gid]
++			sline(a, s.Siz(), bucketNames[b], s.Name(r))
++			if b == bBSS || b == bNoptrBSS || b == bCov {
++				continue
++			}
++			relocs := r.Relocs(j)
++			for i := range relocs {
++				rl := &relocs[i]
++				if rl.Siz() == 0 {
++					continue
++				}
++				t := objabi.RelocType(rl.Type()) &^ objabi.R_WEAK
++				tg := o.ref(rl.Sym())
++				tname := ""
++				if tg != 0 {
++					tname = symName(canon[tg])
++				}
++				buf = append(buf[:0], "R "...)
++				buf = strconv.AppendUint(buf, uint64(a+uint32(rl.Off())), 16)
++				buf = append(buf, ' ')
++				buf = strconv.AppendUint(buf, uint64(rl.Siz()), 10)
++				buf = append(buf, ' ')
++				buf = strconv.AppendUint(buf, uint64(t), 10)
++				buf = append(buf, ' ')
++				buf = strconv.AppendUint(buf, uint64(addr[tg]), 16)
++				buf = append(buf, ' ')
++				buf = strconv.AppendInt(buf, rl.Add(), 10)
++				buf = append(buf, ' ')
++				buf = append(buf, tname...)
++				buf = append(buf, '\n')
++				w.Write(buf)
++			}
++		}
++	}
++	if err := w.Flush(); err != nil {
++		fatalf("%v", err)
++	}
++	f.Close()
++}
+diff -ruN a/main.go b/main.go
+--- a/main.go	2026-11-13 17:30:27.294100958 +0000
++++ b/main.go	2026-11-13 17:30:27.330101718 +0000
+@@ -286,6 +286,10 @@
+ 	exitIfErrors()
+ 	finish()
+ 	exitIfErrors()
++	if *flagDumpmap != "" {
++		dumpmap(*flagDumpmap)
++		lap("dumpmap", "")
++	}
+ 
+ 	if *flagStats {
+ 		total, totalCPU := time.Since(linkT0).Seconds()*1000, (cpuSeconds()-linkCPU0)*1000
+diff -ruN a/special.go b/special.go
+--- a/special.go	2026-11-13 17:30:27.294100958 +0000
++++ b/special.go	2026-11-13 17:30:27.330101718 +0000
+@@ -160,6 +160,7 @@
+ 		"go:textfipsstart": fb[0], "go:textfipsend": fb[1], "go:rodatafipsstart": fb[2], "go:rodatafipsend": fb[3],
+ 		"go:noptrdatafipsstart": fb[4], "go:noptrdatafipsend": fb[5], "go:datafipsstart": fb[6], "go:datafipsend": fb[7],
+ 	}
++	boundaryDefs = def // (-dumpmap)
+ 	for name, a := range def {
+ 		if g := lookupName(name, 0); g != 0 && !isDef(g) {
+ 			addr[g] = a

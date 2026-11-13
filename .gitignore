@@ -21,3 +21,6 @@ STOP
 .claude/fresh
 .claude/settings.local.json
 STOP
+.claude/worktrees/
+.claude/fresh
+.claude/status-asked

@@ -1,0 +1,53 @@
+1	load	33.4
+1	resolve	206.9
+1	inittasks	3.9
+1	deadcode	153.9
+1	layout	83.7
+1	create	0.1
+1	write	191.0
+1	finish	4.1
+1	total	677.2
+1	process	723.2
+2	load	28.5
+2	resolve	112.8
+2	inittasks	3.9
+2	deadcode	89.4
+2	layout	48.3
+2	create	0.1
+2	write	98.0
+2	finish	3.9
+2	total	385.0
+2	process	428.8
+4	load	28.1
+4	resolve	74.1
+4	inittasks	4.1
+4	deadcode	64.9
+4	layout	32.2
+4	create	0.1
+4	write	62.8
+4	finish	3.7
+4	total	270.0
+4	process	317.1
+8	load	13.2
+8	resolve	51.6
+8	inittasks	4.4
+8	deadcode	46.2
+8	layout	22.1
+8	create	0.5
+8	write	58.7
+8	finish	3.7
+8	total	200.4
+8	process	251.4
+8	cold	381.8
+# phase       wall ms   cpu ms
+# load           13.2     71.4  [kernel  64.4] 1312 files, 1421 objects, 1763 units; slots: 1124269 by index, 47874+2632620 by content hash, 547814 defined by name, 852850 references by name; 0 of the slots in bare .o files
+# resolve        51.6    375.4  [kernel 116.8] 5205427 slots; joined: 1411301 by name, 2632620 + 47874 by content hash
+# inittasks       4.4      4.4  [kernel   0.1] 622 + 3 packages with initialization to run
+# deadcode       46.2    268.2  [kernel  41.2] 360376 symbols live, 109 levels in 7 rounds, 11450 methods pruned, reflection true
+# layout         22.1     94.4  [kernel  15.3] 110680 functions, text 40.0 MB, rodata 21.3, pclntab 31.4, types 9.7 (33261 sorted), data 2.0, bss 32.6
+# create          0.5      0.1  [kernel   0.0] 
+# write          58.7    428.8  [kernel 315.9] 2227123 relocations applied
+# finish          3.7      4.3  [kernel   0.1] 
+# total         200.4   1247.0  8 threads, output 109.5 MB
+# output_bytes 109486380
+# measured 2026-11-13T17:48:13Z, 5 rounds, hlink
