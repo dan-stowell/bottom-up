@@ -218,6 +218,7 @@ typedef struct {
 	bool reflect;
 	vecu32 tmp;
 	struct fbatch *batch; // two: the batch being flooded and the next one, whose first stages run early
+	u64 nflooded, nrelocs, nauxs; // what the flood read (for -stats and the floor)
 	char pad[64];
 } floodWorker;
 
@@ -655,6 +656,9 @@ static void floodTask(void *ctx UNUSED, int w, long i) {
 		for (size_t k = 0; k < cur->n; k++) process(fw, cur->f[k], cur->it[k].uii, cur->tg.a + cur->it[k].t0, cur->atg.a + cur->it[k].a0);
 		STAGE(6);
 		tscStage[tscW(w)][7] += cur->n;
+		fw->nflooded += cur->n;
+		fw->nrelocs += cur->nt;
+		fw->nauxs += cur->nat;
 		at = nx;
 		fbatch *t = cur;
 		cur = next;
@@ -803,6 +807,12 @@ static void deadcode(void) {
 		fprintf(stderr, "flood, core-ms: index %.1f, relocs+aux %.1f, decode %.1f, dup ids %.1f, dup flags %.1f, funcinfo %.1f, process %.1f; %llu symbols flooded\n",
 		        t[0] / 3.095e6, t[1] / 3.095e6, t[2] / 3.095e6, t[3] / 3.095e6, t[4] / 3.095e6, t[5] / 3.095e6, t[6] / 3.095e6, (unsigned long long)t[7]);
 	}
-	lap("deadcode", "%ld symbols live, %d levels in %d rounds, %zu methods pruned, reflection %s; content-addressed: %ld reached, %ld kept",
-	    nlive, levels, rounds, markable.n, reflectSeen ? "true" : "false", nHashedReached, nHashedClasses);
+	u64 nfl = 0, nrl = 0, nax = 0;
+	for (int i = 0; i < nthreads; i++) {
+		nfl += fws[i].nflooded;
+		nrl += fws[i].nrelocs;
+		nax += fws[i].nauxs;
+	}
+	lap("deadcode", "%ld symbols live, %d levels in %d rounds, %zu methods pruned, reflection %s; %llu symbols flooded, %llu relocations and %llu aux records read; content-addressed: %ld reached, %ld kept",
+	    nlive, levels, rounds, markable.n, reflectSeen ? "true" : "false", (unsigned long long)nfl, (unsigned long long)nrl, (unsigned long long)nax, nHashedReached, nHashedClasses);
 }

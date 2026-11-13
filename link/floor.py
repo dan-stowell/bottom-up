@@ -7,7 +7,8 @@ The floor of a phase is the larger of
   bytes:        bytes it must read / the DRAM read-stream rate + bytes it must write / the DRAM write-stream rate
                 (8 threads; a copy benchmark counts each byte once but moves it twice, so it is not the divisor)
   instructions: instructions / (8 cores x measured instructions per second per core)
-  latency:      independent random accesses / the measured random-load rate for a table of that size
+  random:       independent random accesses / the measured random-load rate for a table of that size (added to
+                the byte time: both use the memory system), where the input format scatters what must be read
 "Must" is what any linker of these inputs has to touch for that phase, not what ours touches (the model is in
 PHASES below; change it there, with the reason). OS costs (opening the inputs, creating the output file, tearing
 the address space down) are not in the hardware floor: they are their own rows, with the measured kernel limit
@@ -26,6 +27,7 @@ def top(k): return max(hw[k + "_4t"], hw[k + "_8t"])          # all cores (4 thr
 READ, WRITE = top("read_dram"), top("write_dram")
 INSTR = hw["instr_8t"]
 RAND_L3 = top("rand_16m")
+RAND_DRAM = top("rand_512m")                                  # independent loads from a table far bigger than the caches
 
 def load_tsv(path):
     t, notes = {}, {}
@@ -43,23 +45,34 @@ def num(note, pat, default=0):
     return float(m.group(1)) if m else default
 
 def phases(o, notes):
-    """rows: (name, linker phases it covers, bytes in, bytes out, instructions, random accesses, why)"""
+    """rows: (name, linker phases it covers, bytes in, bytes out, instructions, random L3 accesses,
+    random DRAM accesses, why)"""
     slots = o["nsym_slots"]; SYM, REL, AUX = 21, 23, 9
     out = float(notes.get("output_bytes", 0))
     live = num(notes.get("deadcode"), r"(\d+) symbols live")
     lrel = num(notes.get("write"), r"(\d+) relocations applied")
     byname = o["nonpkgdef"] + o["nonpkgref"]
     names = o["strings"] * byname / (slots * SYM)          # the names of the symbols joined by name (average length)
+    dc = notes.get("deadcode", "")
+    flooded = num(dc, r"(\d+) symbols flooded", live)       # symbols whose relocations had to be read
+    edges = num(dc, r"(\d+) relocations and", lrel) + num(dc, r"and (\d+) aux records read")
+    hreached = num(dc, r"content-addressed: (\d+) reached")
+    hashed = o["hashed64def"] + o["hasheddef"]               # bytes of content-addressed symbol records
+    # resolve: by-name symbols and their names are read once; of the content-addressed ones only the reached need
+    # their hash read (the linker says how many; before it did, all of them)
+    hbytes = hreached * 16 if hreached else o["hash64"] + o["hash"]
     return [
-        ("resolve", ["resolve"], slots * SYM + o["hash64"] + o["hash"] + names, 4 * slots, 20 * slots, 0,
-         "every symbol record, content hash and by-name name read once; one canonical id written per slot"),
-        ("reach", ["inittasks", "deadcode"], lrel * REL + live * (SYM + 2 * AUX), live, 10 * lrel, lrel,
-         "the relocations and aux records of the live symbols; one mark per edge (state fits L3). The edge count is the "
-         "linker's applied relocations: reachability-only relocations and aux edges are not counted yet"),
-        ("layout", ["layout"], live * SYM, 4 * live, 10 * live, 0,
-         "sizes of the live symbols read; one address written per live symbol (prefix sums)"),
-        ("write", ["create", "write", "finish"], out + lrel * REL, out, 2 * out, lrel,
-         "every output byte copied once from the objects (pclntab and metadata included); live relocations read; one address lookup each"),
+        ("resolve", ["resolve"], (slots * SYM - (hashed if hreached else 0)) + hbytes + names, 4 * (byname / SYM + (hreached or hashed / SYM)), 20 * slots, 0, 0,
+         "every by-name and package-indexed symbol record and by-name name read once; the hashes of the reached "
+         "content-addressed symbols; one canonical id written per joined slot"),
+        ("reach", ["inittasks", "deadcode"], num(dc, r"(\d+) relocations and", lrel) * REL + num(dc, r"and (\d+) aux records read") * AUX, live, 10 * edges, edges, flooded,
+         "the relocations and aux records of the symbols flooded; one mark per edge (flags fit L3); and one "
+         "random DRAM access per flooded symbol, whose records start anywhere in 0.8 GB of objects"),
+        ("layout", ["layout"], live * SYM, 4 * live, 10 * live, 0, live,
+         "sizes of the live symbols read (one random DRAM access each); one address written per live symbol"),
+        ("write", ["create", "write", "finish"], out + lrel * REL, out, 2 * out, lrel, live,
+         "every output byte copied once from the objects (pclntab and metadata included); live relocations read; "
+         "one address lookup each; one random DRAM access per live symbol for where its bytes start"),
     ]
 
 def os_rows(o, notes):
@@ -81,8 +94,8 @@ def mb(b): return "%.1f MB" % (b / 1e6) if b else "-"
 print("# FLOOR: % of floor, per workload and phase\n")
 print("Generated by `link/floor.py %s` (do not edit). Limits: `hw/linklimits.out.txt`; timings: `link/results/`.\n" % linker)
 print("Machine limits used (8 cores): DRAM read stream %.1f GB/s, write stream %.1f GB/s (copy: %.1f GB/s of payload), "
-      "%.0f G instructions/s (%.1f on 1 core), %.2f G random loads/s into an L3-sized table.\n" % (
-          READ / 1e9, WRITE / 1e9, top("copy_dram") / 1e9, INSTR / 1e9, hw["instr_1t"] / 1e9, RAND_L3 / 1e9))
+      "%.0f G instructions/s (%.1f on 1 core), random loads: %.2f G/s into an L3-sized table, %.2f G/s into a 512 MB one.\n" % (
+          READ / 1e9, WRITE / 1e9, top("copy_dram") / 1e9, INSTR / 1e9, hw["instr_1t"] / 1e9, RAND_L3 / 1e9, RAND_DRAM / 1e9))
 for path in sorted(glob.glob(os.path.join(here, "link/results/*.%s.tsv" % linker))):
     w = os.path.basename(path).split(".")[0]
     o = kv(os.path.join(here, "link/results/%s.objstat" % w))
@@ -92,8 +105,10 @@ for path in sorted(glob.glob(os.path.join(here, "link/results/*.%s.tsv" % linker
     print("|---|---|---|---|---|---|---|---|---|---|")
     def ms(j, names): return sum(t.get((j, n), 0) for n in names)
     hwfloor = 0
-    for name, cover, bin_, bout, instr, rnd, why in phases(o, notes):
-        f = {"bytes": (bin_ / READ + bout / WRITE) * 1e3, "instructions": instr / INSTR * 1e3, "latency": rnd / RAND_L3 * 1e3}
+    for name, cover, bin_, bout, instr, rnd, rdram, why in phases(o, notes):
+        # streams and random accesses share the memory system: their times add; instructions run beside them
+        mem = (bin_ / READ + bout / WRITE + rnd / RAND_L3 + rdram / RAND_DRAM) * 1e3
+        f = {"memory": mem, "instructions": instr / INSTR * 1e3}
         bind = max(f, key=f.get); fl = f[bind]; hwfloor += fl
         m8 = ms(8, cover)
         print("| %s/%s | %s | %s | %.1f | %.1f | %.1f | %.1f | %.2f | %.1f%% | %s |" % (
@@ -117,6 +132,6 @@ for path in sorted(glob.glob(os.path.join(here, "link/results/*.%s.tsv" % linker
         print("| %s/total (process, cold) | | | | | | %.1f | %.2f (disk read of the %.0f MB touched) | %.1f%% | disk |" % (
             w, t[(8, "cold")], cf + hwfloor, cold_bytes / 1e6, 100 * (cf + hwfloor) / t[(8, "cold")]))
     print("\nWhat each floor counts:\n")
-    for name, cover, bin_, bout, instr, rnd, why in phases(o, notes): print("- **%s**: %s." % (name, why))
+    for name, cover, bin_, bout, instr, rnd, rdram, why in phases(o, notes): print("- **%s**: %s." % (name, why))
     for name, cover, fl, why in os_rows(o, notes): print("- **%s**: %s." % (name, why))
     print()
