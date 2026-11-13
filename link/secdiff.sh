@@ -58,4 +58,4 @@ t1=$(date +%s.%N)
 t2=$(date +%s.%N)
 echo "linked $name: stock $(stat -c %s "$out/stock") bytes ($(echo "$t1 - $t0" | bc) s), $(basename "$linker") $(stat -c %s "$out/hlink") bytes ($(echo "$t2 - $t1" | bc) s); maps in $out"
 [ -n "${work:-}" ] && [ -z "${KEEP_WORK:-}" ] && rm -rf "$work"
-exec prlimit --as=$(numfmt --from=iec "${SECDIFF_AS:-20G}") "$repo/build/secdiff" ${SECDIFF_FLAGS:-} "$out/hlink.map" "$out/hlink" "$out/stock.map" "$out/stock"
+exec /usr/bin/time -f "secdiff: %e s, max RSS %M KB" prlimit --as=$(numfmt --from=iec "${SECDIFF_AS:-20G}") "$repo/build/secdiff" ${SECDIFF_FLAGS:-} "$out/hlink.map" "$out/hlink" "$out/stock.map" "$out/stock"

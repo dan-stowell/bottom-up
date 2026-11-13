@@ -18,6 +18,9 @@ type differ struct {
 
 	nFipsMarkers int
 	refd         map[string]bool
+
+	pcfileBytesDiffer int
+	pctabExplained    bool
 }
 
 func (d *differ) desc(m *lmap, a uint64) string {
@@ -46,6 +49,7 @@ func (d *differ) matchSymbols() {
 		names = append(names, n)
 	}
 	sort.Strings(names)
+	var groups [][2][]int32
 	for _, name := range names {
 		hl := H.byName[name]
 		var sl []int32
@@ -61,7 +65,14 @@ func (d *differ) matchSymbols() {
 			d.pair(hl[0], sl[0])
 			continue
 		}
-		d.matchGroup(hl, sl)
+		groups = append(groups, [2][]int32{hl, sl})
+	}
+	// names with several symbols: first the pairs the content and the relocation targets single out, then
+	// the rest (whose targets may have been matched meanwhile)
+	for round := 0; round < 3; round++ {
+		for _, g := range groups {
+			d.matchGroup(g[0], g[1], round < 2)
+		}
 	}
 	d.matchByContent()
 	for i := range H.syms {
@@ -119,43 +130,57 @@ func (d *differ) pair(hi, si int32) {
 	d.S.syms[si].match = hi
 }
 
-// matchGroup matches symbols that share a name, by size and content with hlink's relocation sites masked.
-func (d *differ) matchGroup(hl, sl []int32) {
+// matchGroup matches symbols that share a name, by size, content with hlink's relocation sites masked,
+// and the relocation targets. strict: only pairs where exactly one candidate fits, with every target known.
+func (d *differ) matchGroup(hl, sl []int32, strict bool) {
 	H, S := d.H, d.S
-	used := make([]bool, len(sl))
 	big := len(hl)*len(sl) > 1<<14
 	for _, hi := range hl {
 		h := &H.syms[hi]
-		var eqs []int
-		for k, si := range sl {
-			s := &S.syms[si]
-			if s.size != h.size {
-				continue
-			}
-			if big && used[k] {
-				continue
-			}
-			if d.sameMasked(hi, si) {
-				eqs = append(eqs, k)
-				if big {
-					break
-				}
-			}
+		if h.match >= 0 {
+			continue
 		}
-		pick := -1
-		for _, k := range eqs {
-			if !used[k] {
-				pick = k
+		var eqs []int32 // candidates (matched or not) that fit
+		unknown := false
+		for _, si := range sl {
+			s := &S.syms[si]
+			if s.size != h.size || (big && s.match >= 0) {
+				continue
+			}
+			if !d.sameMasked(hi, si) {
+				continue
+			}
+			ok, unk := d.relocsAgree(hi, si)
+			if !ok {
+				continue
+			}
+			unknown = unknown || unk
+			eqs = append(eqs, si)
+			if big {
 				break
 			}
 		}
-		if pick < 0 {
-			// no identical candidate left: take the only unused one of the same size, if there is just one,
-			// so that its differences get reported
+		var free []int32
+		for _, si := range eqs {
+			if S.syms[si].match < 0 {
+				free = append(free, si)
+			}
+		}
+		pick := int32(-1)
+		switch {
+		case strict:
+			if len(free) == 1 && len(eqs) == 1 && !unknown {
+				pick = free[0]
+			}
+		case len(free) > 0:
+			pick = free[0]
+		default:
+			// nothing fits: take the only unmatched one of the same size, if there is just one, so that its
+			// differences get reported
 			n := 0
-			for k, si := range sl {
-				if !used[k] && S.syms[si].size == h.size {
-					pick, n = k, n+1
+			for _, si := range sl {
+				if S.syms[si].match < 0 && S.syms[si].size == h.size {
+					pick, n = si, n+1
 				}
 			}
 			if n != 1 {
@@ -165,12 +190,11 @@ func (d *differ) matchGroup(hl, sl []int32) {
 		if pick < 0 {
 			continue
 		}
-		used[pick] = true
-		d.pair(hi, sl[pick])
+		d.pair(hi, pick)
 		if len(eqs) > 1 {
 			id := int32(0)
-			for _, k := range eqs {
-				if e := S.syms[sl[k]].eq; e != 0 {
+			for _, si := range eqs {
+				if e := S.syms[si].eq; e != 0 {
 					id = e
 				}
 			}
@@ -179,11 +203,46 @@ func (d *differ) matchGroup(hl, sl []int32) {
 				id = d.eqN
 			}
 			h.eq = id
-			for _, k := range eqs {
-				S.syms[sl[k]].eq = id
+			for _, si := range eqs {
+				S.syms[si].eq = id
 			}
 		}
 	}
+}
+
+// relocsAgree: the stock bytes of s at hlink's relocation sites of h are the relocations evaluated with the
+// stock addresses (unknown: some target is not matched yet, and was not counted against).
+func (d *differ) relocsAgree(hi, si int32) (ok, unknown bool) {
+	h, s := &d.H.syms[hi], &d.S.syms[si]
+	if !d.S.img.inFile(s.addr, s.size) {
+		return true, false
+	}
+	for _, r := range d.H.relocsIn(h.addr, h.size) {
+		o := r.site - h.addr
+		if o+uint64(r.siz) > h.size {
+			return false, false
+		}
+		hti := d.hlinkTarget(&r)
+		if hti >= 0 && d.H.syms[hti].match < 0 && d.H.syms[hti].class != cBoundary {
+			unknown = true
+			continue
+		}
+		want, mode, _, _, _ := d.stockExpect(&r, hti, s.addr+o)
+		sv := readSized(d.S.img.view(s.addr+o, uint64(r.siz)))
+		switch mode {
+		case vBad:
+			unknown = true
+		case vKeep:
+			if sv != readSized(d.H.img.view(r.site, uint64(r.siz))) {
+				return false, false
+			}
+		default:
+			if sv != want {
+				return false, false
+			}
+		}
+	}
+	return true, unknown
 }
 
 // sameMasked: the two symbols' bytes are equal outside hlink's relocation sites.
@@ -221,6 +280,17 @@ func defaultAlign(size uint64) uint64 {
 func (d *differ) checkSizes() {
 	H, S := d.H, d.S
 	st := rep.stat("sizes+alignment")
+	// hlink: no two symbols overlap
+	for k := 1; k < len(H.byAddr); k++ {
+		a, b := &H.syms[H.byAddr[k-1]], &H.syms[H.byAddr[k]]
+		st.compared++
+		if a.addr+a.size > b.addr {
+			st.different++
+			rep.diff("sizes+alignment", "hlink: symbols overlap", "%s @%#x+%d and %s @%#x", a.name, a.addr, a.size, b.name, b.addr)
+		} else {
+			st.equal++
+		}
+	}
 	for i := range H.syms {
 		h := &H.syms[i]
 		if h.match < 0 {

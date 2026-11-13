@@ -37,6 +37,7 @@ import (
 var (
 	flagN       = flag.Int("n", 10, "show the first `N` differences of each kind")
 	flagVerbose = flag.Bool("v", false, "also show examples of differences covered by rules")
+	flagLocate  = flag.String("locate", "", "print the address of `pcsp:FUNC`'s pcsp table in the first binary and exit (for selftest.sh)")
 )
 
 // ---- classes of symbols
@@ -72,7 +73,7 @@ var pclntabNames = map[string]bool{}
 var linkerNames = map[string]bool{
 	"runtime.firstmoduledata": true, "runtime.lastmoduledatap": true, "go:buildinfo": true, "go:fipsinfo": true,
 	"go:main.inittasks": true, "go:runtime.inittasks": true, "runtime.runtime_inittasks": true,
-	"runtime.textsectionmap": true, "runtime.disableMemoryProfiling": true, "go:buildinfo.ref": true,
+	"runtime.textsectionmap": true, "go:buildinfo.ref": true,
 }
 
 // stock carrier symbols (symtab.go: groupSym, setCarrierSym; pcln.go: runtime.pclntab)
@@ -600,9 +601,13 @@ func main() {
 	H.img = readImage(flag.Arg(1))
 	S := readMap(flag.Arg(2), true)
 	S.img = readImage(flag.Arg(3))
+	d := &differ{H: H, S: S}
+	if *flagLocate != "" {
+		d.locate(*flagLocate)
+		return
+	}
 	fmt.Printf("hlink: %d symbols, %d relocations (%s)\nstock: %d symbols, %d sections (%s)\n",
 		len(H.syms), len(H.relocs), H.path, len(S.syms), len(S.sects), S.path)
-	d := &differ{H: H, S: S}
 	d.matchSymbols()
 	d.checkSizes()
 	d.checkContent()

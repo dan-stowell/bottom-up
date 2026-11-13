@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"internal/abi"
 	"sort"
+	"strings"
 	"unsafe"
 )
 
@@ -288,15 +289,29 @@ func (d *differ) checkPclntab() {
 			rep.diff("pclntab", sd.name+": end of the last function before its entry", "%s", last.name)
 		}
 	}
-	// pctab: the bytes the functions reference
-	for _, sd := range sds {
+	// pctab: the bytes the functions reference; how many copies of each table content
+	copies := [2]map[string]int{{}, {}}
+	example := map[string]string{}
+	for k, sd := range sds {
 		ref := map[uint32]int{}
+		counted := map[uint32]bool{}
 		for i := range sd.funcs {
 			f := &sd.funcs[i]
-			for _, o := range append([]uint32{f.pcsp, f.pcfile, f.pcln}, f.pcdata...) {
-				if _, ok := ref[o]; !ok && o != 0 {
+			for j, o := range append([]uint32{f.pcfile, f.pcsp, f.pcln}, f.pcdata...) {
+				if o == 0 {
+					continue
+				}
+				if _, ok := ref[o]; !ok {
 					b, _ := sd.pcvalue(o)
 					ref[o] = len(b)
+				}
+				if j > 0 && !counted[o] { // (pcfile tables: compared decoded, function by function)
+					counted[o] = true
+					b, _ := sd.pcvalue(o)
+					copies[k][string(b)]++
+					if _, ok := example[string(b)]; !ok {
+						example[string(b)] = sd.name + " " + f.name
+					}
 				}
 			}
 		}
@@ -317,14 +332,33 @@ func (d *differ) checkPclntab() {
 		sd.pctabUnref = total - covered
 		sd.pctabRefd = covered
 	}
-	if H.pctabRefd == S.pctabRefd && H.pctabUnref < 8+1 && S.pctabUnref < 8+1 {
+	ndup := 0
+	for c, n := range copies[1] {
+		if hn := copies[0][c]; hn != n {
+			ndup++
+			rep.diff("pclntab", "pctab: a table content has a different number of copies", "%d bytes (e.g. %s): hlink %d copies, stock %d", len(c), example[c], hn, n)
+		}
+	}
+	for c, hn := range copies[0] {
+		if copies[1][c] == 0 {
+			ndup++
+			rep.diff("pclntab", "pctab: a table content has a different number of copies", "%d bytes (e.g. %s): hlink %d copies, stock 0", len(c), example[c], hn)
+		}
+	}
+	// function by function (before the totals: pcfile tables whose bytes differ explain them)
+	d.compareFuncs(H, S, st)
+	if ndup > 0 || d.pcfileBytesDiffer > 0 {
+		d.pctabExplained = true // (the byte totals then differ too; not reported again)
+	} else if H.pctabRefd == S.pctabRefd && H.pctabUnref < 8+1 && S.pctabUnref < 8+1 {
 		if H.pctabUnref != S.pctabUnref {
 			rep.allow("P1", "pctab: %d bytes referenced in both; unreferenced: hlink %d, stock %d", H.pctabRefd, H.pctabUnref, S.pctabUnref)
 		}
 	} else {
 		rep.diff("pclntab", "pctab: bytes referenced by functions / not referenced differ", "hlink %d / %d, stock %d / %d", H.pctabRefd, H.pctabUnref, S.pctabRefd, S.pctabUnref)
 	}
-	// function by function
+}
+
+func (d *differ) compareFuncs(H, S *side, st *stat) {
 	seen := make([]bool, len(S.funcs))
 	for i := range H.funcs {
 		hf := &H.funcs[i]
@@ -417,12 +451,20 @@ func (d *differ) compareFunc(H, S *side, hf, sf *fn) bool {
 	if len(hr) != len(sr) {
 		bad("pcfile differs", "hlink %d runs, stock %d", len(hr), len(sr))
 	} else {
+		same := true
 		for k := range hr {
 			hn, sn := H.fileName(hf.cuOffset, hr[k].val), S.fileName(sf.cuOffset, sr[k].val)
 			if hr[k].pc != sr[k].pc || hn != sn {
+				same = false
 				bad("pcfile differs", "run %d: hlink pc %#x %s, stock pc %#x %s", k, hr[k].pc, hn, sr[k].pc, sn)
 				break
 			}
+		}
+		hb, _ := H.pcvalue(hf.pcfile)
+		sb, _ := S.pcvalue(sf.pcfile)
+		if same && !bytes.Equal(hb, sb) {
+			d.pcfileBytesDiffer++
+			bad("pcfile bytes differ, file names equal (another CU's copy of the function: other file indices)", "hlink % x, stock % x", hb[:min(len(hb), 12)], sb[:min(len(sb), 12)])
 		}
 	}
 	// funcdata
@@ -680,7 +722,9 @@ func (d *differ) checkModuledata() {
 	for _, f := range []string{"pctab"} {
 		hv, sv := H.md[f][1], S.md[f][1]
 		st.compared++
-		if hv == sv {
+		if d.pctabExplained {
+			st.compared--
+		} else if hv == sv {
 			st.equal++
 		} else if (hv+7)&^7 == (sv+7)&^7 {
 			st.allowed++
@@ -746,13 +790,22 @@ func (d *differ) checkLinkerSyms() {
 		return string(sd.img.bytes(p, n)), true
 	}
 	done := map[string]bool{"runtime.firstmoduledata": true}
-	for i := range H.m.syms {
-		h := &H.m.syms[i]
-		if h.class != cLinker || done[h.name] {
-			continue
+	// the symbols either linker writes itself (hlink's specials, the stock linker's linker-made ones)
+	var todo []string
+	for _, sd := range sds {
+		for i := range sd.m.syms {
+			if s := &sd.m.syms[i]; s.class == cLinker && !done[s.name] {
+				done[s.name] = true
+				todo = append(todo, s.name)
+			}
 		}
-		done[h.name] = true
-		name := h.name
+	}
+	for _, name := range todo {
+		hk := H.m.named(name)
+		if hk < 0 {
+			continue // (in the stock binary only: rules L1, L2, or a symbol-set difference)
+		}
+		h := &H.m.syms[hk]
 		switch {
 		case H.m.named(name+".str") >= 0:
 			// a string variable the linker sets: runtime.buildVersion, runtime.modinfo, -X
@@ -800,6 +853,7 @@ func (d *differ) checkLinkerSyms() {
 			for _, sd := range sds {
 				d.checkFipsinfo(sd, result)
 			}
+		case name == "go:buildinfo.ref":
 		default:
 			// byte for byte: go:buildinfo, runtime.disableMemoryProfiling, ...
 			k := S.m.named(name)
@@ -1163,4 +1217,21 @@ func (d *differ) checkELF() {
 			}
 		}
 	}
+}
+
+// locate (-locate pcsp:FUNC): the address of FUNC's pcsp table in the hlink binary.
+func (d *differ) locate(what string) {
+	sd := d.sides()[0]
+	sd.readPclntab()
+	name, ok := strings.CutPrefix(what, "pcsp:")
+	if !ok {
+		fatalf("-locate: want pcsp:FUNC")
+	}
+	for i := range sd.funcs {
+		if f := &sd.funcs[i]; f.name == name && f.pcsp != 0 {
+			fmt.Printf("%#x\n", sd.md["pctab"][0]+uint64(f.pcsp))
+			return
+		}
+	}
+	fatalf("-locate: no function %s with a pcsp table", name)
 }
