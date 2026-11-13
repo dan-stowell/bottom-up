@@ -166,7 +166,16 @@ static void dumpSym(u32 a, u32 size, const char *bucket, str name) {
 static void writeUnitTask(void *ctx UNUSED, int w UNUSED, long ui) {
 	unit *u = &units[ui];
 	object *o = u->o;
-	u32 fidx[2] = {u->funcBase[0], u->funcBase[1]};
+	// the function table is in address order: within the unit's block, by alignment class from the largest down
+	// (fclink numbers the functions in symbol order, which is only right while they all have one class)
+	u32 fidx[2][nClasses];
+	for (int t = 0; t < 2; t++) {
+		u32 k = u->funcBase[t];
+		for (int cl = nClasses - 1; cl >= 0; cl--) {
+			fidx[t][cl] = k;
+			k += u->nfuncCl[t][cl];
+		}
+	}
 	u32 foff = lay.ftabStructs + u->ftabBase;
 	u32 inl = u->inlBase;
 	u8 *names = out + (lay.funcnametab - imageBase);
@@ -320,7 +329,7 @@ static void writeUnitTask(void *ctx UNUSED, int w UNUSED, long ui) {
 		u32 npc, nfd, ninl;
 		bytes fi = funcShape(o, j, &npc, &nfd, &ninl);
 		u8 *ft = out + (lay.functab - imageBase);
-		u32 fi0 = fidx[b - bText]++;
+		u32 fi0 = fidx[b - bText][st >> stClassShft & 15]++;
 		st32(ft + fi0 * 8, a - lay.text);
 		st32(ft + fi0 * 8 + 4, foff);
 		u8 *f = ft + foff;

@@ -160,7 +160,9 @@ static void sizeUnit(void *ctx UNUSED, int w UNUSED, long ui) {
 		const u8 *s = osym(o, j);
 		if (st & stPC) u->pcSize += oDataSize(o, j);
 		int b = bNone;
-		if ((st & stLive) && !(st & stOverride)) b = bucketOf(o, s, st);
+		// (a pc-value table lives in pctab only, even when -nodce makes it live too: fclink places it in rodata
+		// as well and then copies it to pctab at its rodata address, out of bounds)
+		if ((st & stLive) && !(st & (stOverride | stPC))) b = bucketOf(o, s, st);
 		if (isTextBucket(b)) {
 			u32 npc, nfd, ninl;
 			funcShape(o, j, &npc, &nfd, &ninl);
@@ -187,6 +189,7 @@ static void sizeUnit(void *ctx UNUSED, int w UNUSED, long ui) {
 			continue;
 		}
 		state[gid] = st | (u32)b << stBucketShift | cl << stClassShft;
+		if (isTextBucket(b)) u->nfuncCl[b - bText][cl]++;
 		u->csize[b][cl] += occupied(symSiz(s), b, cl);
 	}
 }

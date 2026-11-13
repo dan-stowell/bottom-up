@@ -188,6 +188,7 @@ typedef struct unit {
 	u32 cbase[nBuckets][nClasses];
 	u32 nfunc[2]; // live functions (ordinary, FIPS), and the index of the first of each
 	u32 funcBase[2];
+	u32 nfuncCl[2][nClasses]; // live functions per alignment class: the function table is in address order
 	u32 ftabSize, ftabBase; // bytes of _func structs with their pcdata and funcdata offsets
 	u32 nameSize, nameBase; // bytes of function names
 	u32 pcSize, pcBase;     // bytes of pc-value tables this unit owns
