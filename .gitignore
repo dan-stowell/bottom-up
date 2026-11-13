@@ -14,3 +14,4 @@ explore/omp_*
 .claude/settings.local.json
 STOP
 .claude/status-asked
+.claude/fresh
