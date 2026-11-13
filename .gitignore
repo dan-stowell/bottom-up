@@ -15,3 +15,9 @@ explore/omp_*
 STOP
 .claude/status-asked
 .claude/fresh
+.claude/deadline
+.claude/morning-asked
+.claude/status-asked
+.claude/fresh
+.claude/settings.local.json
+STOP
