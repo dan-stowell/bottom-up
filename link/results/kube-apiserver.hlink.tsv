@@ -1,53 +1,63 @@
-1	load	65.9
-1	resolve	528.4
-1	inittasks	7.6
-1	deadcode	228.2
-1	layout	145.4
-1	create	0.2
-1	write	224.7
-1	finish	5.0
-1	total	1205.3
-1	process	1289.6
-2	load	52.8
-2	resolve	286.1
-2	inittasks	7.6
-2	deadcode	139.5
-2	layout	93.5
-2	create	0.2
-2	write	121.6
-2	finish	4.7
-2	total	706.0
-2	process	794.0
-4	load	37.5
-4	resolve	169.2
-4	inittasks	7.8
-4	deadcode	101.0
-4	layout	62.8
-4	create	0.1
-4	write	94.6
-4	finish	4.5
-4	total	477.5
-4	process	562.2
-8	load	38.6
-8	resolve	119.7
-8	inittasks	7.9
-8	deadcode	75.2
-8	layout	48.1
-8	create	0.1
-8	write	66.3
-8	finish	4.4
-8	total	360.4
-8	process	450.0
-8	cold	727.8
+1	load	41.9
+1	resolve	247.2
+1	inittasks	8.3
+1	deadcode	217.6
+1	layout	130.8
+1	create	28.2
+1	write	134.3
+1	finish	3.5
+1	teardown	3.9
+1	total	815.7
+1	complete	816.2
+1	process	821.0
+2	load	23.0
+2	resolve	134.3
+2	inittasks	8.2
+2	deadcode	128.6
+2	layout	80.2
+2	create	16.1
+2	write	67.4
+2	finish	3.2
+2	teardown	2.6
+2	total	463.5
+2	complete	463.6
+2	process	469.5
+4	load	41.0
+4	resolve	92.8
+4	inittasks	8.1
+4	deadcode	94.3
+4	layout	57.0
+4	create	14.1
+4	write	35.2
+4	finish	3.0
+4	teardown	3.6
+4	total	349.2
+4	complete	349.3
+4	process	356.0
+8	load	32.5
+8	resolve	52.4
+8	inittasks	8.6
+8	deadcode	80.9
+8	layout	44.1
+8	create	14.4
+8	write	18.9
+8	finish	3.0
+8	teardown	7.3
+8	total	262.0
+8	complete	262.1
+8	process	267.2
+8	cold	571.1
 # phase       wall ms   cpu ms
-# load           38.6    100.1  [kernel  83.2] 2080 files, 2142 objects, 3091 units; slots: 2743051 by index, 61563+6682604 by content hash, 1500774 defined by name, 2230206 references by name; 0 of the slots in bare .o files
-# resolve       119.7    862.5  [kernel 276.7] 13218198 slots; joined: 3747622 by name, 6682604 + 61563 by content hash
-# inittasks       7.9      7.9  [kernel   0.0] 905 + 3 packages with initialization to run
-# deadcode       75.2    419.7  [kernel  77.2] 430039 symbols live, 102 levels in 7 rounds, 10576 methods pruned, reflection true
-# layout         48.1    189.6  [kernel  64.8] 168056 functions, text 53.4 MB, rodata 3.4, pclntab 45.3, types 12.4 (45442 sorted), data 0.9, bss 32.4
-# create          0.1      0.1  [kernel   0.0] 
-# write          66.3    485.1  [kernel 352.4] 3072382 relocations applied
-# finish          4.4      5.1  [kernel   0.4] 
-# total         360.4   2070.1  8 threads, output 121.1 MB
+# load           32.5    150.3  [kernel 130.5] 2080 files, 2142 objects, 3091 units; slots: 2743051 by index, 61563+6682604 by content hash, 1500774 defined by name, 2230206 references by name; 0 of the slots in bare .o files
+# resolve        52.4    401.6  [kernel 115.7] 13218198 slots; joined: 1659504 by name (and 2814 definitions by package index); ms: records 35.4, joins 6.1, pkgdefs 3.9, names 6.4
+# inittasks       8.6     13.0  [kernel   6.3] 905 + 3 packages with initialization to run
+# deadcode       80.9    441.3  [kernel  54.8] 430039 symbols live, 101 levels in 7 rounds, 10576 methods pruned, reflection true; 332513 symbols flooded, 3382937 relocations and 3236492 aux records read; content-addressed: 1903925 reached, 427288 kept
+# layout         44.1    178.9  [kernel  34.0] 168056 functions, text 53.4 MB, rodata 3.4, pclntab 45.3, types 12.4 (45442 sorted), data 0.9, bss 32.4
+# create         14.4    124.6  [kernel 106.7] overwrote the old output in place (it was 121.1 MB), zeroed
+# write          18.9    128.9  [kernel   3.2] 3072382 relocations applied
+# finish          3.0     28.9  [kernel   0.0] 
+# teardown        7.3     48.3  [kernel  48.3] output unmapped
+# total         262.0   1515.8  8 threads, output 121.1 MB
+# complete      262.1           from the start to the output complete, as the parent sees it (a child tears the link's address space down)
 # output_bytes 121109868
-# measured 2026-11-13T17:48:28Z, 3 rounds, hlink
+# measured 2026-11-13T18:20:54Z, 3 rounds, hlink

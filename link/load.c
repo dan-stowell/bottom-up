@@ -58,15 +58,9 @@ static object *newObject(str pkg, const char *file, bytes body) {
 	o->npkg = (o->off[BlkPkgIdx + 1] - o->off[BlkPkgIdx]) / 8;
 	o->nalldef = o->ndef + o->nh64 + o->nh + o->nnonpkg;
 	o->total = o->nalldef + o->nref;
-	// Put the pages the flood will read at random in the page table now, in bulk: the index tables, the
-	// relocations and the aux records. A prefetch of a page that is not mapped yet does nothing, so without
-	// this the flood's cache misses queue up behind page faults instead of overlapping. What is read in order
-	// (symbol records, hashes, names: resolve; the data block: the write pass) is left to first touch, which
-	// costs less per page with the kernel's fault-around than it does here.
-	if (!getenv("HLINK_NOPOPULATE")) {
-		uintptr_t lo = ((uintptr_t)b.p + o->off[BlkRelocIdx]) & ~(uintptr_t)4095, hi = ((uintptr_t)b.p + o->off[BlkData] + 4095) & ~(uintptr_t)4095;
-		madvise((void *)lo, hi - lo, 22 /* MADV_POPULATE_READ */);
-	}
+	// (Tried and dropped, 2026-11-13: MADV_POPULATE_READ of the index tables, relocations and aux records here,
+	// so that the flood's prefetches would not be dropped on pages not yet in the page table. On 8 threads it
+	// made load 35-63 ms instead of 9-12 and the flood no faster.)
 	return o;
 }
 
