@@ -37,3 +37,8 @@
 - 2026-11-13T17:31:49Z Spike: a Go binary execs from hugetlbfs if its segments are 2 MiB-aligned with filesz = memsz, and filling
   110 MB of a new hugetlbfs file takes 3.7 ms on 8 threads (ext4: 31-39 ms + 6 ms unmap). That removes the
   largest OS row from the link. IDEAS.md started (7 entries with kill tests).
+- 2026-11-13T17:39:01Z Merged the builder's hlink (C port of fclink, link/*.c, 3,400 lines + generated gotables.h). Re-ran
+  `link/test.sh` in the main checkout: ALL PASS (5 programs with and without inlining, -j 1/2/4/8 identical
+  output for ifaces and MinIO, 5 std packages' tests agree with the stock link, MinIO --version, live set equal
+  to fclink's 360,376). The builder found two fclink bugs (both only with -nodce: pc tables given data
+  addresses; function table unsorted when a function is aligned above 32). **M1 reached.**
