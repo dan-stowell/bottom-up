@@ -1,4 +1,10 @@
-# Strand
+# bottom-up
+
+Bottom-up: a core that runs at hardware speed, grown to take on real workloads, starting
+with Go's front end. CHARTER.md is the goal, PLAN.md the current campaign. The core is Strand,
+carried over with its history from `dan-stowell/simd-lang`:
+
+## Strand
 
 A language whose source has no loops and no branches, and a compiler for it — written in
 it — that runs as AVX-512 code in every phase and reproduces itself byte for byte.
