@@ -277,7 +277,12 @@ static inline const u8 *fiInlNode(bytes fi, u32 inlOff, u32 k) { return fi.p + i
 
 // process floods symbol c. tg[i] is the canonical target of its relocation i and atg[i] that of its aux record i
 // (functions only): floodTask has worked them out, so that their flags are in the cache by now.
-static void process(floodWorker *w, u32 c, bool uii, const u32 *tg, const u32 *atg) {
+static void process(floodWorker *w, u32 c, bool uii, bool simple, u32 ntg, const u32 *tg, const u32 *atg) {
+	if (simple && !(SF(c) & (sfText | sfReflect))) {
+		// the common case, a data symbol with ordinary relocations: its targets become live, nothing else
+		for (u32 i = 0; i < ntg; i++) fmark(w, tg[i]);
+		return;
+	}
 	u32 j;
 	object *o = objOf(c, &j);
 	const u8 *s = osym(o, j);
@@ -289,6 +294,10 @@ static void process(floodWorker *w, u32 c, bool uii, const u32 *tg, const u32 *a
 	u32 nr;
 	relocp rs = oRelocs(o, j, &nr);
 	w->tmp.n = 0;
+	if (simple) {
+		for (u32 i = 0; i < ntg; i++) fmark(w, tg[i]);
+		nr = 0; // (the general loop below has nothing left to do)
+	}
 	for (u32 i = 0; i < nr; i++) {
 		relocp rl = RELOC(rs, i);
 		u16 t = rType(rl);
@@ -507,7 +516,8 @@ typedef struct fbatch {
 		u32 j, nr, na, t0, a0;
 		relocp rs;
 		auxp as;
-		bool uii; // it is a type converted to an interface (as seen when its references were decoded)
+		bool uii;    // it is a type converted to an interface (as seen when its references were decoded)
+		bool simple; // not that, and every relocation the flood follows is an ordinary one: mark its target
 	} it[floodBatch];
 	u32 nt, nat;
 	vecu32 tg, atg; // the canonical targets of the batch's relocations and aux records
@@ -553,9 +563,11 @@ static inline void bDecode(fbatch *b) {
 		u32 *t = b->tg.a + b->it[k].t0, c = b->f[k];
 		bool uii = (SF(c) & sfGoType) && (atomicLoad8(&FL(c)) & stUsedInIface);
 		b->it[k].uii = uii;
+		bool special = uii;
 		for (u32 r = 0; r < b->it[k].nr; r++) {
 			relocp rl = RELOC(b->it[k].rs, r);
 			u16 ty = rType(rl);
+			special |= ty == R_METHODOFF || ty == R_USEIFACE || ty == R_USEIFACEMETHOD || ty == R_USENAMEDMETHOD;
 			u32 g = 0;
 			if (!((ty & R_WEAK) || ty == R_USETYPE || ty == R_INITORDER || (ty == R_METHODOFF && !uii))) {
 				g = RREF(o, rl);
@@ -571,6 +583,7 @@ static inline void bDecode(fbatch *b) {
 				if (!(atomicLoad8(&FL(h)) & flRef)) atomicOr8(&FL(h), flRef);
 			}
 		}
+		b->it[k].simple = !special;
 		t = b->atg.a + b->it[k].a0;
 		for (u32 a = 0; a < b->it[k].na; a++) {
 			auxp ax = AUX(b->it[k].as, a);
@@ -661,7 +674,7 @@ static void floodTask(void *ctx UNUSED, int w, long i) {
 		t0 = __rdtsc();
 		bFuncInfo(cur);
 		STAGE(5);
-		for (size_t k = 0; k < cur->n; k++) process(fw, cur->f[k], cur->it[k].uii, cur->tg.a + cur->it[k].t0, cur->atg.a + cur->it[k].a0);
+		for (size_t k = 0; k < cur->n; k++) process(fw, cur->f[k], cur->it[k].uii, cur->it[k].simple, cur->it[k].nr, cur->tg.a + cur->it[k].t0, cur->atg.a + cur->it[k].a0);
 		STAGE(6);
 		tscStage[tscW(w)][7] += cur->n;
 		fw->nflooded += cur->n;
