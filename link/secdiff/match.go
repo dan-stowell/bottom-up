@@ -21,6 +21,8 @@ type differ struct {
 
 	pcfileBytesDiffer int
 	pctabExplained    bool
+
+	incoming map[int32][]int32 // (voteByReferences) relocations into hlink symbols that share their name, by target
 }
 
 func (d *differ) desc(m *lmap, a uint64) string {
@@ -174,6 +176,11 @@ func (d *differ) matchGroup(hl, sl []int32, strict bool) {
 			}
 		case len(free) > 0:
 			pick = free[0]
+			if len(free) > 1 {
+				if v := d.voteByReferences(hi, free); v >= 0 {
+					pick = v
+				}
+			}
 		default:
 			// nothing fits: take the only unmatched one of the same size, if there is just one, so that its
 			// differences get reported
@@ -208,6 +215,61 @@ func (d *differ) matchGroup(hl, sl []int32, strict bool) {
 			}
 		}
 	}
+}
+
+// voteByReferences picks, among stock candidates that fit hlink symbol hi equally (same name, size and bytes:
+// e.g. two packages' file-local assembly functions of one name), the one the stock binary's references point
+// at from the counterparts of hi's matched referrers: decoded from the stock bytes at the corresponding site
+// for absolute and pc-relative relocations. -1 unless exactly one candidate gets votes.
+func (d *differ) voteByReferences(hi int32, cands []int32) int32 {
+	H, S := d.H, d.S
+	if d.incoming == nil {
+		d.incoming = map[int32][]int32{}
+		for k := range H.relocs {
+			r := &H.relocs[k]
+			if len(H.byName[H.tnames[r.tname]]) < 2 {
+				continue
+			}
+			if t := d.hlinkTarget(r); t >= 0 {
+				d.incoming[t] = append(d.incoming[t], int32(k))
+			}
+		}
+	}
+	votes := map[int32]int{}
+	for _, k := range d.incoming[hi] {
+		r := &H.relocs[k]
+		src := H.containing(r.site)
+		if src < 0 || H.syms[src].match < 0 {
+			continue
+		}
+		s := &S.syms[H.syms[src].match]
+		ssite := s.addr + (r.site - H.syms[src].addr)
+		if !S.img.inFile(ssite, uint64(r.siz)) {
+			continue
+		}
+		v := readSized(S.img.view(ssite, uint64(r.siz)))
+		var ta uint64
+		switch t := objabi.RelocType(r.typ); {
+		case t == objabi.R_ADDR && r.siz == 8:
+			ta = uint64(int64(v) - r.add)
+		case (t == objabi.R_CALL || t == objabi.R_PCREL) && r.siz == 4:
+			ta = uint64(int64(int32(uint32(v))) + int64(ssite) + 4 - r.add)
+		default:
+			continue
+		}
+		for _, c := range cands {
+			if S.syms[c].addr == ta {
+				votes[c]++
+			}
+		}
+	}
+	if len(votes) != 1 {
+		return -1
+	}
+	for c := range votes {
+		return c
+	}
+	return -1
 }
 
 // relocsAgree: the stock bytes of s at hlink's relocation sites of h are the relocations evaluated with the
