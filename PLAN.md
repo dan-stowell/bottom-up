@@ -63,4 +63,8 @@ M4. Within 3x of the floor on MinIO; kube-apiserver passes.
 
 Log (append one line per milestone reached, with the oracle number):
 
+- 2026-11-13T17:47:38Z M0: floors (MinIO 6.9 ms, kube-apiserver 11.7 ms hardware; FLOOR.md), frozen objects for both, bench + floor scripts. Oracle harness: link/try.sh, link/stdtest.sh; secdiff still being built.
+- 2026-11-13T17:47:38Z M1: hello and 4 other programs linked by hlink run like the stock link (link/test.sh). Oracle number: 5 programs.
+- 2026-11-13T17:47:38Z M2: all 259 standard-library packages that have tests and build without cgo: test binaries linked by hlink give the stock link's results (link/stdtest.sh over `go list std`). MinIO (not yet its tests): 188 ms on 8 cores before any tuning, 3.7% of floor.
+
 Now: M0 finishing: builders are writing link/hlink.c (branch from worktree; merge, then run `link/test.sh`) and link/secdiff (merge, run `link/secdiff.sh /home/exedev/targets/frozen/minio`). Then M1-M3 via `link/try.sh`, `link/stdtest.sh`; regenerate FLOOR.md with `link/bench.sh minio && link/floor.py hlink > FLOOR.md`. kube-apiserver freeze: `FREEZE_GOFLAGS= link/freeze.sh /home/exedev/targets/kubernetes/cmd/kube-apiserver kube-apiserver`.

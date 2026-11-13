@@ -42,3 +42,22 @@
   output for ifaces and MinIO, 5 std packages' tests agree with the stock link, MinIO --version, live set equal
   to fclink's 360,376). The builder found two fclink bugs (both only with -nodce: pc tables given data
   addresses; function table unsorted when a function is aligned above 32). **M1 reached.**
+- 2026-11-13T17:47:55Z **M2.** `link/stdtest.sh` over every package of `go list std`: 254 agreed with the stock link, 5 differed
+  (crypto/cipher, crypto/fips140, crypto/internal/fips140only, crypto/internal/fips140test, crypto/tls), 100
+  have no tests, 2 need cgo. The 5 were one bug inherited from fclink: `go:fipsinfo` is *defined* by the check
+  package (a linknamed variable) and the linker must overwrite it; fclink (and the port) only wrote it when it
+  was undefined, so any binary run with GODEBUG=fips140=on died with "no verification checksum found". Fixed in
+  link/special.c; the 5 pass; crypto/fips140 added to link/test.sh. Oracle number: 259 of 259 std test
+  binaries; MinIO links and runs `--version` (its own tests are M3). hlink untuned: 188 ms for MinIO on 8
+  cores. *What did the oracle number do since the last milestone?* 0 -> 5 programs -> 259 std test binaries in
+  one session; nothing stalled. Next blocker: MinIO's own tests need a toolexec run over its packages, and
+  the linker is at 3.7% of floor: the front half (resolve, reachability) is being rewritten around streaming
+  pre-passes and partitioned joins (explore/linkos/lazy.c is the spike), the back half gets a hugetlbfs
+  output mode (IDEAS.md #1).
+- 2026-11-13T17:47:55Z Spike result (explore/linkos/lazy.c, MinIO, live set within 1 of fclink's before the fix below):
+  resolving content-addressed symbols only when reached still reaches 1.29 M of the 2.68 M (every live
+  function's pc tables and funcdata), so it halves that join rather than removing it, and costs byte-identity
+  with the port; a by-name join over definitions + references is 1.4 M records of which 833 k references
+  name only 45 k distinct symbols, almost all never defined (DWARF and file symbols): references must not be
+  joined eagerly. Also: a pool that spins between jobs collapses when the machine is busy (flood 145 ms on
+  1 thread, 321-507 ms on 8 with a test suite running beside it): spin briefly, then futex.

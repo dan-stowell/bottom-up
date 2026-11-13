@@ -51,7 +51,7 @@ mapfile -t F < "$minio/link.flags"
 (cd "$minio" && jcheck minio -importcfg importcfg.link "${F[@]}" main.a) || fail=1
 
 # ---- 3. standard-library tests
-read -r -a std <<< "${STD:-sort strings strconv fmt reflect}"
+read -r -a std <<< "${STD:-sort strings strconv fmt reflect crypto/fips140}"
 "$here/link/stdtest.sh" "${std[@]}" || fail=1
 
 # ---- 4. MinIO

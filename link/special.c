@@ -108,9 +108,12 @@ static void makeSpecials(void) {
 		g = lookupC("runtime.disableMemoryProfiling", 0);
 		if (isLive(g)) addSpecial(&dataSpecials, g, 1, 1, spByte1, NULL, 0, 0, NULL);
 	}
-	// go:fipsinfo (crypto/internal/fips140/check.Linkinfo): magic, the hash of the FIPS sections, their bounds
+	// go:fipsinfo (crypto/internal/fips140/check.Linkinfo): magic, the hash of the FIPS sections, their bounds.
+	// The check package defines it (a linknamed variable); the linker writes its content, as the stock linker
+	// does (ld.loadfips). fclink skipped it when it was defined, which is always: with GODEBUG=fips140=on the
+	// program then died with "no verification checksum found".
 	g = lookupC("go:fipsinfo", 0);
-	if (isLive(g) && !isDef(g)) {
+	if (isLive(g)) {
 		fipsinfo = g;
 		addSpecial(&dataSpecials, g, 16 + 32 + 8 + 8 * 8, 8, spFipsinfo, NULL, 0, 0, NULL);
 	}

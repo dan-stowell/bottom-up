@@ -7,3 +7,6 @@
 - same, random-load index stream was serially dependent: **accept** (counter through a multiplicative hash; rand_16m_1t 316 -> 530 M/s).
 - same, freeze.sh kept an old main.a / stale objs and split quoted flags: **accept** (clears first; shlex).
 - same, bench.sh subtracted minima of different runs: **accept** (phase table now comes from the run with the fastest process).
+- 20261113 codex-hlink-port (9 findings). 1 (u32 size sums wrap for >4 GB images), 2 (GC bitmap index not bounded), 3 (symbol index not bounded in oref), 4 (index tables not validated at load), 5 (FuncInfo length), 6 (R_METHODOFF sentinel writes 4 bytes whatever the declared size), 7 (typeString varint): **defer as one item**: all need a malformed or >4 GB object, which the stock compiler does not write; fclink has the same holes. To do once the phases stop moving: one validation pass at load (index tables monotonic and in range, symbol indices in range), then the accessors can stay unchecked.
+- same, 8 (plain read of state[] racing with atomic or): **accept**, fix in the reachability rewrite.
+- same, 9 (iswupper uses libc's Unicode tables, Go uses Unicode 17): **accept**: generate the upper-case ranges from Go's unicode package in link/gen/mktables.go.

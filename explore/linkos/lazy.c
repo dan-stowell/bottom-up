@@ -132,7 +132,7 @@ static inline i32 r_off(const u8 *r) { return (i32)rd32(r); }
 static inline u16 r_type(const u8 *r) { return rd16(r + 5); }
 static inline i64 r_add(const u8 *r) { return (i64)rd64(r + 7); }
 
-static u32 *canon;        // per slot defined or referenced by name: its canonical definition. Other slots: unused.
+static u32 *canon;        // per slot defined or referenced by name: its canonical definition; content-addressed slots: set after the flood
 static u8 *state;         // per slot
 enum { stLive = 1, stUsedInIface = 2, stIfaceDone = 4, stPC = 8, stFuncdata = 16, stNameNeeded = 32, stUndef = 64, stDup = 128 };
 static u32 builtins[NBUILTIN];
@@ -242,12 +242,10 @@ static object *primary_get(const u8 *name, size_t n) {
 static void pkg_bases(int w, int i) {
   object *o = objs[i]; const u8 *pk = o->b + rd32(o->b + 20 + 4 * BlkPkgIdx);
   o->pkgbase = malloc(4 * (o->npkg + 1)); o->pkgbase[0] = ~0u;
-  for (u32 p = 0; p < o->npkg; p++) {     // package index p+1
+  for (u32 p = 1; p < o->npkg; p++) {     // (entry 0 is the invalid index)
     u32 len = rd32(pk + 8 * p), off = rd32(pk + 8 * p + 4);
-    char tmp[16]; const u8 *name = o->b + off;
-    if (len < 16) { memset(tmp, 0, 16); memcpy(tmp, name, len); }   // (namekey reads 16 bytes; a short tail is fine inside the object)
-    object *q = primary_get(name, len);
-    o->pkgbase[p + 1] = q ? q->base : ~0u;
+    object *q = primary_get(o->b + off, len);
+    o->pkgbase[p] = q ? q->base : ~0u;
   }
 }
 static void load(const char *cfgfile, const char *mainfile) {
@@ -284,19 +282,26 @@ static void load(const char *cfgfile, const char *mainfile) {
   par(nobjs, pkg_bases);
 }
 
-// ---- resolve: the table of definitions by name
-// Records are scattered by the top bits of their key into NPART partitions per worker; each partition is then
-// inserted by one thread into its own stretch of the table, so the build takes no lock and no atomic.
+// ---- resolve: the join by name
+// One record per definition by name and per reference by name is scattered by the top bits of its key into
+// NPART partitions per worker. Each partition is then grouped by one thread into its own small table (so the
+// build takes no lock), package-indexed definitions whose name is in some table join in (a Bloom filter of the
+// tables' keys keeps most of them out), and a last pass per partition tells every record's slot its winner.
 #define NPART 256
 typedef struct { key k; u64 val; } nrec;           // val: rank << 32 | ~gid (the winner is the maximum)
-typedef struct { nrec *r; u32 n, cap; } nlist;
-typedef struct { nlist part[NPART]; vec miss; vec ifaceref; u64 nprobe; char pad[64]; } rworker;
+#define CHUNK 340
+typedef struct chunk { struct chunk *next; u64 n; nrec r[CHUNK]; } chunk;
+typedef struct { u64 k1, k2, val; } tent;
+typedef struct { chunk *head[NPART], *tail[NPART]; u8 *slab, *slabend; u32 *scratch; u32 scratchcap; u64 nrec, ndistinct, npkghit; char pad[64]; } rworker;
 static rworker *rw;
-static struct { key *k; u64 *val; u32 pshift, pmask; } T;      // partition p owns entries [p << pshift, (p+1) << pshift)
+static struct { tent *e; u32 mask; } T[NPART];
+#define BLOOMBITS (1u << 23)
+static u64 *bloom;
 #define rankNoDup (1u << 31)
 #define rankContent (1u << 30)
 #define rankDef (1u << 29)
 #define rankIface (1u << 28)
+#define IFACE ((u64)rankIface << 32)
 static inline u32 rank_of(const object *o, u32 j, const u8 *s) {
   u32 siz = s_siz(s), r = (siz < (1u << 28) - 1 ? siz : (1u << 28) - 1) | rankDef;
   if (s_flag2(s) & SymFlagUsedInIface) r |= rankIface;
@@ -306,153 +311,127 @@ static inline u32 rank_of(const object *o, u32 j, const u8 *s) {
   if (s_type(s) == K_STEXT || s_type(s) == K_STEXTFIPS || dn) r |= rankContent;
   return r;
 }
-static inline void nadd(nlist *l, nrec r) { if (l->n == l->cap) { l->cap = l->cap ? 2 * l->cap : 256; l->r = realloc(l->r, (size_t)l->cap * sizeof(nrec)); } l->r[l->n++] = r; }
-static void scan_defs(int w, int ui) {
+static inline void *slab(rworker *w, size_t n) {
+  if (w->slab + n > w->slabend) { w->slab = big(4 << 20); w->slabend = w->slab + (4 << 20); }
+  void *p = w->slab; w->slab += n; return p;
+}
+static inline void nadd(rworker *w, nrec r) {
+  u32 p = r.k.k1 >> 56; chunk *c = w->tail[p];
+  if (!c || c->n == CHUNK) { chunk *d = slab(w, sizeof(chunk)); d->next = 0; d->n = 0; if (c) c->next = d; else w->head[p] = d; w->tail[p] = c = d; }
+  c->r[c->n++] = r;
+}
+static void scan_names(int w, int ui) {
   unit *u = &units[ui]; object *o = u->o;
-  u32 lo = u->lo > o->nplo ? u->lo : o->nplo, hi = u->hi < o->reflo ? u->hi : o->reflo;
-  for (u32 j = lo; j < hi; j++) {
-    const u8 *s = symrec(o, j); u32 gid = o->base + j;
-    if (s_abi(s) == SymABIstatic || s_namelen(s) == 0) { canon[gid] = gid; continue; }
-    key k = namekey(s_name(o, s), s_namelen(s), s_abi(s));
-    nadd(&rw[w].part[k.k1 >> 56], (nrec){k, (u64)rank_of(o, j, s) << 32 | (u32)~gid});
+  u32 lo = u->lo > o->nplo ? u->lo : o->nplo;
+  for (u32 j = lo; j < u->hi; j++) {
+    const u8 *s = symrec(o, j); u32 gid = o->base + j, rk;
+    if (j < o->reflo) {
+      if (s_abi(s) == SymABIstatic || s_namelen(s) == 0) { canon[gid] = gid; continue; }
+      rk = rank_of(o, j, s);
+    } else rk = s_flag2(s) & SymFlagUsedInIface ? rankIface : 0;
+    nadd(&rw[w], (nrec){namekey(s_name(o, s), s_namelen(s), s_abi(s)), (u64)rk << 32 | (u32)~gid});
   }
 }
-static u32 part_n[NPART];
-static void build_part(int w, int p) {
-  key *tk = T.k + ((size_t)p << T.pshift); u64 *tv = T.val + ((size_t)p << T.pshift);
-  for (int t = 0; t < nthreads; t++) {
-    nlist *l = &rw[t].part[p];
-    for (u32 i = 0; i < l->n; i++) {
-      nrec *r = &l->r[i];
-      for (u32 h = (u32)(r->k.k1 >> 8) & T.pmask;; h = (h + 1) & T.pmask) {
-        if (tk[h].k1 == 0) { tk[h] = r->k; tv[h] = r->val; break; }
-        if (tk[h].k1 == r->k.k1 && tk[h].k2 == r->k.k2) {
-          u64 iface = (tv[h] | r->val) & ((u64)rankIface << 32);      // the flag rides along, whoever wins
-          u64 a = tv[h] & ~((u64)rankIface << 32), b = r->val & ~((u64)rankIface << 32);
-          if ((a >> 62) == 3 && (b >> 62) == 3) die("duplicated definition of a symbol (ids %u and %u)", ~(u32)a, ~(u32)b);
-          tv[h] = (a > b ? a : b) | iface; break;
+static inline u64 better(u64 a, u64 b) {      // the winner of two records of one name; the interface flag rides along
+  u64 iface = (a | b) & IFACE; a &= ~IFACE; b &= ~IFACE;
+  if ((a >> 62) == 3 && (b >> 62) == 3 && a != b) die("duplicated definition of a symbol (ids %u and %u)", ~(u32)a, ~(u32)b);
+  return (a > b ? a : b) | iface;
+}
+static void build_part(int wi, int p) {
+  rworker *w = &rw[wi]; u64 n = 0;
+  for (int t = 0; t < nthreads; t++) for (chunk *c = rw[t].head[p]; c; c = c->next) n += c->n;
+  u32 size = 64; while (size < 2 * n) size <<= 1;
+  if (w->scratchcap < size) { free(w->scratch); w->scratch = malloc(4 * (size_t)size + sizeof(tent) * (size_t)size / 2 + 64); w->scratchcap = size; }
+  u32 *idx = w->scratch; tent *ent = (tent *)(idx + size); u32 nd = 0, mask = size - 1;
+  memset(idx, 0, 4 * (size_t)size);
+  for (int t = 0; t < nthreads; t++)
+    for (chunk *c = rw[t].head[p]; c; c = c->next)
+      for (u32 i = 0; i < c->n; i++) {
+        nrec *r = &c->r[i];
+        for (u32 h = (u32)(r->k.k1 >> 8) & mask;; h = (h + 1) & mask) {
+          u32 e = idx[h];
+          if (!e) { idx[h] = ++nd; ent[nd - 1] = (tent){r->k.k1, r->k.k2, r->val}; break; }
+          if (ent[e - 1].k1 == r->k.k1 && ent[e - 1].k2 == r->k.k2) { ent[e - 1].val = better(ent[e - 1].val, r->val); break; }
         }
       }
-    }
+  // the partition's table: the distinct names, at half load or less
+  u32 tsize = 16; while (tsize < 2 * nd) tsize <<= 1;
+  tent *te = slab(w, sizeof(tent) * (size_t)tsize); memset(te, 0, sizeof(tent) * (size_t)tsize);
+  for (u32 i = 0; i < nd; i++) {
+    for (u32 h = (u32)(ent[i].k1 >> 8) & (tsize - 1);; h = (h + 1) & (tsize - 1)) if (!te[h].k1) { te[h] = ent[i]; break; }
+    u64 b1 = ent[i].k2 % BLOOMBITS, b2 = (ent[i].k2 >> 32) % BLOOMBITS;
+    __atomic_fetch_or(&bloom[b1 >> 6], 1ull << (b1 & 63), __ATOMIC_RELAXED); __atomic_fetch_or(&bloom[b2 >> 6], 1ull << (b2 & 63), __ATOMIC_RELAXED);
+  }
+  T[p].e = te; T[p].mask = tsize - 1; w->nrec += n; w->ndistinct += nd;
+}
+static inline tent *t_find(key k) {
+  u32 p = k.k1 >> 56; tent *te = T[p].e; u32 mask = T[p].mask;
+  if (!te) return 0;
+  for (u32 h = (u32)(k.k1 >> 8) & mask;; h = (h + 1) & mask) {
+    if (te[h].k1 == 0) return 0;
+    if (te[h].k1 == k.k1 && te[h].k2 == k.k2) return &te[h];
   }
 }
-static inline u64 *t_find(key k) {
-  u32 p = k.k1 >> 56; key *tk = T.k + ((size_t)p << T.pshift);
-  for (u32 h = (u32)(k.k1 >> 8) & T.pmask;; h = (h + 1) & T.pmask) {
-    if (tk[h].k1 == 0) return 0;
-    if (tk[h].k1 == k.k1 && tk[h].k2 == k.k2) return T.val + ((size_t)p << T.pshift) + h;
-  }
-}
-static void finish_defs(int w, int ui) {      // every definition by name learns its winner
-  unit *u = &units[ui]; object *o = u->o;
-  u32 lo = u->lo > o->nplo ? u->lo : o->nplo, hi = u->hi < o->reflo ? u->hi : o->reflo;
-  for (u32 j = lo; j < hi; j++) {
-    const u8 *s = symrec(o, j); u32 gid = o->base + j;
-    if (s_abi(s) == SymABIstatic || s_namelen(s) == 0) continue;
-    u64 v = *t_find(namekey(s_name(o, s), s_namelen(s), s_abi(s)));
-    u32 c = ~(u32)v; canon[gid] = c;
-    if (c == gid && (v >> 32 & rankIface)) __atomic_fetch_or(&state[c], stUsedInIface, __ATOMIC_RELAXED);
-  }
-}
-// The small set of names that are referenced by name but not defined by name: package-indexed definitions
-// (assembly and linkname references reach them this way), names the linker itself looks up, or nothing.
-static struct { key *k; u64 *def; u32 *firstref; u8 *iface; u32 mask, n; } U;
-static u32 u_slot(key k, int insert) {
-  for (u32 h = k.k1 & U.mask;; h = (h + 1) & U.mask) {
-    if (U.k[h].k1 == 0) { if (!insert) return ~0u; U.k[h] = k; U.firstref[h] = ~0u; U.n++; return h; }
-    if (U.k[h].k1 == k.k1 && U.k[h].k2 == k.k2) return h;
-  }
-}
-static void scan_refs(int w, int ui) {
-  unit *u = &units[ui]; object *o = u->o;
-  u32 lo = u->lo > o->reflo ? u->lo : o->reflo;
-  for (u32 j = lo; j < u->hi; j++) {
-    const u8 *s = symrec(o, j); u32 gid = o->base + j;
-    u64 *v = t_find(namekey(s_name(o, s), s_namelen(s), s_abi(s)));
-    if (!v) { push(&rw[w].miss, gid); continue; }
-    u32 c = ~(u32)*v; canon[gid] = c;
-    if (s_flag2(s) & SymFlagUsedInIface) __atomic_fetch_or(&state[c], stUsedInIface, __ATOMIC_RELAXED);
-  }
-}
-static u64 pkgdef_hits[64][8];
-static void scan_pkgdefs(int w, int ui) {      // package-indexed definitions whose name is in U
+static void scan_pkgdefs(int w, int ui) {      // package-indexed definitions: themselves, unless something refers to their name
   unit *u = &units[ui]; object *o = u->o;
   u32 hi = u->hi < o->ndef ? u->hi : o->ndef;
   for (u32 j = u->lo; j < hi; j++) {
-    const u8 *s = symrec(o, j);
-    if (s_flag2(s) & SymFlagUsedInIface) state[o->base + j] |= stUsedInIface;
+    const u8 *s = symrec(o, j); u32 gid = o->base + j;
+    if (s_flag2(s) & SymFlagUsedInIface) __atomic_fetch_or(&state[gid], stUsedInIface, __ATOMIC_RELAXED);
     if (s_abi(s) == SymABIstatic || s_namelen(s) == 0) continue;
     key k = namekey(s_name(o, s), s_namelen(s), s_abi(s));
-    u32 h = u_slot(k, 0);
-    if (h == ~0u) continue;
-    u64 val = (u64)(rank_of(o, j, s) & ~rankIface) << 32 | (u32)~(o->base + j), old = __atomic_load_n(&U.def[h], __ATOMIC_RELAXED);
-    while (val > old && !__atomic_compare_exchange_n(&U.def[h], &old, val, 1, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
-    pkgdef_hits[w][0]++;
+    u64 b1 = k.k2 % BLOOMBITS, b2 = (k.k2 >> 32) % BLOOMBITS;
+    if (!(bloom[b1 >> 6] >> (b1 & 63) & 1) || !(bloom[b2 >> 6] >> (b2 & 63) & 1)) continue;
+    tent *e = t_find(k);
+    if (!e) continue;
+    u64 val = (u64)rank_of(o, j, s) << 32 | (u32)~gid, old = __atomic_load_n(&e->val, __ATOMIC_RELAXED);
+    while (!__atomic_compare_exchange_n(&e->val, &old, better(old, val), 1, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
+    rw[w].npkghit++;
+  }
+}
+static void finish_part(int wi, int p) {       // every record's slot learns its name's winner
+  for (int t = 0; t < nthreads; t++)
+    for (chunk *c = rw[t].head[p]; c; c = c->next)
+      for (u32 i = 0; i < c->n; i++) {
+        nrec *r = &c->r[i]; u32 gid = ~(u32)r->val;
+        if (gid == ~0u) continue;                      // (a name the linker wants: not a slot)
+        canon[gid] = ~(u32)t_find(r->k)->val;
+      }
+  tent *te = T[p].e;
+  if (te) for (u32 h = 0; h <= T[p].mask; h++) {
+    if (!te[h].k1) continue;
+    u32 c = ~(u32)te[h].val; if (c == ~0u) continue;
+    u8 f = (te[h].val >> 32 & rankDef ? 0 : stUndef) | (te[h].val & IFACE ? stUsedInIface : 0);
+    if (f) __atomic_fetch_or(&state[c], f, __ATOMIC_RELAXED);
   }
 }
 static const char *linker_names[] = {"runtime.firstmoduledata", "runtime.lastmoduledatap", "runtime.runtime_inittasks", "main..inittask", "runtime..inittask",
   "runtime.unreachableMethod", "runtime.mapinitnoop", "runtime.deferreturn", "runtime.memProfileInternal", "runtime.disableMemoryProfiling", "main.main",
   "_rt0_amd64_linux", "runtime.buildVersion", "runtime.modinfo", "runtime.defaultGOROOT", "runtime.godebugDefault", 0};
+static key strkey(const char *name, u16 abi) { size_t n = strlen(name); char buf[512]; memset(buf, 0, sizeof buf); memcpy(buf, name, n); return namekey((const u8 *)buf, n, abi); }
 static u32 lookup(const char *name, u16 abi) {
-  size_t n = strlen(name); char buf[256]; memset(buf, 0, sizeof buf); memcpy(buf, name, n);
-  key k = namekey((const u8 *)buf, n, abi);
-  u64 *v = t_find(k); if (v) return ~(u32)*v;
-  u32 h = u_slot(k, 0); if (h == ~0u) return 0;
-  if (U.def[h]) return ~(u32)U.def[h];
-  return U.firstref[h] == ~0u ? 0 : U.firstref[h];
+  tent *e = t_find(strkey(name, abi)); if (!e) return 0;
+  u32 c = ~(u32)e->val; return c == ~0u ? 0 : c;
 }
-static double t_res[8];
 static void resolve(void) {
   double t0 = now_ms();
-  canon = big(4 * ((size_t)nslots + 1)); state = big((size_t)nslots + 1);
+  canon = big(4 * ((size_t)nslots + 1)); state = big((size_t)nslots + 1); bloom = big(BLOOMBITS / 8);
   rw = calloc(nthreads, sizeof(rworker));
-  par(nunits, scan_defs);
-  u32 total = 0, mx = 0;
-  for (int p = 0; p < NPART; p++) { for (int t = 0; t < nthreads; t++) part_n[p] += rw[t].part[p].n; total += part_n[p]; if (part_n[p] > mx) mx = part_n[p]; }
-  T.pshift = 4; while ((1u << T.pshift) < 2 * mx) T.pshift++;
-  T.pmask = (1u << T.pshift) - 1;
-  T.k = big(sizeof(key) * ((size_t)NPART << T.pshift)); T.val = big(8 * ((size_t)NPART << T.pshift));
+  // names the linker itself looks up: package-indexed definitions of these must join by name
+  for (int i = 0; i < NBUILTIN; i++) nadd(&rw[0], (nrec){strkey(builtin_names[i].name, builtin_names[i].abi), 0});
+  for (const char **n = linker_names; *n; n++) for (int abi = 0; abi < 2; abi++) nadd(&rw[0], (nrec){strkey(*n, abi), 0});
+  par(nunits, scan_names);
   double t1 = now_ms();
   par(NPART, build_part);
   double t2 = now_ms();
-  par(nunits, finish_defs);
-  double t3 = now_ms();
-  par(nunits, scan_refs);
-  double t4 = now_ms();
-  // the misses: one small table, built on this thread in slot order so that "the first reference" is the lowest id
-  u32 nmiss = 0; for (int t = 0; t < nthreads; t++) nmiss += rw[t].miss.n;
-  U.mask = 1024; while (U.mask < 4 * (nmiss + 1024)) U.mask <<= 1;
-  U.k = calloc(U.mask, sizeof(key)); U.def = calloc(U.mask, 8); U.firstref = malloc(4 * (size_t)U.mask); U.iface = calloc(U.mask, 1); U.mask--;
-  for (int t = 0; t < nthreads; t++)
-    for (u32 i = 0; i < rw[t].miss.n; i++) {
-      u32 gid = rw[t].miss.v[i], j; object *o = obj_of(gid, &j); const u8 *s = symrec(o, j);
-      u32 h = u_slot(namekey(s_name(o, s), s_namelen(s), s_abi(s)), 1);
-      if (gid < U.firstref[h]) U.firstref[h] = gid;
-      if (s_flag2(s) & SymFlagUsedInIface) U.iface[h] = 1;
-    }
-  u32 nu_refs = U.n;
-  for (int i = 0; i < NBUILTIN; i++) { char buf[256] = {0}; strcpy(buf, builtin_names[i].name); u_slot(namekey((u8 *)buf, strlen(buf), builtin_names[i].abi), 1); }
-  for (const char **n = linker_names; *n; n++) for (int abi = 0; abi < 2; abi++) { char buf[256] = {0}; strcpy(buf, *n); u_slot(namekey((u8 *)buf, strlen(buf), abi), 1); }
-  double t5 = now_ms();
   par(nunits, scan_pkgdefs);
-  double t6 = now_ms();
-  u32 nundef = 0;
-  for (int t = 0; t < nthreads; t++)
-    for (u32 i = 0; i < rw[t].miss.n; i++) {
-      u32 gid = rw[t].miss.v[i], j; object *o = obj_of(gid, &j); const u8 *s = symrec(o, j);
-      u32 h = u_slot(namekey(s_name(o, s), s_namelen(s), s_abi(s)), 0);
-      u32 c = U.def[h] ? ~(u32)U.def[h] : U.firstref[h];
-      canon[gid] = c;
-      if (!U.def[h] && c == gid) { state[c] |= stUndef; nundef++; }
-      if (U.iface[h]) state[c] |= stUsedInIface;
-    }
+  double t3 = now_ms();
+  par(NPART, finish_part);
   for (int i = 0; i < NBUILTIN; i++) { u32 g = lookup(builtin_names[i].name, builtin_names[i].abi); builtins[i] = is_def(g) ? g : 0; }
-  double t7 = now_ms();
-  u64 hits = 0; for (int t = 0; t < nthreads; t++) hits += pkgdef_hits[t][0];
-  fprintf(stderr, "resolve: %u defs by name in the table (%u partitions, largest %u, table %.1f MB); %u references missed it: %u names (+%u the linker wants), "
-          "%llu package-indexed definitions matched, %u undefined\n", total, NPART, mx, (sizeof(key) + 8) * ((size_t)NPART << T.pshift) / 1e6, nmiss, nu_refs, U.n - nu_refs, (unsigned long long)hits, nundef);
-  fprintf(stderr, "resolve ms: scan defs %.2f, build %.2f, defs' winners %.2f, refs %.2f, misses %.2f, pkgdefs %.2f, fix %.2f = %.2f\n",
-          t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4, t6 - t5, t7 - t6, t7 - t0);
+  double t4 = now_ms();
+  u64 nrec = 0, nd = 0, hits = 0; for (int t = 0; t < nthreads; t++) { nrec += rw[t].nrec; nd += rw[t].ndistinct; hits += rw[t].npkghit; }
+  fprintf(stderr, "resolve: %llu records by name, %llu distinct names, %llu package-indexed definitions joined\n", (unsigned long long)nrec, (unsigned long long)nd, (unsigned long long)hits);
+  fprintf(stderr, "resolve ms: scan names %.2f, build %.2f, pkgdefs %.2f, finish %.2f = %.2f\n", t1 - t0, t2 - t1, t3 - t2, t4 - t3, t4 - t0);
 }
 
 // ---- the lazy join of content-addressed symbols: a lock-free table of the classes the flood has reached
