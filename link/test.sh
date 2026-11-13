@@ -90,9 +90,18 @@ ow() {
   # a failed link leaves no output
   L -X nodot -o "$f" > /dev/null 2>&1
   [ -e "$f" ] && { ok=0; echo "FAIL overwrite: a failed link left the old output"; }
-  # a directory at the output path is not replaced
+  # a directory or a fifo at the output path is not replaced
   mkdir "$d/dir"; L -o "$d/dir" > /dev/null 2>&1 && { ok=0; echo "FAIL overwrite: linked over a directory"; }
   [ -d "$d/dir" ] || { ok=0; echo "FAIL overwrite: the directory at the output path is gone"; }
+  mkfifo "$d/fifo"; L -o "$d/fifo" > /dev/null 2>&1 && { ok=0; echo "FAIL overwrite: linked over a fifo"; }
+  [ -p "$d/fifo" ] || { ok=0; echo "FAIL overwrite: the fifo at the output path is gone"; }
+  # the sweep (a link that finds no output) removes a dead link's temporary and leaves alone names that only look
+  # like one (another output's temporary, a name of ours)
+  true & local dead=$!; wait $dead
+  touch "$d/.minio.hlink-$dead-0000abcd" "$d/.minio.hlink-$dead-x.hlink-777-0000abcd" "$d/.minio.hlink-$dead-0000abc"; rm -f "$f"
+  L -o "$f" > /dev/null && gone "$f" && [ ! -e "$d/.minio.hlink-$dead-0000abcd" ] && [ -e "$d/.minio.hlink-$dead-x.hlink-777-0000abcd" ] &&
+    [ -e "$d/.minio.hlink-$dead-0000abc" ] || { ok=0; echo "FAIL overwrite: the sweep removed the wrong files"; ls -a "$d"; }
+  rm -f "$d"/.minio.hlink-"$dead"-*
   # two links of different programs (MinIO, MinIO -nodce: 109 and 172 MB) to one path, started together (one of
   # them, at random, after a random delay, so either may claim the old file and either may finish last), over what
   # the previous round left: both succeed, the path holds one of the two whole, and no temporaries remain
@@ -110,7 +119,7 @@ ow() {
   [ "$(temps "$d")" = 0 ] || { ok=0; echo "FAIL overwrite: concurrent links left temporaries"; ls -a "$d"; }
   echo "(overwrite: $rounds concurrent rounds: MinIO won $won1, MinIO -nodce won $won2)"
   rm -rf "$d"
-  [ $ok = 1 ] && echo "PASS overwrite: in place over 300, 20 and 0 MB of garbage = -fresh; symlink, hard link, running binary, directory, failed link; $rounds concurrent rounds whole"
+  [ $ok = 1 ] && echo "PASS overwrite: in place over 300, 20 and 0 MB of garbage = -fresh; symlink, hard link, running binary, directory, fifo, failed link, sweep; $rounds concurrent rounds whole"
   [ $ok = 1 ]
 }
 ow || fail=1
@@ -150,7 +159,8 @@ td() {
       for _ in $(seq ${KILLROUNDS:-20}); do
         cp "$d/old" "$f"
         (cd "$minio" && exec "$hlink" -teardown=$t -o "$f" -importcfg importcfg.link "${F[@]}" main.a > /dev/null) & pid=$!
-        sleep "$(rnd 300)"; kill -$sig $pid 2> /dev/null; wait $pid 2> /dev/null
+        # (at least 30 ms: a kill before the claim, a millisecond in, rightly leaves the old output)
+        sleep "$(awk -v r=$((RANDOM % 300)) 'BEGIN{printf "%.3f", 0.030 + r / 1000}')"; kill -$sig $pid 2> /dev/null; wait $pid 2> /dev/null
         gone "$f" || { ok=0; echo "FAIL teardown: a killed link's child is still running"; pkill -9 -f -- "-o $f "; }
         n=$((n + 1))
         if [ ! -e "$f" ]; then absent=$((absent + 1)); elif cmp -s "$f" "$d/new"; then new=$((new + 1)); else

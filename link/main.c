@@ -230,10 +230,12 @@ static const flagdef flagdefs[] = {
 static void usage(void) {
 	fprintf(stderr, "usage: hlink -o out -importcfg importcfg.link [-buildid id] [-X pkg.name=val]... [-stats] [-j N] [-nodce] "
 	                "[-dumplive file] [-dumpmap file] [-E entry] [-hugetlb] [-fresh] [-nodetach] [-teardown fork|madvise|exit] main.o\n"
-	                "The output is written under a temporary name and renamed to out when complete; out does not exist while the\n"
-	                "link runs. By default the old out is rewritten in place to reuse its page-cache pages when it is a regular\n"
-	                "file of ours with no other hard link and not running: a process that opened it before the link, or a hard link\n"
-	                "made to its temporary during the link, sees it rewritten. -fresh never writes the old file.\n");
+	                "The output is written under a temporary name in out's directory (which must be writable) and renamed to out\n"
+	                "when complete; out does not exist while the link runs. By default the old out is rewritten in place, to reuse\n"
+	                "its page-cache pages, when it is a regular file of ours with no other hard link and not the image of a process\n"
+	                "started by exec: a process that opened or mapped it before the link (also a program run as `ld.so out` or under\n"
+	                "valgrind or qemu), or a hard link made to its temporary during the link, sees it rewritten. -fresh never writes\n"
+	                "the old file.\n");
 	_exit(2);
 }
 
@@ -358,8 +360,9 @@ static void printCompleteRow(const char *note) {
 
 // ---- fatal signals: a link they end removes its temporary (write.c's claimOutput). A signal the caller had
 // ignored stays ignored (nohup, a background job's SIGINT, SIGPIPE ignored so that a write says EPIPE).
-static const int cleanupSigs[] = {SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGPIPE, SIGBUS, SIGSEGV};
-static const int forwardSigs[] = {SIGINT, SIGTERM, SIGHUP, SIGQUIT}; // (the ones sent from outside)
+static const int cleanupSigs[] = {SIGINT,  SIGTERM, SIGHUP,  SIGQUIT, SIGPIPE, SIGALRM, SIGUSR1, SIGUSR2,
+                                  SIGXCPU, SIGXFSZ, SIGABRT, SIGBUS,  SIGSEGV, SIGFPE,  SIGILL};
+static const int forwardSigs[] = {SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGALRM, SIGUSR1, SIGUSR2}; // (sent from outside)
 #define NSIGS(a) (int)(sizeof a / sizeof a[0])
 static volatile pid_t forwardTo; // -teardown fork, in the parent: the linking child
 
@@ -383,8 +386,8 @@ static void catchFatalSignals(void) { setHandlers(cleanupSigs, NSIGS(cleanupSigs
 
 // detach forks. The parent never returns from it: it waits for the child's word that the output is complete
 // (one byte on a pipe), prints the -stats row for that moment and exits 0; if the pipe closes without that byte,
-// it exits as the child did. Meanwhile it passes SIGINT, SIGTERM, SIGHUP and SIGQUIT on to the child, so that the
-// child removes its temporary before either goes (the parent's death would SIGKILL the child: PR_SET_PDEATHSIG).
+// it exits as the child did. Meanwhile it passes forwardSigs on to the child, so that the child removes its
+// temporary before either goes (the parent's death would SIGKILL the child: PR_SET_PDEATHSIG).
 // The child returns and links. It runs before any thread starts and before anything is mapped, so the fork is
 // cheap and so is the parent's own exit.
 static void detach(void) {

@@ -57,9 +57,11 @@ static void createHuge(void) {
 // a new file's huge pages must be reserved). Unlinking a 110 MB output and filling a new one costs a page-cache
 // allocation and a fault per 4 KiB page (31-39 ms on ext4 for MinIO); the pages of the file a rebuild replaces are
 // already there (13 ms to fill). So the claimed file is rewritten in place when it is a regular file (the claim
-// renames a symlink itself, not its target), ours, with no other hard link, and not being executed (opening it for
-// writing fails with ETXTBSY; while we hold it open for writing, nobody can exec it). The claim opens it and sets
-// its mode to 0; its hard-link count is checked again on the open file right before the first write (reuseOutput).
+// renames a symlink itself, not its target), ours, with no other hard link, and not the image of a process started
+// by exec (exec denies writes: opening it for writing fails with ETXTBSY; and while we hold it open for writing,
+// nobody can exec it). The claim opens it and sets its mode to 0; its hard-link count is checked again on the open
+// file right before the first write (reuseOutput). A program that maps the file without exec (run as
+// `ld.so out`, or under valgrind or qemu-user) gets no ETXTBSY: it is a reader like any other (below).
 // A claimed file that is not reused is unlinked at once, held by an O_PATH descriptor so that freeing its pages
 // (15-25 ms for MinIO) happens when the process ends: with -teardown fork, after the caller's wait has returned
 // (on hugetlbfs it is not held: the new file needs its huge pages).
@@ -69,20 +71,27 @@ static void createHuge(void) {
 //     new file would get: a reused file is zeroed before the write pass), at its final size, with mode
 //     0755 & ~umask. Once a link has started, the path never again shows the old executable or a partial image,
 //     whether the link succeeds, fails or is killed. Of concurrent links to one path the last to finish wins;
-//     each wrote a file of its own.
-//   - A failed link, or one ended by SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGPIPE, SIGBUS or SIGSEGV, removes its
-//     temporary (with -teardown fork the parent passes SIGINT, SIGTERM, SIGHUP and SIGQUIT on to the linking child
-//     and exits as it does). A link killed by SIGKILL leaves its temporary behind (mode 0 if it is the reused old
-//     file): the next link that finds nothing at the output path removes the temporaries of dead links (kill(pid,
-//     0) says ESRCH) to the same name that are ours, after its own output is complete (with -teardown fork, after
-//     the caller's wait). A leftover survives while every later link finds an output there, which is the case
-//     only if another link completed after the killed one had claimed. (A pid seen from another pid namespace
-//     sharing the directory looks dead: do not link to one path from two pid namespaces at once.)
+//     each wrote a file of its own. Something other than a regular file or a symlink at the path (a directory,
+//     a device) is refused and left alone. The directory must be writable (as for go tool link, which removes
+//     the old output first): a writable output in a read-only directory is not linked to.
+//   - A failed link, or one ended by a signal of main.c's cleanupSigs (SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGPIPE,
+//     SIGALRM, SIGUSR1, SIGUSR2, SIGXCPU, SIGXFSZ, SIGABRT, SIGBUS, SIGSEGV, SIGFPE, SIGILL; those the caller ignores
+//     stay ignored), removes its temporary; with -teardown fork the parent passes the ones sent from outside
+//     (forwardSigs) on to the linking child and exits as it does. A link that dies any other way leaves its
+//     temporary behind (mode 0 if it is the reused old file): SIGKILL, another fatal signal, a stack overflow (the
+//     handler has no stack of its own), or with -teardown fork a signal to the parent that is not forwarded (the
+//     child then gets SIGKILL). The next link that finds nothing at the output path removes the temporaries, named
+//     exactly .<name>.hlink-<pid>-<8 hex digits> and ours, of links whose pid is gone (kill(pid, 0) says ESRCH),
+//     after its own output is complete (with -teardown fork, after the caller's wait). A leftover survives while
+//     every later link finds an output there, which is the case only if another link completed after the dead one
+//     had claimed. (A pid seen from another pid namespace sharing the directory looks dead: do not link to one path
+//     from two pid namespaces at once.)
 //   - What page reuse leaves exposed, the old inode being rewritten in place (-fresh leaves none of it: the old
 //     inode is never written):
 //       * a process that opened or mapped the old output before the claim keeps the old inode and sees it change:
-//         zeros, then the new image, and a new size (its mapping beyond the new size gets SIGBUS). A running
-//         executable is never reused, so no running program sees this, but a reader that has the file open does;
+//         zeros, then the new image, and a new size (its mapping beyond the new size gets SIGBUS). A program started
+//         by exec is never reused, so it is safe; one that maps the file without exec (ld.so, valgrind, qemu-user)
+//         is such a reader and can crash;
 //       * a hard link to the temporary made after the last count check, just before the first write. The file
 //         has mode 0 by then, so with fs.protected_hardlinks=1 (the default) only its owner or root can make one;
 //         with 0, anyone who can write a directory on that file system;
@@ -122,13 +131,20 @@ static void claimOutput(void) {
 	if (getrandom(&r, sizeof r, GRND_NONBLOCK) != sizeof r) r = (u32)(nowSeconds() * 1e9);
 	int n = snprintf(outTmp, sizeof outTmp, "%s.%s.hlink-%d-%08x", dir, base, (int)getpid(), r);
 	if (n < 0 || n >= (int)sizeof outTmp) fatalf("output path too long: %s", flagOut);
+	struct stat st;
+	if (lstat(flagOut, &st) < 0) {
+		claimFoundNothing = errno == ENOENT; // (nothing to claim: no rename; the temporary is created later)
+		outTmpLive = 1;
+		return;
+	}
+	if (!S_ISREG(st.st_mode) && !S_ISLNK(st.st_mode)) fatalf("%s is not a regular file", flagOut); // (left alone)
 	outTmpLive = 1; // (from before the rename: a signal between the two removes nothing that is not ours)
 	if (rename(flagOut, outTmp) < 0) {
-		// (ENOENT: nothing there; anything else, e.g. EACCES, and creating the temporary fails with the reason)
+		// (ENOENT: gone since the lstat, e.g. claimed by a concurrent link; anything else, e.g. EACCES: creating the
+		// temporary fails with the reason)
 		claimFoundNothing = errno == ENOENT;
 		return;
 	}
-	struct stat st;
 	int fd = -1;
 	if (!flagFresh && !outOnHugetlbfs) {
 		fd = open(outTmp, O_RDWR | O_NOFOLLOW | O_CLOEXEC); // (fails: ETXTBSY being executed, ELOOP a symlink, EISDIR, ...)
@@ -140,11 +156,12 @@ static void claimOutput(void) {
 			return;
 		}
 	}
-	if (lstat(outTmp, &st) == 0 && S_ISDIR(st.st_mode)) { // (a directory is not ours to replace: put it back)
+	if (lstat(outTmp, &st) == 0 && !S_ISREG(st.st_mode) && !S_ISLNK(st.st_mode)) {
+		// (it changed since the lstat; not ours to replace: put it back)
 		if (fd >= 0) close(fd);
-		rename(outTmp, flagOut);
 		outTmpLive = 0;
-		fatalf("%s is a directory", flagOut);
+		if (rename(outTmp, flagOut) < 0) fatalf("%s is not a regular file; it is left at %s: %s", flagOut, outTmp, strerror(errno));
+		fatalf("%s is not a regular file", flagOut);
 	}
 	letGo(fd);
 }
@@ -228,6 +245,8 @@ static void sweepStale(void) {
 		char *end;
 		long pid = strtol(e->d_name + pn, &end, 10);
 		if (end == e->d_name + pn || *end != '-' || pid <= 0 || pid == getpid()) continue;
+		// (exactly <pid>-<8 hex digits>: not the temporaries of an output named <name>.hlink-...)
+		if (strlen(end + 1) != 8 || strspn(end + 1, "0123456789abcdef") != 8) continue;
 		if (kill((pid_t)pid, 0) == 0 || errno != ESRCH) continue;
 		struct stat st;
 		if (fstatat(dirfd(d), e->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0 && st.st_uid == geteuid()) unlinkat(dirfd(d), e->d_name, 0);
