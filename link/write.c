@@ -30,7 +30,7 @@ static long hugeFree(void) {
 // now or fails the mmap with ENOMEM: a page the write pass touches later is always there (touching an unreserved
 // one would be SIGBUS). The pages come zeroed, which is what bss and noptrbss must read as.
 static void createHuge(void) {
-	outFd = open(flagOut, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0755);
+	outFd = open(flagOut, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0); // (mode 0 until it is complete)
 	if (outFd < 0) fatalf("open %s: %s", flagOut, strerror(errno));
 	if (ftruncate(outFd, outSize) < 0) fatalf("truncate %s: %s", flagOut, strerror(errno));
 	out = mmap(NULL, (size_t)outSize, PROT_READ | PROT_WRITE, MAP_SHARED, outFd, 0);
@@ -51,12 +51,13 @@ static void createHuge(void) {
 // other hard link, and not being executed (opening it for writing then fails with ETXTBSY; and while we hold it
 // open for writing, nobody can exec it). Anything else, or any failure on the way, falls back to unlink + create.
 //
-// What a reader sees: while the link runs, the file has mode 0, so it cannot be newly opened or executed by
-// anyone but root, and its bytes are a mix of the old image, zeros and the new image. A process that had it
-// open or mapped before sees that mix too. When hlink exits 0 the file is exactly the new image (the same
-// bytes a fresh file would get: every byte is zeroed before the write pass, as a new file's would be), with
-// mode 0755 & ~umask. A link that fails removes the output, as before; one that is killed leaves a file of
-// mode 0, which no one can run and which the next link replaces.
+// What a reader sees: while the link runs, the output (reused or new) has mode 0, so it cannot be newly opened
+// or executed by anyone but root; a reused file's bytes are a mix of the old image, zeros and the new image, and
+// a process that had it open or mapped before sees that mix too. When hlink exits 0 (with -teardown=fork: when
+// the parent does) the file is exactly the new image (the bytes a new file would get: every byte is zeroed before
+// the write pass, as a new file's would be), at its final size, with mode 0755 & ~umask. A link that fails
+// removes the output, as before; one that is killed leaves a file of mode 0, which no one can run and which the
+// next link replaces.
 static mode_t outMode;      // the mode the file gets when it is complete
 static bool outReused;      // the old file's pages are reused
 static long long oldOutSize; // (for the -stats note)
@@ -102,20 +103,67 @@ static void openOutput(void) {
 	}
 	if (!flagFresh && reuseOutput()) return;
 	if (!flagFresh) unlink(flagOut); // (-fresh: main removed it before the link)
-	outFd = open(flagOut, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0755);
+	outFd = open(flagOut, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0); // (mode 0 until it is complete)
 	if (outFd < 0) fatalf("open %s: %s", flagOut, strerror(errno));
 	if (ftruncate(outFd, outSize) < 0) fatalf("truncate %s: %s", flagOut, strerror(errno));
 	out = mmap(NULL, (size_t)outSize, PROT_READ | PROT_WRITE, MAP_SHARED, outFd, 0);
 	if (out == MAP_FAILED) fatalf("mmap %s: %s", flagOut, strerror(errno));
 }
 
-// closeOutput gives the file its final size (and, when it was reused, its mode) and closes it (writeELF, at the
-// end of finish).
+// closeOutput gives the file its final size and mode and closes it (writeELF, at the end of finish).
 static void closeOutput(void) {
 	if (ftruncate(outFd, outSize) < 0) fatalf("truncate %s: %s", flagOut, strerror(errno));
-	if (outReused && fchmod(outFd, outMode) < 0) fatalf("chmod %s: %s", flagOut, strerror(errno));
+	if (fchmod(outFd, outMode) < 0) fatalf("chmod %s: %s", flagOut, strerror(errno));
 	close(outFd);
 	outFd = -1;
+}
+
+// ---- the end (main.c's -teardown)
+// unmapOutput empties the output mapping from all threads (MADV_DONTNEED takes the mmap lock shared; the pages
+// stay in the file) and then unmaps the empty range. A detached child must do this before it says the output is
+// complete: a shared writable mapping holds the file open for writing, and exec of it fails with ETXTBSY until
+// the last such mapping is gone.
+static void dontneedTask(void *ctx UNUSED, int w UNUSED, long i) {
+	size_t lo = (size_t)i << 21, hi = MIN(lo + (2u << 20), outMapped);
+	madvise(out + lo, hi - lo, MADV_DONTNEED);
+}
+static void unmapOutput(void) {
+	if (!out || out == MAP_FAILED) return;
+	// (MinIO: 4.2 ms on ext4 and 1.0 on tmpfs, against 5.4 and 4.5 for the munmap alone)
+	par((long)((outMapped + (2u << 20) - 1) >> 21), dontneedTask, NULL);
+	munmap(out, outMapped);
+	out = NULL;
+}
+
+// releaseInputs empties the inputs' mappings from all threads (-teardown madvise). They are found in
+// /proc/self/maps rather than in load.c's tables: every private read-only file mapping that is not a shared
+// library or hlink itself.
+typedef struct {
+	u8 *p;
+	size_t n;
+} span;
+static VEC(span) inputSpans;
+static void releaseTask(void *ctx UNUSED, int w UNUSED, long i) { madvise(inputSpans.a[i].p, inputSpans.a[i].n, MADV_DONTNEED); }
+static void releaseInputs(void) {
+	char exe[4096];
+	ssize_t en = readlink("/proc/self/exe", exe, sizeof exe - 1);
+	exe[en > 0 ? en : 0] = 0;
+	FILE *f = fopen("/proc/self/maps", "r");
+	if (!f) return;
+	char line[4400];
+	while (fgets(line, sizeof line, f)) {
+		unsigned long lo, hi, ino;
+		char perm[8];
+		int pathAt = 0;
+		if (sscanf(line, "%lx-%lx %7s %*s %*s %lu %n", &lo, &hi, perm, &ino, &pathAt) < 4 || ino == 0 || strcmp(perm, "r--p") != 0) continue;
+		char *path = line + pathAt;
+		path[strcspn(path, "\n")] = 0;
+		if (strcmp(path, exe) == 0 || strstr(path, ".so")) continue;
+		span s = {(u8 *)lo, hi - lo};
+		VPUSH(inputSpans, s);
+	}
+	fclose(f);
+	par((long)inputSpans.n, releaseTask, NULL);
 }
 
 static void writeOut(void) {

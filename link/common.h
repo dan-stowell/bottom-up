@@ -21,6 +21,8 @@
 #include <wctype.h>
 // (not <sys/wait.h>: it brings in <signal.h>, whose sigset() dead.c's type would clash with; stdlib.h has the W* macros)
 extern pid_t waitpid(pid_t pid, int *status, int options);
+extern int kill(pid_t pid, int sig);
+#include <sys/prctl.h>
 
 #define HLINK_BUILTINS
 #define HLINK_RELOCNAMES
@@ -116,6 +118,7 @@ static int nthreads;
 #define HUGETLBFS_MAGIC_ 0x958458f6
 #define hugePage (2u << 20)
 static bool flagHugetlb, flagFresh, flagNoDetach;
+static const char *flagTeardown = ""; // fork, madvise or exit (main.c)
 static bool outHuge, outOnHugetlbfs;
 static u32 segAlign = 4096; // alignment of a segment's start (hugePage when outHuge)
 

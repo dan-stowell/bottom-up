@@ -4,6 +4,8 @@
 #   2. identical output for -j 1, 2, 4 and 8 (a program of link/progs and the frozen MinIO link);
 #   2b. overwriting an old output in place (the default) gives the bytes -fresh gives, over files of other sizes;
 #      a symlink, a hard-linked file and a running binary are not written through; a failed link leaves nothing;
+#   2c. -teardown fork (the default), madvise and exit: the output runs as soon as the link returns, a failed
+#      link's status and stderr are the same, -stats ends with the parent's row, a killed parent stops the child;
 #   3. a short list of standard-library test binaries linked by hlink (link/stdtest.sh);
 #   4. the frozen MinIO link: `--version` prints what the stock binary prints, and the live set (-dumplive)
 #      equals fclink's for the same link;
@@ -84,6 +86,37 @@ ow() {
   [ $ok = 1 ]
 }
 ow || fail=1
+
+# ---- 2c. the end of the process (-teardown fork, the default; madvise; exit = -nodetach)
+td() {
+  local d=$out/teardown ok=1; rm -rf "$d"; mkdir -p "$d"
+  L() { (cd "$minio" && timeout 120 prlimit --as=$((16 << 30)) "$hlink" "$@" -importcfg importcfg.link "${F[@]}" main.a); }
+  for t in fork madvise exit; do
+    # the output runs as soon as the linker returns (a detached child that still mapped it: ETXTBSY)
+    for r in 1 2; do
+      L -teardown=$t -o "$d/stock" > /dev/null && "$d/stock" --version > /dev/null || { ok=0; echo "FAIL teardown $t: the output did not run right after the link"; }
+    done
+    # a failed link: the same status and stderr whichever way it ends
+    L -teardown=$t -X nodot -o "$d/bad" > /dev/null 2> "$d/err.$t"; echo "exit $?" >> "$d/err.$t"
+    [ -e "$d/bad" ] && { ok=0; echo "FAIL teardown $t: a failed link left an output"; }
+  done
+  cmp -s "$d/err.fork" "$d/err.exit" && cmp -s "$d/err.madvise" "$d/err.exit" && grep -q "^exit 2$" "$d/err.exit" ||
+    { ok=0; echo "FAIL teardown: a failed link's status or stderr differs between fork, madvise and exit"; cat "$d"/err.*; }
+  # -stats: the child's table, then the parent's row for the moment the output was complete
+  L -stats -o "$d/stock" > "$d/stats" && tail -1 "$d/stats" | grep -q "^complete .*as the parent sees it" ||
+    { ok=0; echo "FAIL teardown fork: -stats does not end with the parent's complete row"; tail -3 "$d/stats"; }
+  HLINK_NODETACH=1 L -stats -o "$d/stock" | grep -q "^complete .*one process" || { ok=0; echo "FAIL teardown: HLINK_NODETACH=1 did not keep one process"; }
+  cmp -s <("$d/stock" --version 2>&1) <("$minio/stock" --version 2>&1) || { ok=0; echo "FAIL teardown: --version differs"; }
+  # the parent killed: the child stops too (it does not go on and write the output)
+  (cd "$minio" && exec "$hlink" -fresh -o "$d/killed" -importcfg importcfg.link "${F[@]}" main.a) & local pid=$!
+  sleep 0.05; kill -9 $pid; wait $pid 2> /dev/null; sleep 0.5
+  pgrep -f -- "-o $d/killed" > /dev/null && { ok=0; echo "FAIL teardown: the child outlived its killed parent"; pkill -9 -f -- "-o $d/killed"; }
+  [ -e "$d/killed" ] && [ "$(stat -c %a "$d/killed")" != 0 ] && { ok=0; echo "FAIL teardown: a killed link left an executable output"; }
+  rm -rf "$d"
+  [ $ok = 1 ] && echo "PASS teardown: fork, madvise and exit: outputs run at once, failures alike, -stats complete row, HLINK_NODETACH, killed parent"
+  [ $ok = 1 ]
+}
+td || fail=1
 
 # ---- 3. standard-library tests
 read -r -a std <<< "${STD:-sort strings strconv fmt reflect crypto/fips140}"

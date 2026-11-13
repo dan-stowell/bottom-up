@@ -5,16 +5,20 @@
 # many cores (taskset and -j both set), plus phase "process" (that run's whole process by the caller's clock,
 # start to exit) and, for 8 cores, "cold" (process time after dropping the page cache; the output directory
 # stays). Core counts are interleaved within a round so that drift on this noisy host hits all of them alike.
+# Knobs: OUT (the output path; default $HLINK_OUT/bench/<workload>.out; removed afterwards if it is on hugetlbfs, where
+# it holds huge pages), FLAGS (more hlink flags, e.g. -fresh or -teardown=exit), COLD=0 (skip the cold runs: they
+# drop the whole page cache).
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 w=$1; linker=${2:-$here/build/hlink}; rounds=${3:-7}
 d=${FROZEN:-/home/exedev/targets/frozen}/$w; out=${HLINK_OUT:-/tmp/hlink-try}/bench; mkdir -p "$out" "$here/link/results"
 mapfile -t F < "$d/link.flags"
+o=${OUT:-$out/$w.out}
 res=$here/link/results/$w.$(basename "$linker").tsv
 run() { # run <cores> -> prints process ms; stats in $out/stats
   local j=$1 t0 t1
   t0=$(date +%s%N)
-  taskset -c 0-$((j-1)) "$linker" -stats -j "$j" -o "$out/$w.out" -importcfg "$d/importcfg.link" "${F[@]}" -s -w "$d/main.a" > "$out/stats"
+  taskset -c 0-$((j-1)) "$linker" -stats ${FLAGS:-} -j "$j" -o "$o" -importcfg "$d/importcfg.link" "${F[@]}" -s -w "$d/main.a" > "$out/stats"
   t1=$(date +%s%N)
   echo $(( (t1 - t0) / 1000 ))
 }
@@ -28,7 +32,7 @@ for r in $(seq 1 "$rounds"); do
   done
 done
 cold=""
-for r in 1 2 3; do
+for r in $([ "${COLD:-1}" = 0 ] || echo 1 2 3); do
   sync; echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
   us=$(run 8); if [ -z "$cold" ] || [ "$us" -lt "$cold" ]; then cold=$us; fi
 done
@@ -37,10 +41,11 @@ done
     awk -v j=$j '$1!="phase" && $2 ~ /^[0-9.]+$/ {print j "\t" $1 "\t" $2}' "$out/stats.$j"
     echo -e "$j\tprocess\t$(awk -v u=${best[$j]} 'BEGIN{printf "%.1f", u/1000}')"
   done
-  echo -e "8\tcold\t$(awk -v u=$cold 'BEGIN{printf "%.1f", u/1000}')"
+  [ -n "$cold" ] && echo -e "8\tcold\t$(awk -v u=$cold 'BEGIN{printf "%.1f", u/1000}')"
   # what the link was made of, from the fastest 8-core run (the notes of the -stats table)
   sed 's/^/# /' "$out/stats.8"
-  echo "# output_bytes $(stat -c %s "$out/$w.out")"
+  echo "# output_bytes $(stat -c %s "$o")"
   echo "# measured $(date -u +%FT%TZ), $rounds rounds, $(basename "$linker")"
 } > "$res"
+[ "$(stat -f -c %T "$o")" = hugetlbfs ] && rm -f "$o"
 cat "$res"
