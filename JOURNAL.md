@@ -61,3 +61,16 @@
   name only 45 k distinct symbols, almost all never defined (DWARF and file symbols): references must not be
   joined eagerly. Also: a pool that spins between jobs collapses when the machine is busy (flood 145 ms on
   1 thread, 321-507 ms on 8 with a test suite running beside it): spin briefly, then futex.
+- 2026-11-13T18:08:12Z hlink front half, output byte-identical throughout (cmp against the port's MinIO binary after every step):
+  resolve as 128-bit-key partitioned joins with DWARF-kind symbols left out (by-name records 1.4 M -> 0.63 M:
+  four of five references by name are to debug information); a spin-then-futex pool; the flood on two
+  interleaved byte arrays (flags the flood writes, facts it reads) instead of the 21 MB state words; leaves
+  (no relocations, not a function) marked without being queued (678 k -> 220 k symbols flooded); references
+  decoded branch-free (one table read; the switch was the most mispredicted branch in the program) and once
+  per batch; batches of 64 symbols walked in stages so their misses overlap; object pages pre-populated at
+  load (MADV_POPULATE_READ), because a prefetch of a page that is not in the page table yet is dropped.
+  Measured on one core (the machine is shared with three builders, so 8-core walls are noise today):
+  deadcode 158 -> 110 ms, resolve 207 -> 152 ms. What the flood costs now, core-ms: decode references 22,
+  duplicates' canonical ids 15, process 41, the rest outside the batches. A dependent miss on this VM is
+  158 ns (4 KiB pages, nested paging), an independent one 9.5 ns; link/prof.sh (perf_event sampling) and
+  HLINK_TSC=1 (stage clocks) are how these were found. Not yet where it has to be: see STATUS.md.

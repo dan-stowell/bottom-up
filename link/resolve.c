@@ -194,6 +194,13 @@ static const char *const linkerNames[] = {"runtime.firstmoduledata", "runtime.la
 	"main..inittask", "runtime..inittask", "runtime.unreachableMethod", "runtime.mapinitnoop", "runtime.deferreturn",
 	"runtime.memProfileInternal", "runtime.disableMemoryProfiling", "main.main"};
 
+// sfOf: what the flood wants to know about a definition (its record s, its entry ri of the relocation index)
+static inline u8 sfOf(const u8 *s, const u8 *ri) {
+	u8 f = symFlag(s), k = symType(s);
+	return (ld32(ri + 4) != ld32(ri) ? sfHasRel : 0) | (f & SymFlagGoType ? sfGoType : 0) | (f & SymFlagReflectMethod ? sfReflect : 0) |
+	       (symFlag2(s) & SymFlagItab ? sfItab : 0) | (kindIsText(k) ? sfText : 0);
+}
+
 // 1. one pass over every unit's symbol records, in order: every slot starts as its own canonical symbol;
 // definitions and references by name and content-addressed definitions leave a record for their join
 static void resolveRecords(void *ctx UNUSED, int w, long ui) {
@@ -204,8 +211,10 @@ static void resolveRecords(void *ctx UNUSED, int w, long ui) {
 	for (u32 g = o->base + u->lo, e = o->base + u->hi; g < e; g++) canon[g] = g;
 	const u8 *s = osym(o, MAX(u->lo, o->ndef));
 	const u8 *h64 = o->b + o->off[BlkHash64], *hh = o->b + o->off[BlkHash];
+	const u8 *ri = o->b + o->off[BlkRelocIdx];
 	for (u32 j = MAX(u->lo, o->ndef); j < u->hi; j++, s += SymSize) {
 		u32 gid = o->base + j;
+		if (j < o->nalldef) SF(gid) = sfOf(s, ri + (size_t)j * 4);
 		if (j < hLo) {
 			u64 h = ld64(h64 + (size_t)(j - h64Lo) * 8), k = mix64(h ^ 0x5851F42D4C957F2Dull);
 			recAdd(rw, &rw->hashes[k >> (64 - 9)], (rec){k, h, (u64)symSiz(s) << 32 | (u32)~gid});
@@ -215,6 +224,16 @@ static void resolveRecords(void *ctx UNUSED, int w, long ui) {
 			recAdd(rw, &rw->hashes[k1 >> (64 - 9)], (rec){k1, ld64(h + 8), (u64)symSiz(s) << 32 | (u32)~gid});
 		} else {
 			u32 rk = 0;
+			if (isDwarfKind(symType(s))) {
+				// Debug information: this linker writes none (-w), and only debug information refers to it.
+				// Four of five references by name are of this kind. A reference stays unresolved (0), so
+				// that anything that did use it would say "undefined" rather than read a non-definition.
+				if (j >= o->nalldef) {
+					canon[gid] = 0;
+					SF(gid) = sfRedir;
+				}
+				continue;
+			}
 			if (j < o->nalldef) {
 				if (symABI(s) == SymABIstatic || symNameLen(s) == 0) continue; // file-local, or an unnamed auxiliary symbol
 				rk = rankOf(o, j, s);
@@ -337,7 +356,10 @@ static void resolveJoin(void *ctx UNUSED, int w, long task) {
 			for (u32 i = 0; i < c->n; i++) {
 				rec *r = &c->r[i];
 				u32 gid = ~(u32)r->val, win = ~(u32)ent[r->k2].val;
-				if (win != gid) canon[gid] = win;
+				if (win != gid) {
+					canon[gid] = win;
+					SF(gid) |= sfRedir;
+				}
 			}
 	rw->nrec[1] += (long)n;
 }
@@ -349,9 +371,11 @@ static void resolvePkgDefs(void *ctx UNUSED, int w, long ui) {
 	object *o = u->o;
 	u32 hi = MIN(u->hi, o->ndef);
 	const u8 *s = osym(o, u->lo);
+	const u8 *ri = o->b + o->off[BlkRelocIdx];
 	for (u32 j = u->lo; j < hi; j++, s += SymSize) {
 		u32 gid = o->base + j;
-		if (symABI(s) != SymABIstatic && symNameLen(s) != 0) {
+		SF(gid) = sfOf(s, ri + (size_t)j * 4);
+		if (symABI(s) != SymABIstatic && symNameLen(s) != 0 && !isDwarfKind(symType(s))) {
 			key128 k = nameKey128(o->b + ld32(s + 4), symNameLen(s), symABI(s));
 			u64 b1 = k.k2 % bloomBits, b2 = (k.k2 >> 32) % bloomBits;
 			tent *e;
@@ -364,7 +388,7 @@ static void resolvePkgDefs(void *ctx UNUSED, int w, long ui) {
 				continue;
 			}
 		}
-		if (symUsedInIface(s)) atomicOr32(&state[gid], stUsedInIface);
+		if (symUsedInIface(s)) atomicOr8(&FL(gid), stUsedInIface);
 	}
 }
 
@@ -377,7 +401,10 @@ static void resolveNames(void *ctx UNUSED, int w UNUSED, long p) {
 				u32 gid = ~(u32)r->val;
 				if (gid == ~0u) continue; // a name the linker wants: not a slot
 				u32 win = ~(u32)nameFind((key128){r->k1, r->k2})->val;
-				if (win != gid) canon[gid] = win;
+				if (win != gid) {
+					canon[gid] = win;
+					SF(gid) |= sfRedir;
+				}
 			}
 	tent *te = nameTab[p].e;
 	if (!te) return;
@@ -386,7 +413,7 @@ static void resolveNames(void *ctx UNUSED, int w UNUSED, long p) {
 		u32 c = ~(u32)te[h].val;
 		if (c == ~0u) continue;
 		u32 f = (te[h].val >> 32 & rankDef ? 0 : stUndef) | (te[h].val & valIface ? stUsedInIface : 0);
-		if (f) atomicOr32(&state[c], f);
+		if (f) atomicOr8(&FL(c), (u8)f);
 	}
 }
 
@@ -398,7 +425,7 @@ static void resolveRefFlags(void *ctx UNUSED, int w UNUSED, long i) {
 	for (u32 k = 0; k < n; k++, rf += RefFlagsSize) {
 		if (rf[9] & SymFlagUsedInIface) {
 			u32 g = oref(o, ld32(rf), ld32(rf + 4));
-			if (g != 0) atomicOr32(&state[canon[g]], stUsedInIface);
+			if (g != 0) atomicOr8(&FL(canonOf(g)), stUsedInIface);
 		}
 	}
 }
@@ -412,6 +439,7 @@ static void resolve(void) {
 	aux = hugealloc((size_t)idCap * 4);
 	synthNames = calloc(65536, sizeof(str));
 	bloom = hugealloc(bloomBits / 8);
+	flsf = hugealloc(2 * (size_t)idCap);
 	rws = calloc((size_t)nthreads, sizeof(resolveWorker));
 
 	for (int i = 0; i < NBUILTIN; i++) wantName(cstr(builtinNames[i].name), (u16)builtinNames[i].abi);

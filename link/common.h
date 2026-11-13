@@ -250,6 +250,7 @@ static inline bool symIsGoType(const u8 *s) { return symFlag(s) & SymFlagGoType;
 static inline bool symUsedInIface(const u8 *s) { return symFlag2(s) & SymFlagUsedInIface; }
 static inline bool symIsItab(const u8 *s) { return symFlag2(s) & SymFlagItab; }
 static inline bool kindIsText(u8 k) { return k == K_STEXT || k == K_STEXTFIPS; }
+static inline bool isDwarfKind(u8 k) { return k >= K_SDWARFCUINFO && k <= K_SDWARFADDR; }
 
 typedef const u8 *relocp; // goobj.Reloc: Off int32, Siz uint8, Type uint16, Add int64, Sym {PkgIdx, SymIdx}
 static inline i32 rOff(relocp r) { return (i32)ld32(r); }
@@ -313,24 +314,23 @@ static u32 builtins[NBUILTIN];
 // ref returns the id of the slot a symbol reference in object o names (not yet its canonical definition).
 static void refError(const object *o, u32 pkg);
 static inline u32 oref(const object *o, u32 pkg, u32 idx) {
-	switch (pkg) {
-	case PkgIdxInvalid: return 0;
-	case PkgIdxSelf: return o->base + idx;
-	case PkgIdxHashed64: return o->base + o->ndef + idx;
-	case PkgIdxHashed: return o->base + o->ndef + o->nh64 + idx;
-	case PkgIdxNone: return o->base + o->ndef + o->nh64 + o->nh + idx;
-	case PkgIdxBuiltin: return builtins[idx];
-	}
-	if (pkg >= o->npkg) {
+	// One table read whatever kind of reference it is (a switch here was the linker's most mispredicted
+	// branch): pkgBase holds the packages' bases and, after them, the bases of this object's own blocks.
+	u32 sp = pkg - PkgIdxSelf; // 0..4 for PkgIdxSelf, Builtin, Hashed, Hashed64, None
+	u32 t = sp < 5 ? o->npkg + sp : pkg;
+	if (__builtin_expect(t >= o->npkg + 5, 0)) {
 		refError(o, pkg);
 		return 0;
 	}
-	u32 b = o->pkgBase[pkg];
-	if (b == badBase) {
+	u32 b = o->pkgBase[t];
+	if (__builtin_expect(b == badBase, 0)) {
 		refError(o, pkg);
 		return 0;
 	}
-	return b + idx;
+	u32 bi = sp == 1 ? idx : 0;
+	if (__builtin_expect(bi >= NBUILTIN, 0)) return 0;
+	u32 bg = builtins[bi];
+	return sp == 1 ? bg : b + idx;
 }
 #define RREF(o, r) oref((o), rPkg(r), rIdx(r))
 #define AREF(o, a) oref((o), aPkg(a), aIdx(a))
@@ -358,8 +358,28 @@ enum {
 static inline u32 atomicOr32(u32 *p, u32 v) { return __atomic_fetch_or(p, v, __ATOMIC_RELAXED); }
 static inline u32 atomicLoad32(const u32 *p) { return __atomic_load_n(p, __ATOMIC_RELAXED); }
 
+// Resolution and reachability work on two byte arrays instead of state, so that what a relocation's target
+// costs is a read of a 5 MB array (it stays in the L3) and not of a 21 MB one:
+//   FL(id)  the low byte of state (stLive .. stUndef), written with atomic operations; copied into state when
+//           the flood is over (deadcode), after which state is the truth for those bits too, except stUndef,
+//           which is only ever in fl;
+//   SF(id)  what the flood needs to know about a symbol without reading its record: set once, in resolve.
+static u8 *flsf; // fl and sf interleaved: one cache line serves both
+#define FL(id) flsf[2 * (size_t)(id)]
+#define SF(id) flsf[2 * (size_t)(id) + 1]
+enum {
+	sfHasRel = 1 << 0,  // it has relocations
+	sfGoType = 1 << 1,  // goobj.SymFlagGoType
+	sfReflect = 1 << 2, // goobj.SymFlagReflectMethod
+	sfItab = 1 << 3,    // goobj.SymFlagItab
+	sfText = 1 << 4,    // a function
+	sfRedir = 1 << 5,   // canon[id] != id (most ids are their own canonical symbol: no need to read canon)
+};
+static inline u8 atomicOr8(u8 *p, u8 v) { return __atomic_fetch_or(p, v, __ATOMIC_RELAXED); }
+static inline u8 atomicLoad8(const u8 *p) { return __atomic_load_n(p, __ATOMIC_RELAXED); }
+static inline u32 canonOf(u32 g) { return (SF(g) & sfRedir) ? canon[g] : g; }
 // isDef: is canonical id c a definition in some object?
-static inline bool isDef(u32 c) { return c != 0 && c <= nslots && (state[c] & stUndef) == 0; }
+static inline bool isDef(u32 c) { return c != 0 && c <= nslots && (atomicLoad8(&FL(c)) & stUndef) == 0; }
 static inline bool isLive(u32 g) { return g != 0 && (state[g] & stLive) != 0; }
 
 static inline bytes dataOf(u32 c) {

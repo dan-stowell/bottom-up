@@ -58,6 +58,16 @@ static object *newObject(str pkg, const char *file, bytes body) {
 	o->npkg = (o->off[BlkPkgIdx + 1] - o->off[BlkPkgIdx]) / 8;
 	o->nalldef = o->ndef + o->nh64 + o->nh + o->nnonpkg;
 	o->total = o->nalldef + o->nref;
+	// Put the object's pages in the page table now, in bulk: its strings, symbol records, hashes, index
+	// tables, relocations and aux records (everything up to the data block). Left to first touch, each page
+	// (or each 16, with the kernel's fault-around) is a fault taken in the middle of a pass, and, worse, a
+	// prefetch of a page that is not mapped yet does nothing, so the flood's cache misses would queue up
+	// behind one another instead of overlapping. The data block is left to the write pass, which reads the
+	// live symbols' bytes in order.
+	if (!getenv("HLINK_NOPOPULATE")) {
+		uintptr_t lo = (uintptr_t)b.p & ~(uintptr_t)4095, hi = ((uintptr_t)b.p + o->off[BlkData] + 4095) & ~(uintptr_t)4095;
+		madvise((void *)lo, hi - lo, 22 /* MADV_POPULATE_READ */);
+	}
 	return o;
 }
 
@@ -242,8 +252,17 @@ static void loadLib(void *ctx UNUSED, int w UNUSED, long i) {
 
 static void loadPkgBase(void *ctx UNUSED, int w UNUSED, long i) {
 	object *o = objs[i];
-	o->pkgBase = malloc(MAX(o->npkg, 1) * sizeof(u32));
-	o->pkgBase[0] = badBase;
+	// (after the packages: the bases of this object's own blocks, in the order of the special package indices
+	// from PkgIdxSelf up; see oref)
+	if (o->npkg == 0) o->npkg = 1;
+	o->pkgBase = malloc((o->npkg + 5) * sizeof(u32));
+	o->pkgBase[0] = 0; // the nil reference {0, 0}
+	u32 *sb = o->pkgBase + o->npkg;
+	sb[PkgIdxSelf - PkgIdxSelf] = o->base;
+	sb[PkgIdxBuiltin - PkgIdxSelf] = 0;
+	sb[PkgIdxHashed - PkgIdxSelf] = o->base + o->ndef + o->nh64;
+	sb[PkgIdxHashed64 - PkgIdxSelf] = o->base + o->ndef;
+	sb[PkgIdxNone - PkgIdxSelf] = o->base + o->ndef + o->nh64 + o->nh;
 	for (u32 p = 1; p < o->npkg; p++) {
 		long *q = smFind(&primary, oPkg(o, p));
 		o->pkgBase[p] = q ? objs[*q]->base : badBase;

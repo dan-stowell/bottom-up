@@ -146,7 +146,7 @@ static vecu32 inittaskOrder(const char *root) {
 				relocp rl = RELOC(rs, i);
 				if (rType(rl) != R_INITORDER) continue;
 				ndeps++;
-				u32 s = canon[RREF(o, rl)];
+				u32 s = canonOf(RREF(o, rl));
 				edge e = {x, s};
 				VPUSH(edges, e);
 				if (!umFind(&m, s)) {
@@ -217,20 +217,28 @@ typedef struct {
 	VEC(str) generic;
 	bool reflect;
 	vecu32 tmp;
+	struct fbatch *batch; // two: the batch being flooded and the next one, whose first stages run early
 	char pad[64];
 } floodWorker;
 
 static floodWorker *fws;
 
 static inline void fmark(floodWorker *w, u32 c) {
-	if (c != 0 && (atomicOr32(&state[c], stLive) & (stLive | stUndef)) == 0 && c <= nslots) VPUSH(w->next, c);
+	// A newly live definition is flooded, unless there is nothing to follow from it: no relocations, not a
+	// function (whose aux symbols are followed), not marked as calling reflect's Method. Most content-addressed
+	// symbols (strings, stack maps) are such leaves, and not queueing them saves a cache miss each.
+	// (Most edges lead to a symbol that is live already: look before the locked operation, which, unlike a
+	// plain load, waits for every miss before it.)
+	if (c == 0 || (atomicLoad8(&FL(c)) & stLive)) return;
+	if ((atomicOr8(&FL(c), stLive) & (stLive | stUndef)) == 0 && c <= nslots && (SF(c) & (sfHasRel | sfText | sfReflect)) != 0)
+		VPUSH(w->next, c);
 }
 
 // setIface records that type c is converted to an interface. If it was already flooded as a plain type it is
 // flooded again, this time following its methods' types and its element types as such.
 static inline void setIface(floodWorker *w, u32 c) {
-	u32 old = atomicOr32(&state[c], stUsedInIface);
-	if ((old & stUsedInIface) == 0 && (old & stLive) != 0) VPUSH(w->next, c);
+	u8 old = atomicOr8(&FL(c), stUsedInIface);
+	if ((old & stUsedInIface) == 0 && (old & stLive) != 0 && (SF(c) & sfHasRel) != 0) VPUSH(w->next, c);
 }
 
 static inline relocp relocAt(relocp rs, u32 n, i32 off) {
@@ -251,7 +259,7 @@ static str nameData(bytes d) {
 static str nameAt(const object *o, relocp rs, u32 n, i32 off) {
 	relocp rl = relocAt(rs, n, off);
 	if (!rl) return (str){"", 0};
-	return nameData(dataOf(canon[RREF(o, rl)]));
+	return nameData(dataOf(canonOf(RREF(o, rl))));
 }
 
 static inline u8 typeKind(const u8 *p) { return p[23]; }
@@ -266,15 +274,18 @@ static inline u32 fiNumInl(bytes fi, u32 *inlOff) {
 // node k: Parent, File, Line, Func {PkgIdx, SymIdx}, ParentPC
 static inline const u8 *fiInlNode(bytes fi, u32 inlOff, u32 k) { return fi.p + inlOff + k * INLTREE_NODE_SIZE; }
 
-static void process(floodWorker *w, u32 c) {
+// process floods symbol c. tg[i] is the canonical target of its relocation i and atg[i] that of its aux record i
+// (functions only): floodTask has worked them out, so that their flags are in the cache by now.
+static void process(floodWorker *w, u32 c, const u32 *tg, const u32 *atg) {
 	u32 j;
 	object *o = objOf(c, &j);
 	const u8 *s = osym(o, j);
-	if (symReflectMethod(s)) w->reflect = true;
-	bool isType = symIsGoType(s), uii = false;
-	if (isType && (atomicLoad32(&state[c]) & stUsedInIface) != 0) {
+	u8 sfc = SF(c);
+	if (sfc & sfReflect) w->reflect = true;
+	bool isType = sfc & sfGoType, uii = false;
+	if (isType && (atomicLoad8(&FL(c)) & stUsedInIface) != 0) {
 		uii = true;
-		if (atomicOr32(&state[c], stIfaceDone) & stIfaceDone) return;
+		if (atomicOr8(&FL(c), stIfaceDone) & stIfaceDone) return;
 	}
 	u32 nr;
 	relocp rs = oRelocs(o, j, &nr);
@@ -292,7 +303,7 @@ static void process(floodWorker *w, u32 c) {
 			if (uii) {
 				VPUSH(w->tmp, i);
 				// the method's type is itself reachable through reflection
-				u32 rsym = canon[RREF(o, rl)];
+				u32 rsym = tg[i];
 				if (rsym != 0) setIface(w, rsym);
 			}
 			i += 2;
@@ -300,23 +311,23 @@ static void process(floodWorker *w, u32 c) {
 		case R_USETYPE:
 		case R_INITORDER: continue;
 		case R_USEIFACE: {
-			u32 rsym = canon[RREF(o, rl)];
+			u32 rsym = tg[i];
 			if (!isDef(rsym)) continue;
-			u32 j2;
-			object *o2 = objOf(rsym, &j2);
-			if (symIsItab(osym(o2, j2))) { // "the type of that itab"
+			if (SF(rsym) & sfItab) { // "the type of that itab"
+				u32 j2;
+				object *o2 = objOf(rsym, &j2);
 				u32 nr2;
 				relocp rs2 = oRelocs(o2, j2, &nr2);
 				relocp rl2 = relocAt(rs2, nr2, 8);
 				if (!rl2) continue;
-				rsym = canon[RREF(o2, rl2)];
+				rsym = canonOf(RREF(o2, rl2));
 				if (!isDef(rsym)) continue;
 			}
 			setIface(w, rsym);
 			continue;
 		}
 		case R_USEIFACEMETHOD: {
-			u32 rsym = canon[RREF(o, rl)];
+			u32 rsym = tg[i];
 			if (isDef(rsym)) {
 				u32 j2, nr2;
 				object *o2 = objOf(rsym, &j2);
@@ -324,47 +335,42 @@ static void process(floodWorker *w, u32 c) {
 				i32 off = (i32)rAdd(rl);
 				methodsig m = {nameAt(o2, rr, nr2, off), 0};
 				relocp rl2 = relocAt(rr, nr2, off + 4);
-				if (rl2) m.typ = canon[RREF(o2, rl2)];
+				if (rl2) m.typ = canonOf(RREF(o2, rl2));
 				VPUSH(w->ifaceM, m);
 			}
 			continue;
 		}
 		case R_USENAMEDMETHOD: {
-			bytes d = dataOf(canon[RREF(o, rl)]);
+			bytes d = dataOf(tg[i]);
 			str n = {(const char *)d.p, d.n};
 			VPUSH(w->generic, n);
 			continue;
 		}
 		}
-		u32 rsym = RREF(o, rl);
+		u32 rsym = tg[i];
 		if (rsym == 0) continue;
-		rsym = canon[rsym];
-		if (uii && isDef(rsym) && (atomicLoad32(&state[rsym]) & stUsedInIface) == 0) {
+		if (uii && (SF(rsym) & sfGoType) && isDef(rsym) && (atomicLoad8(&FL(rsym)) & stUsedInIface) == 0) {
 			// a type reachable by reflection from one converted to an interface ([]T from T, ...)
-			u32 j2;
-			object *o2 = objOf(rsym, &j2);
-			if (symIsGoType(osym(o2, j2))) {
-				u32 old = atomicOr32(&state[rsym], stUsedInIface | stLive);
-				if ((old & stUsedInIface) == 0 || (old & stLive) == 0) VPUSH(w->next, rsym);
-				continue;
-			}
+			u8 old = atomicOr8(&FL(rsym), stUsedInIface | stLive);
+			if ((old & stUsedInIface) == 0 || (old & stLive) == 0) VPUSH(w->next, rsym);
+			continue;
 		}
 		fmark(w, rsym);
 	}
-	if (kindIsText(symType(s))) {
+	if (sfc & sfText) {
 		u32 na;
 		auxp as = oAuxs(o, j, &na);
 		u32 ninl = 0;
 		for (u32 i = 0; i < na; i++) {
 			if (aType(AUX(as, i)) == AuxFuncInfo) {
-				bytes fi = dataOf(canon[AREF(o, AUX(as, i))]);
+				bytes fi = dataOf(atg[i]);
 				if (fi.n == 0) break;
 				u32 inlOff;
 				ninl = fiNumInl(fi, &inlOff);
 				for (u32 k = 0; k < ninl; k++) {
 					const u8 *node = fiInlNode(fi, inlOff, k);
 					u32 callee = oref(o, ld32(node + 12), ld32(node + 16));
-					if (callee != 0) atomicOr32(&state[canon[callee]], stNameNeeded);
+					if (callee != 0) atomicOr8(&FL(canonOf(callee)), stNameNeeded);
 				}
 				break;
 			}
@@ -373,10 +379,9 @@ static void process(floodWorker *w, u32 c) {
 			auxp a = AUX(as, i);
 			switch (aType(a)) {
 			case AuxFuncdata: {
-				u32 g = AREF(o, a);
-				if (g != 0) {
-					u32 cc = canon[g];
-					atomicOr32(&state[cc], stFuncdata);
+				u32 cc = atg[i];
+				if (cc != 0) {
+					atomicOr8(&FL(cc), stFuncdata);
 					fmark(w, cc);
 				}
 				break;
@@ -388,8 +393,7 @@ static void process(floodWorker *w, u32 c) {
 			case AuxPcfile:
 			case AuxPcline:
 			case AuxPcdata: {
-				u32 g = AREF(o, a);
-				if (g != 0) atomicOr32(&state[canon[g]], stPC);
+				if (atg[i] != 0 && !(atomicLoad8(&FL(atg[i])) & stPC)) atomicOr8(&FL(atg[i]), stPC);
 				break;
 			}
 			}
@@ -414,9 +418,9 @@ static void process(floodWorker *w, u32 c) {
 			u32 ri = w->tmp.a[i];
 			i32 at = (i32)(off + moff + 16 * i);
 			str name;
-			if (ri > 0 && rOff(RELOC(rs, ri - 1)) == at) name = nameData(dataOf(canon[RREF(o, RELOC(rs, ri - 1))]));
+			if (ri > 0 && rOff(RELOC(rs, ri - 1)) == at) name = nameData(dataOf(tg[ri - 1]));
 			else name = nameAt(o, rs, nr, at);
-			methodref m = {{name, canon[RREF(o, RELOC(rs, ri))]}, c, ri};
+			methodref m = {{name, tg[ri]}, c, ri};
 			VPUSH(w->methods, m);
 		}
 	}
@@ -479,7 +483,7 @@ static void ssAdd(sigset *s, methodsig m, bool byName) {
 	s->n++;
 }
 
-#define floodGrain 64
+#define floodGrain 1024
 #define methodGrain 1024
 static vecu32 frontier;
 static VEC(methodref) markable;
@@ -487,9 +491,160 @@ static bool *keepM;
 static sigset ifaceMethod, genericIfaceMethod;
 static bool reflectSeen;
 
+// floodTask floods a stretch of the frontier. Flooding a symbol is a chain of cache misses, each address
+// known only when the one before has arrived: its index entries, its relocations and aux records, the flags
+// of what they name (and the canonical id, for a duplicate), a function's FuncInfo. Done symbol by symbol the
+// chain runs at the speed of one miss at a time. So the stretch is cut into batches of 64 symbols that go
+// through stages; each stage reads what an earlier one asked for and asks for what a later one will read, so
+// that the misses of a batch overlap; and the first two stages of the next batch run inside this one's, so
+// that its relocations have a batch's time to arrive. The references are decoded once, into target arrays
+// that the last stage (process) consumes.
+#define floodBatch 64
+typedef struct fbatch {
+	const u32 *f; // the symbols
+	size_t n;
+	struct {
+		object *o;
+		u32 j, nr, na, t0, a0;
+		relocp rs;
+		auxp as;
+	} it[floodBatch];
+	u32 nt, nat;
+	vecu32 tg, atg; // the canonical targets of the batch's relocations and aux records
+} fbatch;
+static u64 tscStage[64][8];
+
+static inline void bIndex(fbatch *b) {
+	for (size_t k = 0; k < b->n; k++) {
+		b->it[k].o = objOf(b->f[k], &b->it[k].j);
+		__builtin_prefetch(b->it[k].o->b + b->it[k].o->off[BlkRelocIdx] + b->it[k].j * 4);
+		if (SF(b->f[k]) & sfText) __builtin_prefetch(b->it[k].o->b + b->it[k].o->off[BlkAuxIdx] + b->it[k].j * 4);
+	}
+}
+static inline void bRelocs(fbatch *b) {
+	u32 nt = 0, nat = 0;
+	for (size_t k = 0; k < b->n; k++) {
+		b->it[k].rs = oRelocs(b->it[k].o, b->it[k].j, &b->it[k].nr);
+		b->it[k].t0 = nt;
+		nt += b->it[k].nr;
+		for (u32 x = 0; x < b->it[k].nr * RelocSize && x < 64 * 64; x += 64) __builtin_prefetch(b->it[k].rs + x);
+		b->it[k].na = 0;
+		b->it[k].a0 = nat;
+		if (SF(b->f[k]) & sfText) {
+			b->it[k].as = oAuxs(b->it[k].o, b->it[k].j, &b->it[k].na);
+			nat += b->it[k].na;
+			for (u32 x = 0; x < b->it[k].na * AuxSize && x < 8 * 64; x += 64) __builtin_prefetch(b->it[k].as + x);
+		}
+	}
+	b->nt = nt;
+	b->nat = nat;
+	VRESERVE(b->tg, nt + 1);
+	VRESERVE(b->atg, nat + 1);
+}
+// the references, decoded; the flags of what they name
+static inline void bDecode(fbatch *b) {
+	for (size_t k = 0; k < b->n; k++) {
+		object *o = b->it[k].o;
+		u32 *t = b->tg.a + b->it[k].t0;
+		for (u32 r = 0; r < b->it[k].nr; r++) {
+			u32 g = RREF(o, RELOC(b->it[k].rs, r));
+			t[r] = g;
+			__builtin_prefetch(&FL(g));
+		}
+		t = b->atg.a + b->it[k].a0;
+		for (u32 a = 0; a < b->it[k].na; a++) {
+			u32 g = AREF(o, AUX(b->it[k].as, a));
+			t[a] = g;
+			__builtin_prefetch(&FL(g));
+		}
+	}
+}
+// the canonical ids of the duplicates among them, then those ids' flags
+static inline void bDups(fbatch *b, int w) {
+	u32 *tg = b->tg.a, *atg = b->atg.a, nt = b->nt, nat = b->nat;
+	u64 t0 = __rdtsc();
+	for (u32 x = 0; x < nt; x++)
+		if (SF(tg[x]) & sfRedir) __builtin_prefetch(&canon[tg[x]]);
+	for (u32 x = 0; x < nat; x++)
+		if (SF(atg[x]) & sfRedir) __builtin_prefetch(&canon[atg[x]]);
+	u64 t1 = __rdtsc();
+	tscStage[w][3] += t1 - t0;
+	for (u32 x = 0; x < nt; x++)
+		if (SF(tg[x]) & sfRedir) {
+			tg[x] = canon[tg[x]];
+			__builtin_prefetch(&FL(tg[x]));
+		}
+	for (u32 x = 0; x < nat; x++)
+		if (SF(atg[x]) & sfRedir) {
+			atg[x] = canon[atg[x]];
+			__builtin_prefetch(&FL(atg[x]));
+		}
+	tscStage[w][4] += __rdtsc() - t1;
+}
+// a function's FuncInfo: where it is, then its bytes
+static inline void bFuncInfo(fbatch *b) {
+	struct {
+		object *o;
+		u32 j;
+	} fi[floodBatch];
+	for (size_t k = 0; k < b->n; k++) {
+		fi[k].o = NULL;
+		for (u32 a = 0; a < b->it[k].na; a++)
+			if (aType(AUX(b->it[k].as, a)) == AuxFuncInfo) {
+				u32 c = b->atg.a[b->it[k].a0 + a];
+				if (c != 0 && c <= nslots) {
+					object *o2 = objOf(c, &fi[k].j);
+					if (fi[k].j < o2->nalldef) {
+						fi[k].o = o2;
+						__builtin_prefetch(o2->b + o2->off[BlkDataIdx] + fi[k].j * 4);
+					}
+				}
+				break;
+			}
+	}
+	for (size_t k = 0; k < b->n; k++)
+		if (fi[k].o) {
+			bytes d = oData(fi[k].o, fi[k].j);
+			__builtin_prefetch(d.p);
+			__builtin_prefetch(d.p + 64);
+		}
+}
+
 static void floodTask(void *ctx UNUSED, int w, long i) {
-	size_t hi = MIN((size_t)(i + 1) * floodGrain, frontier.n);
-	for (size_t k = (size_t)i * floodGrain; k < hi; k++) process(&fws[w], frontier.a[k]);
+	size_t lo = (size_t)i * floodGrain, hi = MIN(lo + floodGrain, frontier.n);
+	floodWorker *fw = &fws[w];
+	fbatch *cur = &fw->batch[0], *next = &fw->batch[1];
+	u64 t0 = __rdtsc(), t1;
+#define STAGE(k) (t1 = __rdtsc(), tscStage[w][k] += t1 - t0, t0 = t1)
+	cur->f = frontier.a + lo;
+	cur->n = MIN((size_t)floodBatch, hi - lo);
+	bIndex(cur);
+	STAGE(0);
+	bRelocs(cur);
+	STAGE(1);
+	for (size_t at = lo; at < hi;) {
+		size_t nx = at + cur->n;
+		next->f = frontier.a + nx;
+		next->n = nx < hi ? MIN((size_t)floodBatch, hi - nx) : 0;
+		bIndex(next);
+		STAGE(0);
+		bDecode(cur);
+		STAGE(2);
+		bRelocs(next);
+		STAGE(1);
+		bDups(cur, w);
+		t0 = __rdtsc();
+		bFuncInfo(cur);
+		STAGE(5);
+		for (size_t k = 0; k < cur->n; k++) process(fw, cur->f[k], cur->tg.a + cur->it[k].t0, cur->atg.a + cur->it[k].a0);
+		STAGE(6);
+		tscStage[w][7] += cur->n;
+		at = nx;
+		fbatch *t = cur;
+		cur = next;
+		next = t;
+	}
+#undef STAGE
 }
 
 static void methodTask(void *ctx UNUSED, int w, long i) {
@@ -502,7 +657,7 @@ static void methodTask(void *ctx UNUSED, int w, long i) {
 			relocp rs = oRelocs(o, j, &nr);
 			for (u32 d = 0; d < 3; d++) {
 				u32 g = RREF(o, RELOC(rs, m->r + d));
-				if (g != 0) fmark(&fws[w], canon[g]);
+				if (g != 0) fmark(&fws[w], canonOf(g));
 			}
 			keepM[k] = false;
 		} else {
@@ -511,15 +666,27 @@ static void methodTask(void *ctx UNUSED, int w, long i) {
 	}
 }
 
+static void publishTask(void *ctx UNUSED, int w UNUSED, long ui) {
+	unit *u = &units[ui];
+	u32 lo = u->o->base + u->lo, hi = u->o->base + u->hi;
+	for (u32 g = lo; g < hi; g++) {
+		u8 f = FL(g) & (u8)~stUndef; // (stUndef stays in fl; bit 7 of state is not used for it any more)
+		if (f) state[g] |= f;
+	}
+}
+
 static int strPtrCmp(const void *a, const void *b) { return strcmpGo(*(const str *)a, *(const str *)b); }
 
 static void deadcode(void) {
+	double tStart = nowSeconds(), tFlood = 0, tBig = 0, tMeth = 0;
+	long nBig = 0;
 	fws = calloc((size_t)nthreads, sizeof(floodWorker));
+	for (int i = 0; i < nthreads; i++) fws[i].batch = calloc(2, sizeof(fbatch));
 	floodWorker *w0 = &fws[0];
 #define ROOT(c)                                    \
 	do {                                           \
 		u32 c_ = (c);                              \
-		if (c_ != 0) fmark(w0, canon[c_]);         \
+		if (c_ != 0) fmark(w0, canonOf(c_));         \
 	} while (0)
 	ROOT(lookupC(flagEntry, 0));
 	ROOT(lookupC(flagEntry, 1));
@@ -534,7 +701,7 @@ static void deadcode(void) {
 			unit *u = &units[ui];
 			for (u32 j = u->lo; j < MIN(u->hi, u->o->nalldef); j++) {
 				u32 g = u->o->base + j;
-				if (canon[g] == g) {
+				if (canonOf(g) == g) {
 					u8 k = symType(osym(u->o, j));
 					if (k != K_Sxxx && k < K_SDWARFCUINFO) ROOT(g);
 				}
@@ -555,7 +722,10 @@ static void deadcode(void) {
 			}
 			if (frontier.n == 0) break;
 			levels++;
+			double tf = nowSeconds();
 			par((long)((frontier.n + floodGrain - 1) / floodGrain), floodTask, NULL);
+			tFlood += nowSeconds() - tf;
+			if (frontier.n >= 4096) tBig += nowSeconds() - tf, nBig += frontier.n;
 		}
 		for (int i = 0; i < nthreads; i++) {
 			floodWorker *w = &fws[i];
@@ -568,7 +738,9 @@ static void deadcode(void) {
 		// methods of live types that something can now call: an interface with that method is live, or
 		// reflection may call any exported method
 		keepM = realloc(keepM, MAX(markable.n, 1));
+		double tm = nowSeconds();
 		par((long)((markable.n + methodGrain - 1) / methodGrain), methodTask, NULL);
+		tMeth += nowSeconds() - tm;
 		size_t r = 0;
 		for (size_t k = 0; k < markable.n; k++)
 			if (keepM[k]) markable.a[r++] = markable.a[k];
@@ -577,11 +749,16 @@ static void deadcode(void) {
 		for (int i = 0; i < nthreads; i++) more = more || fws[i].next.n != 0;
 		if (!more) break;
 	}
+	// the flood is over: state learns what it found
+	double tp = nowSeconds();
+	par(nunits, publishTask, NULL);
+	tp = nowSeconds() - tp;
+	if (getenv("HLINK_TSC")) fprintf(stderr, "deadcode wall ms: floods %.1f (levels of 4096+ symbols: %.1f for %ld symbols), methods %.1f, publish %.1f, since start %.1f\n", tFlood * 1e3, tBig * 1e3, nBig, tMeth * 1e3, tp * 1e3, (nowSeconds() - tStart) * 1e3);
 	long nlive = 0;
 	VEC(str) dump = {0};
 	if (flagStats || *flagDumpLive) {
 		for (u32 g = 1; g <= nslots; g++) {
-			if ((state[g] & stLive) && canon[g] == g) {
+			if ((state[g] & stLive) && canonOf(g) == g) {
 				nlive++;
 				if (*flagDumpLive) VPUSH(dump, symName(g));
 			}
@@ -599,6 +776,13 @@ static void deadcode(void) {
 			fclose(f);
 		}
 		free(dump.a);
+	}
+	if (getenv("HLINK_TSC")) {
+		u64 t[8] = {0};
+		for (int i = 0; i < nthreads; i++)
+			for (int k = 0; k < 8; k++) t[k] += tscStage[i][k];
+		fprintf(stderr, "flood, core-ms: index %.1f, relocs+aux %.1f, decode %.1f, dup ids %.1f, dup flags %.1f, funcinfo %.1f, process %.1f; %llu symbols flooded\n",
+		        t[0] / 3.095e6, t[1] / 3.095e6, t[2] / 3.095e6, t[3] / 3.095e6, t[4] / 3.095e6, t[5] / 3.095e6, t[6] / 3.095e6, (unsigned long long)t[7]);
 	}
 	lap("deadcode", "%ld symbols live, %d levels in %d rounds, %zu methods pruned, reflection %s", nlive, levels, rounds,
 	    markable.n, reflectSeen ? "true" : "false");
