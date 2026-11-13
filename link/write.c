@@ -162,6 +162,10 @@ static void gcSym(u8 *bm, const object *o, u32 j, u32 off) {
 static void dumpSym(u32 a, u32 size, const char *bucket, str name) {
 	fprintf(mapFile_, "S %x %u %s %.*s\n", a, size, bucket, (int)name.n, name.p);
 }
+static void dumpReloc(u32 site, u32 siz, u32 typ, u32 ta, i64 add, u32 tg) {
+	str tn = tg ? symName(canon[tg]) : (str){"", 0};
+	fprintf(mapFile_, "R %x %u %u %x %lld %.*s\n", site, siz, typ, ta, (long long)add, (int)tn.n, tn.p);
+}
 
 static void writeUnitTask(void *ctx UNUSED, int w UNUSED, long ui) {
 	unit *u = &units[ui];
@@ -191,7 +195,6 @@ static void writeUnitTask(void *ctx UNUSED, int w UNUSED, long ui) {
 			if (a != 0) {
 				bytes d = oData(o, j);
 				memcpy(pctab + a, d.p, d.n);
-				if (mapFile_) dumpSym(lay.pctab + a, d.n, "pctab", symNameOf(o, s));
 			}
 		}
 		int b = (int)(st >> stBucketShift & 31);
@@ -239,6 +242,7 @@ static void writeUnitTask(void *ctx UNUSED, int w UNUSED, long ui) {
 			}
 			u32 tg = RREF(o, rl);
 			u32 ta = addr[tg];
+			if (mapFile_) dumpReloc(a + off, rsiz, t, ta, rAdd(rl), tg); // (ta: 0 if the target is not in the output)
 			i64 v;
 			switch (t) {
 			case R_ADDR:
@@ -260,10 +264,6 @@ static void writeUnitTask(void *ctx UNUSED, int w UNUSED, long ui) {
 				if (ta == 0) {
 					if (t == R_METHODOFF) {
 						st32(P + off, 0xFFFFFFFFu); // the runtime knows -1 is no method
-						if (mapFile_) {
-							str tn = symName(canon[tg]);
-							fprintf(mapFile_, "R %x %u %u %x %lld %.*s\n", a + off, rsiz, t, 0u, (long long)rAdd(rl), (int)tn.n, tn.p);
-						}
 						continue;
 					}
 					if (!weak) undefinedRef(o, s, tg);
@@ -318,10 +318,6 @@ static void writeUnitTask(void *ctx UNUSED, int w UNUSED, long ui) {
 				str n = symNameOf(o, s);
 				errorf("%.*s: bad relocation size %u", (int)n.n, n.p, rsiz);
 			}
-			}
-			if (mapFile_) {
-				str tn = symName(canon[tg]);
-				fprintf(mapFile_, "R %x %u %u %x %lld %.*s\n", a + off, rsiz, t, ta, (long long)rAdd(rl), (int)tn.n, tn.p);
 			}
 		}
 		if (!text) continue;
@@ -384,10 +380,6 @@ static void writeUnitTask(void *ctx UNUSED, int w UNUSED, long ui) {
 					st32(e + 8, ld32(node + 20)); // ParentPC
 				}
 				st32(fdd + 4 * ABI_FUNCDATA_InlTree, inl - lay.gofunc);
-				if (mapFile_) {
-					str n = symNameOf(o, s);
-					fprintf(mapFile_, "S %x %u inltree %.*s.inltree\n", inl, 16 * ninl, (int)n.n, n.p);
-				}
 				inl += 16 * ninl;
 			}
 		}

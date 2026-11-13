@@ -119,14 +119,16 @@ static void makeSpecials(void) {
 	}
 }
 
-// defineSyms gives the symbols that name places in the image their addresses.
-static void defineSyms(void) {
+// boundaries: the symbols that name places in the image, and their addresses
+typedef struct {
+	const char *name;
+	u32 a;
+} boundary;
+#define nBoundaries 40
+static void boundaries(boundary def[nBoundaries]) {
 	u32 fb[8];
 	fipsBounds(fb);
-	struct {
-		const char *name;
-		u32 a;
-	} def[] = {
+	boundary d[nBoundaries] = {
 		{"runtime.text", lay.text}, {"runtime.etext", lay.etext}, {"runtime.rodata", lay.rodata}, {"runtime.erodata", lay.erodata},
 		{"runtime.types", lay.types}, {"runtime.etypes", lay.etypes}, {"runtime.noptrdata", lay.noptrdata},
 		{"runtime.enoptrdata", lay.enoptrdata}, {"runtime.data", lay.data}, {"runtime.edata", lay.edata}, {"runtime.bss", lay.bss},
@@ -140,7 +142,14 @@ static void defineSyms(void) {
 		{"go:textfipsstart", fb[0]}, {"go:textfipsend", fb[1]}, {"go:rodatafipsstart", fb[2]}, {"go:rodatafipsend", fb[3]},
 		{"go:noptrdatafipsstart", fb[4]}, {"go:noptrdatafipsend", fb[5]}, {"go:datafipsstart", fb[6]}, {"go:datafipsend", fb[7]},
 	};
-	for (size_t i = 0; i < sizeof def / sizeof def[0]; i++) {
+	memcpy(def, d, sizeof d);
+}
+
+// defineSyms gives the symbols that name places in the image their addresses.
+static void defineSyms(void) {
+	boundary def[nBoundaries];
+	boundaries(def);
+	for (size_t i = 0; i < nBoundaries; i++) {
 		u32 g = lookupC(def[i].name, 0);
 		if (g != 0 && !isDef(g)) addr[g] = def[i].a;
 	}
@@ -650,35 +659,22 @@ static void writeELF(void) {
 	close(outFd);
 }
 
-// -dumpmap: the symbols the linker made or placed itself (the objects' symbols and the relocations were written
-// by the write pass, in unit order)
+// -dumpmap: the symbols whose content the linker writes ("special") and the symbols that name places in the
+// image ("boundary"; size 0, whether or not an object refers to them); the objects' symbols and their
+// relocations were written by the write pass. The format is secdiff's (link/secdiff/fclinkmap.patch, dumpmap.go).
 static void dumpMap(void) {
 	FILE *f = mapFile_;
 	if (!f) return;
 	vecspecial *lists[2] = {&roSpecials, &dataSpecials};
-	const char *lname[2] = {"rodata", "noptrdata"};
 	for (int l = 0; l < 2; l++)
 		for (size_t i = 0; i < lists[l]->n; i++) {
 			special *sp = &lists[l]->a[i];
 			str n = symName(sp->gid);
-			fprintf(f, "S %x %u %s %.*s\n", addr[sp->gid], sp->size, lname[l], (int)n.n, n.p);
+			fprintf(f, "S %x %u special %.*s\n", addr[sp->gid], sp->size, (int)n.n, n.p);
 		}
-	struct {
-		const char *name;
-		u32 a, size;
-		const char *bucket;
-	} tabs[] = {
-		{"runtime.gcdata", lay.gcdata, lay.gcdataMax, "rodata"},
-		{"runtime.gcbss", lay.gcbss, lay.gcbssMax, "rodata"},
-		{"runtime.pcheader", lay.pcheader, 8 + 8 * 8, "pclntab"},
-		{"runtime.funcnametab", lay.funcnametab, lay.nameSize, "pclntab"},
-		{"runtime.cutab", lay.cutab, 4 * lay.cutabLen, "pclntab"},
-		{"runtime.filetab", lay.filetab, lay.fileSize, "pclntab"},
-		{"runtime.pctab", lay.pctab, lay.pctabSize, "pclntab"},
-		{"runtime.functab", lay.functab, lay.functabSize, "pclntab"},
-		{"runtime.findfunctab", lay.findfunctab, lay.findfuncSize, "pclntab"},
-	};
-	for (size_t i = 0; i < sizeof tabs / sizeof tabs[0]; i++) fprintf(f, "S %x %u %s %s\n", tabs[i].a, tabs[i].size, tabs[i].bucket, tabs[i].name);
+	boundary def[nBoundaries];
+	boundaries(def);
+	for (size_t i = 0; i < nBoundaries; i++) fprintf(f, "S %x 0 boundary %s\n", def[i].a, def[i].name);
 	fclose(f);
 	mapFile_ = NULL;
 }
