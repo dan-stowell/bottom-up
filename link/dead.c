@@ -491,7 +491,10 @@ static void ssAdd(sigset *s, methodsig m, bool byName) {
 	s->n++;
 }
 
-#define floodGrain 1024
+// How many symbols of a level one task floods: enough for the batches inside it to run as a pipeline, few
+// enough that a level of a few thousand symbols (there are about a hundred levels, most of them that small)
+// still spreads over all the threads. Set per level in deadcode.
+static size_t floodGrain = 1024;
 #define methodGrain 1024
 static vecu32 frontier;
 static VEC(methodref) markable;
@@ -764,6 +767,8 @@ static void deadcode(void) {
 			if (frontier.n == 0) break;
 			levels++;
 			double tf = nowSeconds();
+			floodGrain = frontier.n / ((size_t)nthreads * 4);
+			floodGrain = floodGrain < 64 ? 64 : floodGrain > 1024 ? 1024 : (floodGrain + 63) & ~(size_t)63;
 			par((long)((frontier.n + floodGrain - 1) / floodGrain), floodTask, NULL);
 			tFlood += nowSeconds() - tf;
 			if (frontier.n >= 4096) tBig += nowSeconds() - tf, nBig += frontier.n;
