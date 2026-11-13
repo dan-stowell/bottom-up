@@ -250,6 +250,54 @@ static void loadPkgBase(void *ctx UNUSED, int w UNUSED, long i) {
 	}
 }
 
+// loadOrder returns the libraries in the order the stock linker loads them, which decides which copy of a
+// duplicated symbol is kept when the copies tie (cmd/link/internal/loader addSym: the first loaded; hlink:
+// the lowest id, so objects are numbered in this order). cmd/link/internal/ld: Main adds the main package
+// (addlibpath); loadlib loads ctxt.Library in order while it grows; loading an object (ldobj, loader.Preload)
+// appends its Autolib block (the packages it imports) to its library's list and addImports adds each of
+// them that is new (addlib), member by member of an archive; when the list is exhausted loadinternal adds
+// runtime if it is not loaded yet, and loading resumes. Libraries of the importcfg nothing imports, which the
+// stock linker never loads, come last, in importcfg order. Serial, but only over the Autolib entries
+// (tens of thousands of lookups); the files were mapped in parallel before.
+#define ImportedPkgSize 16 // goobj.ImportedPkg: a string reference (8 bytes) and a fingerprint (8)
+static long *loadOrder(long mainLib) {
+	long *order = malloc(MAX(nlibs, 1) * sizeof *order);
+	bool *seen = calloc((size_t)MAX(nlibs, 1), 1);
+	strmap byPkg;
+	smInit(&byPkg, (size_t)nlibs);
+	for (long i = 0; i < nlibs; i++) smPut(&byPkg, libs[i].pkg, i, NULL);
+	long n = 0;
+	order[n++] = mainLib;
+	seen[mainLib] = true;
+	for (long q = 0; q < n; q++) {
+		lib *l = &libs[order[q]];
+		for (size_t k = 0; k < l->objs.n; k++) {
+			object *o = l->objs.a[k];
+			u32 na = (o->off[BlkAutolib + 1] - o->off[BlkAutolib]) / ImportedPkgSize;
+			for (u32 a = 0; a < na; a++) {
+				long *x = smFind(&byPkg, oStringRef(o, o->off[BlkAutolib] + a * ImportedPkgSize));
+				if (x && !seen[*x]) {
+					seen[*x] = true;
+					order[n++] = *x;
+				}
+			}
+		}
+		if (q + 1 == n) { // loadinternal(ctxt, "runtime")
+			long *x = smFind(&byPkg, cstr("runtime"));
+			if (x && !seen[*x]) {
+				seen[*x] = true;
+				order[n++] = *x;
+			}
+		}
+	}
+	for (long i = 0; i < nlibs; i++)
+		if (!seen[i]) order[n++] = i;
+	free(seen);
+	free(byPkg.keys);
+	free(byPkg.vals);
+	return order;
+}
+
 static bool hasSuffixC(const char *s, const char *suf) {
 	size_t a = strlen(s), b = strlen(suf);
 	return a >= b && strcmp(s + a - b, suf) == 0;
@@ -272,6 +320,7 @@ static void load(const char *cfgFile, const char *mainFile) {
 	VEC(lib) ls = {0};
 	char *mainAbs = absClean(mainFile);
 	bool haveMain = false;
+	long mainLib = 0;
 	int lineno = 0;
 	for (char *line = cfg, *next; line; line = next) {
 		next = strchr(line, '\n');
@@ -292,9 +341,11 @@ static void load(const char *cfgFile, const char *mainFile) {
 			*eq = 0;
 			lib l = {cstr(args), eq + 1, {0}};
 			char *abs = absClean(eq + 1);
-			if (strcmp(abs, mainAbs) == 0) {
+			if (strcmp(abs, mainAbs) == 0 && !haveMain) {
 				l.pkg = cstr("main");
+				l.file = mainFile; // (the stock linker names it as the command line does)
 				haveMain = true;
+				mainLib = (long)ls.n;
 			}
 			free(abs);
 			VPUSH(ls, l);
@@ -311,12 +362,14 @@ static void load(const char *cfgFile, const char *mainFile) {
 	}
 	if (!haveMain) {
 		lib l = {cstr("main"), mainFile, {0}};
+		mainLib = (long)ls.n;
 		VPUSH(ls, l);
 	}
 	libs = ls.a;
 	nlibs = (long)ls.n;
 	par(nlibs, loadLib, NULL);
 	if (nerrs != 0) return;
+	long *order = loadOrder(mainLib);
 
 	u32 next = 1;
 	u64 nsym[5] = {0};
@@ -329,7 +382,13 @@ static void load(const char *cfgFile, const char *mainFile) {
 	objs = malloc(MAX(nobj, 1) * sizeof *objs);
 	units = calloc(MAX(nun, 1), sizeof *units);
 	smInit(&primary, nobj);
-	for (long i = 0; i < nlibs; i++) {
+	for (long oi = 0; oi < nlibs; oi++) {
+		long i = order[oi];
+		if (flagV > 1) { // (as cmd/link -v=2 does in loadobjfile, for link/test.sh)
+			char *pp = pathToPrefix(libs[i].pkg);
+			printf("ldobj: %s (%s)\n", libs[i].file, pp);
+			free(pp);
+		}
 		for (size_t k = 0; k < libs[i].objs.n; k++) {
 			object *o = libs[i].objs.a[k];
 			o->idx = nobjs;
@@ -354,6 +413,7 @@ static void load(const char *cfgFile, const char *mainFile) {
 			}
 		}
 	}
+	free(order);
 	nslots = next - 1;
 	size_t npage = (nslots >> pageShift) + 2;
 	objPage = bigalloc(npage * sizeof(u32));

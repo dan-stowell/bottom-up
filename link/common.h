@@ -102,7 +102,7 @@ typedef VEC(u8) vecu8;
 static const char *flagOut = "a.out", *flagImportcfg = "", *flagBuildid = "", *flagDumpLive = "", *flagDumpMap = "";
 static const char *flagEntry = "_rt0_amd64_linux";
 static bool flagStats, flagNoDCE;
-static int flagJ;
+static int flagJ, flagV; // (-v 2: print the load order as the stock linker does)
 
 static int nthreads;
 

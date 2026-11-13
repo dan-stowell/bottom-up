@@ -205,6 +205,7 @@ static const flagdef flagdefs[] = {
 	{"buildid", 0, &flagBuildid},
 	{"stats", 1, &flagStats},
 	{"j", 2, &flagJ},
+	{"v", 2, &flagV},
 	{"nodce", 1, &flagNoDCE},
 	{"dumplive", 0, &flagDumpLive},
 	{"dumpmap", 0, &flagDumpMap},
