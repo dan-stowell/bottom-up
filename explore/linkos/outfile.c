@@ -29,7 +29,9 @@ int main(int argc, char **argv) {
                          "new file, fallocate + mmap", "existing file (cached), mmap, no truncate", "existing file (cached), pwrite, no truncate",
                          "existing file, mmap + MAP_POPULATE", "anon memory (no file at all)", "anon + populate_write per thread",
                          "unlink old + new file, mmap shared"};
+  unsigned vmask = argc > 4 ? strtoul(argv[4], 0, 0) : ~0u;   // which variants (bit v)
   for (int v = 0; v < 10; v++) {
+    if (!(vmask >> v & 1)) continue;
     double best = 1e300, bestc = 1e300, bestu = 1e300;
     for (int r = 0; r < 5; r++) {
       int existing = v == 4 || v == 5 || v == 6;

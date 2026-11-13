@@ -34,3 +34,6 @@
   object, 13.2 M slots; fclink 532 ms). `explore/linkos/outfile.c`: 110 MB into a new ext4 file through a
   shared mapping costs 31-39 ms on 8 threads, into an existing cached file 13 ms, into fresh anonymous memory
   10.7 ms: it is the 4 KiB page fault (about 3 us each here) that costs, not the file system alone.
+- 2026-11-13T17:31:49Z Spike: a Go binary execs from hugetlbfs if its segments are 2 MiB-aligned with filesz = memsz, and filling
+  110 MB of a new hugetlbfs file takes 3.7 ms on 8 threads (ext4: 31-39 ms + 6 ms unmap). That removes the
+  largest OS row from the link. IDEAS.md started (7 entries with kill tests).
